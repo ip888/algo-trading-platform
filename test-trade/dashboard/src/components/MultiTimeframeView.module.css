@@ -1,0 +1,93 @@
+.alignment-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: var(--panel-bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.status-badge {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.status-badge.aligned {
+  background: var(--accent-green);
+  color: white;
+}
+
+.status-badge.not-aligned {
+  background: var(--accent-orange);
+  color: white;
+}
+
+.alignment-count {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.timeframes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.timeframe-row {
+  display: grid;
+  grid-template-columns: 60px 100px 80px 1fr;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem;
+  background: var(--panel-bg-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.tf-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.tf-trend, .tf-signal {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.tf-strength {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.strength-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--panel-bg);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.strength-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.strength-value {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  min-width: 35px;
+}
+
+.timeframe-note {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: var(--panel-bg-secondary);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  text-align: center;
+}

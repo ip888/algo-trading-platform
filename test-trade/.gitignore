@@ -1,0 +1,34 @@
+# Build artifacts
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# API Keys and secrets
+.env
+config.properties
+*.properties
+!*.properties.template
+
+# Logs
+*.log
+trading-bot.log*
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Maven
+.mvn/
+mvnw
+mvnw.cmd
+
+# Compiled old files
+*.class
+*.backup.*
+config.properties.bak

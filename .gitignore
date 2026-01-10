@@ -1,0 +1,31 @@
+# User-specific
+.vscode/
+.idea/
+*.DS_Store
+
+# Build & Logs
+target/
+*.log
+*.class
+*.jar
+dependency-reduced-pom.xml
+core.log
+trading-bot.log
+hs_err_pid*.log
+
+# Secrets & Configs
+config.properties
+.env
+secret.key
+
+# Internal Structure (Cleanup)
+.internal/
+_legacy_archive/
+backup/
+*.backup.*
+*.bak
+
+# Dashboard
+node_modules/
+dist/
+.wrangler/

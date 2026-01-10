@@ -1,0 +1,11 @@
+name = "watchdog-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-04-05"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "alpaca-bot-db"
+database_id = "d33ad83a-0c2a-475a-b48f-8d3e9776786d"

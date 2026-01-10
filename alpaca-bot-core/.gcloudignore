@@ -1,0 +1,13 @@
+.git/
+.gitignore
+.gcloudignore
+target/
+*.log
+*.sh
+.gemini/
+alpaca-bot-core/target/
+alpaca-bot-core/*.log
+alpaca-bot-cortex-wasm/
+watchdog-worker/
+node_modules/
+.DS_Store

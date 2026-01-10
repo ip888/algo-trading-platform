@@ -1,0 +1,133 @@
+# ==================== LIVE TRADING CONFIGURATION ====================
+# CRITICAL: Review all settings before live trading!
+# Last Updated: 2025-12-13
+
+# ==================== Trading Mode ====================
+TRADING_MODE=LIVE
+INITIAL_CAPITAL=10000.00
+
+# ==================== Market Hours ====================
+MARKET_HOURS_BYPASS=false
+EXTENDED_HOURS_ENABLED=false
+
+# ==================== Multi-Profile Settings ====================
+MULTI_PROFILE_ENABLED=true
+MAIN_PROFILE_CAPITAL_PERCENT=0.70
+EXPERIMENTAL_PROFILE_CAPITAL_PERCENT=0.30
+
+# Main Profile (Conservative)
+MAIN_PROFILE_BULLISH_SYMBOLS=SPY,QQQ,IWM
+MAIN_PROFILE_BEARISH_SYMBOLS=SH,PSQ,RWM
+MAIN_PROFILE_VIX_THRESHOLD=20.0
+MAIN_PROFILE_VIX_HYSTERESIS=2.0
+MAIN_PROFILE_STRATEGY_TYPE=BULLISH
+MAIN_PROFILE_STOP_LOSS_PERCENT=2.0
+MAIN_PROFILE_TAKE_PROFIT_PERCENT=4.0
+
+# Experimental Profile (Moderate)
+EXPERIMENTAL_PROFILE_BULLISH_SYMBOLS=DIA,XLF,XLE
+EXPERIMENTAL_PROFILE_BEARISH_SYMBOLS=DOG,SEF,ERY
+EXPERIMENTAL_PROFILE_VIX_THRESHOLD=22.0
+EXPERIMENTAL_PROFILE_VIX_HYSTERESIS=3.0
+EXPERIMENTAL_PROFILE_STRATEGY_TYPE=BULLISH
+EXPERIMENTAL_PROFILE_STOP_LOSS_PERCENT=3.0
+EXPERIMENTAL_PROFILE_TAKE_PROFIT_PERCENT=6.0
+
+# ==================== Advanced Risk Management ====================
+# CONSERVATIVE settings for live trading
+
+# Max Loss Exits (per position)
+MAX_LOSS_PERCENT=3.0
+MAX_LOSS_ENABLED=true
+
+# Time-Based Exits (exit losing positions after X hours)
+MAX_HOLD_TIME_HOURS=48
+TIME_BASED_EXITS_ENABLED=true
+
+# Portfolio-Level Stop Loss (halt all trading if portfolio drops X%)
+PORTFOLIO_STOP_LOSS_PERCENT=10.0
+
+# ==================== Advanced Regime Detection ====================
+REGIME_DETECTION_ENABLED=true
+
+# Moving Average Periods
+REGIME_MA_SHORT=50
+REGIME_MA_LONG=200
+
+# Volume Analysis Period
+REGIME_VOLUME_PERIOD=20
+
+# Breadth Threshold (0.0 to 1.0)
+REGIME_BREADTH_THRESHOLD=0.6
+
+# Regime Update Interval (minutes) - Cache regime detection results
+REGIME_UPDATE_INTERVAL_MINUTES=15
+
+# ==================== Multi-Timeframe Analysis ====================
+# Analyze multiple timeframes for better entry/exit timing
+MULTI_TIMEFRAME_ENABLED=true
+
+# Timeframes to analyze (comma-separated)
+# Options: 5M, 15M, 1H, 1D
+MULTI_TIMEFRAME_TIMEFRAMES=15M,1H,1D
+
+# Require timeframe alignment before trading
+MULTI_TIMEFRAME_REQUIRE_ALIGNMENT=true
+
+# Minimum number of timeframes that must align
+MULTI_TIMEFRAME_MIN_ALIGNED=2
+
+# Primary timeframe for regime detection
+MULTI_TIMEFRAME_PRIMARY=1D
+
+# Entry timeframe for precise timing
+MULTI_TIMEFRAME_ENTRY=15M
+
+# ==================== Advanced Position Sizing ====================
+# Dynamic position sizing based on Kelly Criterion, volatility, and win rate
+
+# Position sizing method: KELLY, VOLATILITY, or FIXED
+POSITION_SIZING_METHOD=KELLY
+
+# Kelly Criterion settings (CONSERVATIVE for live)
+POSITION_SIZING_KELLY_FRACTION=0.20
+POSITION_SIZING_KELLY_RISK_REWARD=2.0
+POSITION_SIZING_DEFAULT_WIN_RATE=0.50
+
+# Volatility-based sizing
+POSITION_SIZING_VOLATILITY_RISK_PERCENT=0.02
+POSITION_SIZING_VOLATILITY_ADJUST_ENABLED=true
+POSITION_SIZING_VOLATILITY_MULTIPLIER=20.0
+
+# Fixed percentage sizing (fallback)
+POSITION_SIZING_FIXED_PERCENT=0.10
+
+# Position size limits (CONSERVATIVE)
+POSITION_SIZING_MAX_PERCENT=0.15
+POSITION_SIZING_MIN_PERCENT=0.02
+
+# Correlation-based limits
+POSITION_SIZING_CORRELATION_LIMIT_ENABLED=true
+POSITION_SIZING_MAX_CORRELATED_POSITIONS=4
+
+# ==================== PDT Protection ====================
+PDT_PROTECTION_ENABLED=true
+
+# ==================== Test Mode ====================
+TEST_MODE_ENABLED=false
+
+# ==================== AI Components ====================
+# Alpha Vantage (News & Sentiment)
+ALPHA_VANTAGE_ENABLED=false
+ALPHA_VANTAGE_API_KEY=your_key_here
+
+# FinGPT (Sentiment Analysis)
+FINGPT_ENABLED=false
+HUGGINGFACE_API_TOKEN=your_token_here
+
+# ==================== NOTES ====================
+# 1. Start with CONSERVATIVE settings above
+# 2. Monitor for 1 week before adjusting
+# 3. Only change ONE parameter at a time
+# 4. Keep detailed notes of changes and results
+# 5. Review live_trading_guide.md for tuning advice

@@ -1,0 +1,237 @@
+.profile-comparison {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin-bottom: 20px;
+}
+
+.profile-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.profile-header h3 {
+  margin: 0;
+  font-size: 20px;
+  color: #1f2937;
+}
+
+.profile-tabs {
+  display: flex;
+  gap: 8px;
+  background: #f3f4f6;
+  padding: 4px;
+  border-radius: 8px;
+}
+
+.profile-tabs button {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #6b7280;
+  transition: all 0.2s;
+}
+
+.profile-tabs button:hover {
+  background: white;
+  color: #1f2937;
+}
+
+.profile-tabs button.active {
+  background: white;
+  color: #1f2937;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.profile-tabs button.active.main {
+  color: #3b82f6;
+}
+
+.profile-tabs button.active.experimental {
+  color: #f59e0b;
+}
+
+.profiles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.profile-card {
+  border-radius: 12px;
+  padding: 20px;
+  border: 2px solid;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(249, 250, 251, 0.9) 100%);
+}
+
+.profile-card.main {
+  border-color: #3b82f6;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(147, 197, 253, 0.05) 100%);
+}
+
+.profile-card.experimental {
+  border-color: #f59e0b;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(251, 191, 36, 0.05) 100%);
+}
+
+.profile-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.profile-card-header h4 {
+  margin: 0;
+  font-size: 18px;
+  color: #1f2937;
+}
+
+.profile-badge {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.profile-badge.main {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.profile-badge.experimental {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.profile-strategy {
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.profile-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.stat-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.positive {
+  color: #10b981;
+}
+
+.stat-value.negative {
+  color: #ef4444;
+}
+
+/* Dark mode */
+.dark .profile-comparison {
+  background: #1f2937;
+}
+
+.dark .profile-header h3 {
+  color: #f3f4f6;
+}
+
+.dark .profile-tabs {
+  background: #374151;
+}
+
+.dark .profile-tabs button {
+  color: #9ca3af;
+}
+
+.dark .profile-tabs button:hover,
+.dark .profile-tabs button.active {
+  background: #4b5563;
+  color: #f3f4f6;
+}
+
+.dark .profile-card {
+  background: linear-gradient(135deg, rgba(31, 41, 55, 0.9) 0%, rgba(55, 65, 81, 0.9) 100%);
+}
+
+.dark .profile-card-header h4,
+.dark .stat-value {
+  color: #f3f4f6;
+}
+
+.dark .profile-strategy,
+.dark .stat-label {
+  color: #9ca3af;
+  border-bottom-color: #374151;
+}
+
+/* Responsive Design */
+@media (max-width: 480px) {
+  .profile-comparison {
+    padding: 16px;
+  }
+  
+  .profile-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .profile-tabs {
+    flex-direction: column;
+    width: 100%;
+    gap: 4px;
+  }
+  
+  .profile-tabs button {
+    width: 100%;
+    padding: 12px;
+    text-align: center;
+  }
+  
+  .profiles-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .profile-card {
+    padding: 16px;
+  }
+}
+
+@media (min-width: 481px) and (max-width: 768px) {
+  .profiles-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .profiles-grid {
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  }
+}

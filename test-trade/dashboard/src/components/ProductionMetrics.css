@@ -1,0 +1,128 @@
+.production-metrics {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.production-metrics h3 {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+  color: #1f2937;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.metric-card {
+  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+  padding: 16px;
+  border-radius: 8px;
+  border-left: 4px solid #3b82f6;
+}
+
+.metric-card.circuit-breaker {
+  border-left-color: #10b981;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.metric-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #1f2937;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-value.cb-closed {
+  color: #10b981;
+}
+
+.metric-value.cb-open {
+  color: #ef4444;
+}
+
+.metric-value.cb-half_open {
+  color: #f59e0b;
+}
+
+.metric-value.success {
+  color: #10b981;
+}
+
+.metric-value.latency {
+  color: #3b82f6;
+}
+
+.metric-bar {
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+
+.metric-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%);
+  transition: width 0.3s ease;
+}
+
+.metric-subtitle {
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.metrics-footer {
+  display: flex;
+  gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+  flex-wrap: wrap;
+}
+
+.footer-item {
+  font-size: 11px;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Dark mode */
+.dark .production-metrics {
+  background: #1f2937;
+}
+
+.dark .production-metrics h3 {
+  color: #f3f4f6;
+}
+
+.dark .metric-card {
+  background: linear-gradient(135deg, #374151 0%, #4b5563 100%);
+}
+
+.dark .metric-value {
+  color: #f3f4f6;
+}
+
+.dark .metric-label,
+.dark .metric-subtitle,
+.dark .footer-item {
+  color: #9ca3af;
+}
+
+.dark .metrics-footer {
+  border-top-color: #374151;
+}

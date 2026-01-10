@@ -1,0 +1,75 @@
+.diversification-score {
+  text-align: center;
+  padding: 1rem;
+  background: var(--panel-bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.score-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.score-value {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+
+.score-desc {
+  font-size: 0.9rem;
+  color: var(--text-tertiary);
+}
+
+.correlation-grid {
+  display: grid;
+  gap: 4px;
+  margin: 1rem 0;
+}
+
+.grid-header {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 0.5rem;
+  text-align: center;
+}
+
+.grid-cell {
+  padding: 0.5rem;
+  text-align: center;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+}
+
+.grid-cell.self {
+  background: var(--panel-bg-secondary);
+  color: var(--text-tertiary);
+}
+
+.correlation-legend {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.legend-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+}

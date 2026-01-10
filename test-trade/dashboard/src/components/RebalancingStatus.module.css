@@ -1,0 +1,143 @@
+.rebalance-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  background: var(--panel-bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.status-indicator {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.status-indicator.balanced {
+  background: var(--accent-green);
+  color: white;
+}
+
+.status-indicator.needs-rebalance {
+  background: var(--accent-orange);
+  color: white;
+}
+
+.max-drift {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.max-drift .high {
+  color: var(--accent-red);
+  font-weight: 600;
+}
+
+.max-drift .normal {
+  color: var(--accent-green);
+  font-weight: 600;
+}
+
+.drift-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.drift-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 60px;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem;
+  background: var(--panel-bg-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.drift-symbol {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.drift-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.allocation-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bar-label {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  min-width: 50px;
+}
+
+.bar-container {
+  flex: 1;
+  height: 20px;
+  background: var(--panel-bg);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.bar-fill.current {
+  background: var(--accent-blue);
+}
+
+.bar-fill.target {
+  background: var(--accent-green);
+  opacity: 0.6;
+}
+
+.bar-value {
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.drift-value {
+  text-align: right;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.drift-value.high {
+  color: var(--accent-red);
+}
+
+.drift-value.normal {
+  color: var(--accent-green);
+}
+
+.rebalance-info {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}

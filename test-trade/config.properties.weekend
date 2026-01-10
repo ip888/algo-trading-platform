@@ -1,0 +1,54 @@
+# Weekend Testing Configuration - PAPER TRADING ONLY
+
+# ⚠️ PAPER TRADING CREDENTIALS ⚠️
+# Get these from: https://app.alpaca.markets/paper/dashboard/overview
+APCA_API_KEY_ID=your_paper_key_here
+APCA_API_SECRET_KEY=your_paper_secret_here
+APCA_API_BASE_URL=https://paper-api.alpaca.markets
+
+# CRITICAL: Paper trading mode for weekend testing
+TRADING_MODE=PAPER
+
+# Account Settings
+INITIAL_CAPITAL=10000
+SYMBOLS=SPY,QQQ,IWM
+
+# Dynamic Symbol Selection
+BULLISH_SYMBOLS=SPY,QQQ,IWM
+BEARISH_SYMBOLS=SH,PSQ,RWM
+VIX_THRESHOLD=20.0
+VIX_HYSTERESIS=2.0
+
+# Safety Features
+PDT_PROTECTION_ENABLED=true
+MAX_DAY_TRADES_PER_5_DAYS=3
+
+# Capital Efficiency
+FRACTIONAL_TRADING_ENABLED=true
+USE_LIMIT_ORDERS=true
+LIMIT_ORDER_SPREAD_PERCENT=0.1
+
+# Optional Enhancements
+USE_NATIVE_TRAILING_STOPS=true
+EXTENDED_HOURS_ENABLED=false
+
+# Risk Management
+MAX_POSITION_SIZE_PERCENT=33.33
+STOP_LOSS_PERCENT=2.0
+TAKE_PROFIT_PERCENT=4.0
+TRAILING_STOP_PERCENT=1.5
+
+# Weekend Testing Settings
+BYPASS_MARKET_HOURS=true  # Allow testing outside market hours
+TEST_MODE=true  # Enable test signal generation
+TEST_MODE_FREQUENCY=60  # Generate test signal every 60 seconds
+
+# Multi-Profile Trading
+MULTI_PROFILE_ENABLED=false  # Disable for simpler weekend testing
+
+# Main Profile Settings (if multi-profile disabled, these are used)
+MAIN_BULLISH_SYMBOLS=SPY,QQQ,IWM
+MAIN_BEARISH_SYMBOLS=SH,PSQ,RWM
+MAIN_TAKE_PROFIT_PERCENT=4.0
+MAIN_STOP_LOSS_PERCENT=2.0
+MAIN_TRAILING_STOP_PERCENT=1.5

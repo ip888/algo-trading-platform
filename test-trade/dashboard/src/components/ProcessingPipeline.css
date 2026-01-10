@@ -1,0 +1,145 @@
+/* Compact Pipeline Styles */
+.pipeline-compact {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: white;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.pipeline-compact.idle {
+  background: linear-gradient(135deg, #6b7280 0%, #9ca3af 100%);
+  justify-content: center;
+}
+
+.pipeline-compact-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.pipeline-icon {
+  font-size: 18px;
+}
+
+.pipeline-symbol {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.5px;
+}
+
+.pipeline-stage {
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.pipeline-compact-steps {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.compact-step {
+  font-size: 14px;
+  opacity: 0.4;
+  transition: all 0.3s;
+}
+
+.compact-step.completed {
+  opacity: 1;
+  color: #10b981;
+}
+
+.compact-step.active {
+  opacity: 1;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.pipeline-compact-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 120px;
+}
+
+.compact-progress-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.compact-progress-fill {
+  height: 100%;
+  background: white;
+  transition: width 0.3s ease;
+}
+
+.compact-progress-text {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+  .pipeline-compact {
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  
+  .pipeline-compact-header {
+    width: 100%;
+    justify-content: center;
+  }
+  
+  .pipeline-compact-steps {
+    display: none; /* Hide individual steps on very small screens */
+  }
+  
+  .pipeline-compact-progress {
+    width: 100%;
+    min-width: unset;
+  }
+  
+  .pipeline-symbol {
+    font-size: 14px;
+  }
+  
+  .pipeline-stage {
+    font-size: 11px;
+  }
+}
+
+@media (min-width: 481px) and (max-width: 768px) {
+  .pipeline-compact {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .pipeline-compact-header,
+  .pipeline-compact-progress {
+    width: 100%;
+  }
+}
+
+/* Dark mode */
+.dark .pipeline-compact {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}

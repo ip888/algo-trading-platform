@@ -1,0 +1,180 @@
+/* COMPACT UI STYLES - Override existing styles */
+
+/* Reduce overall spacing */
+.dashboard-realtime {
+  gap: 0.75rem !important;
+  padding: 0.75rem !important;
+}
+
+.panel {
+  padding: 0.75rem !important;
+  margin-bottom: 0 !important;
+}
+
+.panel h2 {
+  font-size: 0.95rem !important;
+  margin-bottom: 0.6rem !important;
+}
+
+/* Compact Account Overview */
+.account-overview .overview-grid {
+  gap: 0.75rem !important;
+  margin-bottom: 0.6rem !important;
+}
+
+.account-overview .overview-label {
+  font-size: 0.7rem !important;
+  margin-bottom: 0.25rem !important;
+}
+
+.account-overview .overview-value {
+  font-size: 1.3rem !important;
+}
+
+.account-overview .overview-value.phase-active {
+  font-size: 1.15rem !important;
+}
+
+.phase-info {
+  padding-top: 0.6rem !important;
+  font-size: 0.7rem !important;
+}
+
+/* Compact Bot Status */
+.bot-status .status-grid {
+  gap: 0.6rem !important;
+  margin-bottom: 0.75rem !important;
+}
+
+.bot-status .status-item {
+  gap: 0.4rem !important;
+  font-size: 0.8rem !important;
+}
+
+.bot-status .status-label {
+  font-size: 0.75rem !important;
+}
+
+.bot-status .status-badge {
+  padding: 0.2rem 0.5rem !important;
+  font-size: 0.7rem !important;
+}
+
+.bot-action {
+  padding: 0.6rem !important;
+  margin-top: 0.6rem !important;
+}
+
+.action-label {
+  font-size: 0.7rem !important;
+  margin-bottom: 0.3rem !important;
+}
+
+.action-value {
+  font-size: 0.85rem !important;
+}
+
+.bot-waiting {
+  margin-top: 0.5rem !important;
+  padding-top: 0.5rem !important;
+  font-size: 0.7rem !important;
+}
+
+/* Compact Profit Targets - Better color */
+.profit-targets .targets-table {
+  font-size: 0.8rem !important;
+}
+
+.profit-targets .targets-header {
+  padding: 0.5rem 0.75rem !important;
+  font-size: 0.7rem !important;
+}
+
+.profit-targets .target-row {
+  padding: 0.5rem 0.75rem !important;
+}
+
+/* Soft blue instead of terrible yellow */
+.profit-targets .target-row.near-target {
+  background: #dbeafe !important;
+  border-left: 3px solid #3b82f6 !important;
+}
+
+.dark .profit-targets .target-row.near-target {
+  background: #1e3a8a !important;
+  border-left-color: #60a5fa !important;
+}
+
+.profit-targets .target-symbol {
+  font-size: 0.85rem !important;
+}
+
+.profit-targets .target-eta {
+  font-size: 0.75rem !important;
+}
+
+.profit-targets .no-targets {
+  padding: 1.2rem !important;
+  font-size: 0.8rem !important;
+}
+
+/* Compact Recent Activity */
+.recent-activity-simple .activity-list {
+  gap: 0.5rem !important;
+}
+
+.recent-activity-simple .activity-item {
+  gap: 0.5rem !important;
+  padding: 0.5rem !important;
+  font-size: 0.75rem !important;
+}
+
+.recent-activity-simple .activity-time {
+  font-size: 0.7rem !important;
+  min-width: 50px !important;
+}
+
+.recent-activity-simple .activity-icon {
+  font-size: 0.9rem !important;
+}
+
+.recent-activity-simple .activity-message {
+  font-size: 0.75rem !important;
+}
+
+/* Compact Notifications */
+.notifications-container {
+  min-height: 60px !important;
+  font-size: 0.75rem !important;
+}
+
+.notification {
+  padding: 0.5rem !important;
+  font-size: 0.75rem !important;
+}
+
+/* Responsive - Mobile */
+@media (max-width: 768px) {
+  .dashboard-realtime {
+    padding: 0.5rem !important;
+    gap: 0.5rem !important;
+  }
+  
+  .panel {
+    padding: 0.6rem !important;
+  }
+  
+  .panel h2 {
+    font-size: 0.85rem !important;
+  }
+  
+  .account-overview .overview-value {
+    font-size: 1.1rem !important;
+  }
+  
+  .profit-targets .targets-header,
+  .profit-targets .target-row {
+    font-size: 0.7rem !important;
+    padding: 0.4rem 0.5rem !important;
+  }
+}

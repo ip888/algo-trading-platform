@@ -1,0 +1,198 @@
+
+.safety-status-container {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 0 10px;
+}
+
+.heartbeat-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    position: relative;
+    cursor: help;
+    transition: all 0.3s ease;
+}
+
+.heartbeat-indicator.ok {
+    border-color: rgba(16, 185, 129, 0.3);
+    color: #10b981;
+}
+
+.heartbeat-indicator.critical {
+    border-color: rgba(239, 68, 68, 0.5);
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    animation: pulse-red 2s infinite;
+}
+
+.status-text {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+}
+
+/* Tooltip */
+.status-tooltip {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 10px;
+    background: #1e293b;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 200px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-10px);
+    transition: all 0.2s ease;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.heartbeat-indicator:hover .status-tooltip {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.status-tooltip h4 {
+    margin: 0 0 10px 0;
+    color: #94a3b8;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 5px;
+}
+
+.component-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    padding: 4px 0;
+}
+
+.component-row .name {
+    color: #cbd5e1;
+}
+
+.component-row .latency {
+    font-family: monospace;
+}
+
+.component-row .latency.good {
+    color: #10b981;
+}
+
+.component-row .latency.bad {
+    color: #ef4444;
+}
+
+/* Panic Button */
+.panic-button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #ef4444;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.panic-button:hover {
+    background: rgba(239, 68, 68, 0.2);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+}
+
+.panic-button.suggested {
+    animation: pulse-red 1s infinite;
+    background: rgba(239, 68, 68, 0.3);
+}
+
+/* Panic Confirm */
+.panic-confirm {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: #ef4444;
+    padding: 4px 8px;
+    border-radius: 6px;
+    animation: slide-in 0.2s ease;
+}
+
+.confirm-text {
+    font-size: 0.75rem;
+    color: white;
+    font-weight: 700;
+    margin-right: 5px;
+}
+
+.confirm-yes {
+    background: white;
+    color: #ef4444;
+    border: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.confirm-no {
+    background: rgba(0, 0, 0, 0.2);
+    color: white;
+    border: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+/* Animations */
+@keyframes pulse-red {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+@keyframes slide-in {
+    from { opacity: 0; transform: translateX(10px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+/* Panic Overlay */
+.panic-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fade-in 0.3s ease;
+}
+
+.panic-message {
+    text-align: center;
+    color: #ef4444;
+    animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
+}
+
+.panic-message h2 {
+    font-size: 2rem;
+    margin: 20px 0 10px;
+}

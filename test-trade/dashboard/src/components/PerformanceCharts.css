@@ -1,0 +1,184 @@
+.performance-charts {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin-bottom: 20px;
+}
+
+.performance-charts h3 {
+  margin: 0 0 20px 0;
+  font-size: 20px;
+  color: #1f2937;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 20px;
+}
+
+.chart-card {
+  background: #f9fafb;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.chart-card h4 {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.pnl-chart {
+  margin-bottom: 12px;
+}
+
+.chart-svg {
+  width: 100%;
+  height: auto;
+}
+
+.chart-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.time-label {
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.chart-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #10b981;
+  text-align: center;
+}
+
+.win-rate-chart {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.donut-chart {
+  width: 120px;
+  height: 120px;
+}
+
+.chart-subtitle {
+  text-align: center;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.risk-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.risk-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  background: white;
+  border-radius: 6px;
+}
+
+.risk-label {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.risk-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.risk-value.positive {
+  color: #10b981;
+}
+
+.risk-value.negative {
+  color: #ef4444;
+}
+
+/* Dark mode */
+.dark .performance-charts {
+  background: #1f2937;
+}
+
+.dark .performance-charts h3 {
+  color: #f3f4f6;
+}
+
+.dark .chart-card {
+  background: #374151;
+}
+
+.dark .chart-card h4,
+.dark .chart-subtitle,
+.dark .risk-label {
+  color: #9ca3af;
+}
+
+.dark .risk-item {
+  background: #4b5563;
+}
+
+.dark .risk-value {
+  color: #f3f4f6;
+}
+
+.dark .donut-chart text {
+  fill: #f3f4f6;
+}
+
+/* Responsive Design */
+@media (max-width: 480px) {
+  .performance-charts {
+    padding: 16px;
+  }
+  
+  .charts-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  
+  .chart-card {
+    padding: 12px;
+  }
+  
+  .chart-value {
+    font-size: 20px;
+  }
+  
+  .donut-chart {
+    width: 100px;
+    height: 100px;
+  }
+}
+
+@media (min-width: 481px) and (max-width: 768px) {
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .charts-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (min-width: 1025px) {
+  .charts-grid {
+    grid-template-columns: 2fr 1fr 1fr;
+  }
+}

@@ -1,0 +1,29 @@
+# Alpaca API Configuration
+APCA_API_KEY_ID=your_api_key_here
+APCA_API_SECRET_KEY=your_api_secret_here
+APCA_API_BASE_URL=https://paper-api.alpaca.markets
+
+# Trading Mode (PAPER or LIVE)
+# WARNING: Set to LIVE only when you are ready for real money trading!
+# TRADING_MODE=PAPER
+#
+# Market Hours Bypass (for testing/development only)
+# Set to true to allow bot to run strategies even when market is closed
+#BYPASS_MARKET_HOURS=false
+
+# Test Mode (for demonstration and verification)
+# Set to true to simulate realistic trades without placing real orders
+# This is useful for weekend testing and verification
+TEST_MODE=true
+# How often to generate test trades (in seconds)
+TEST_MODE_FREQUENCY=30
+
+# Telegram Notifications (Optional)
+#TELEGRAM_BOT_TOKEN=your_bot_token_here
+#TELEGRAM_CHAT_ID=your_chat_id_here
+
+# Email Notifications (Optional)
+#EMAIL_ADDRESS=your_email@gmail.com
+#EMAIL_PASSWORD=your_app_password_here
+#EMAIL_SMTP_HOST=smtp.gmail.com
+#EMAIL_SMTP_PORT=587

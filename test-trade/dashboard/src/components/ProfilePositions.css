@@ -1,0 +1,135 @@
+.profile-positions {
+  background: white;
+}
+
+.profile-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.profile-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 8px;
+  background: #f9fafb;
+}
+
+.profile-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.profile-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.profile-badge.main {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+  border: 1px solid #3b82f6;
+}
+
+.profile-badge.experimental {
+  background: rgba(168, 85, 247, 0.1);
+  color: #a855f7;
+  border: 1px solid #a855f7;
+}
+
+.profile-allocation {
+  font-size: 10px;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.profile-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+}
+
+.stat-row.symbols {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.stat-label {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.stat-value {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.stat-value.positive {
+  color: #10b981;
+}
+
+.stat-value.negative {
+  color: #ef4444;
+}
+
+.profile-note {
+  font-size: 9px;
+  color: #6b7280;
+  padding: 6px;
+  background: #fef3c7;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.profile-note-inline {
+  font-size: 8px;
+  color: #92400e;
+  padding: 4px 6px;
+  background: #fef3c7;
+  border-radius: 4px;
+  margin-top: 6px;
+  text-align: center;
+}
+
+.market-closed-banner {
+  font-size: 9px;
+  color: #92400e;
+  padding: 6px;
+  background: #fef3c7;
+  border-radius: 4px;
+  text-align: center;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+/* Dark mode */
+.dark .profile-card {
+  background: #374151;
+  border-color: #4b5563;
+}
+
+.dark .stat-label {
+  color: #9ca3af;
+}
+
+.dark .stat-value {
+  color: #f3f4f6;
+}
+
+.dark .profile-note {
+  background: #78350f;
+  color: #fef3c7;
+}

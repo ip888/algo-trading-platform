@@ -4,6 +4,7 @@
 
 ![Status](https://img.shields.io/badge/Status-Production-green?style=flat-square)
 ![Java](https://img.shields.io/badge/Java-25%20LTS-orange?style=flat-square)
+![Rust](https://img.shields.io/badge/Rust-WASM%20Edge-red?style=flat-square)
 ![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blue?style=flat-square)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%7C%20Vite-blueviolet?style=flat-square)
 ![Native Image](https://img.shields.io/badge/GraalVM-Native%20Image%20Ready-orange?style=flat-square)
@@ -20,26 +21,33 @@ graph TD
     subgraph "Execution Plane (GCP Cloud Run)"
         JavaCore["☕ Java 25 Core"]
         VirtualThreads["🧵 Virtual Thread Pool"]
-        Watchdog["🐕 Reliability Watchdog"]
         Strategy["🧠 Strategy Engine"]
         
         JavaCore --> VirtualThreads
         VirtualThreads --> Strategy
-        JavaCore --> Watchdog
     end
 
-    subgraph "Data Plane"
-        AlpacaAPI["📡 Alpaca Market Data API"]
-        AlpacaTrade["💸 Alpaca Trading API"]
+    subgraph "Edge Plane (Cloudflare Workers)"
+        RustCortex["🦀 Rust Cortex (WASM)"]
+        EdgeFilter["🛡️ Pre-Trade Filter"]
+        DeadManSwitch["💀 Dead Man's Switch"]
+
+        RustCortex --> EdgeFilter
+        RustCortex --> DeadManSwitch
     end
 
-    subgraph "Control Plane (Cloudflare Edge)"
+    subgraph "Control Plane (Cloudflare Pages)"
         Dashboard["🖥️ React Command Center"]
         State["⚡ Real-Time WebSocket"]
     end
 
+    subgraph "Data Plane"
+        AlpacaAPI["📡 Alpaca Market Data"]
+    end
+
+    JavaCore <-->|Heartbeat| RustCortex
+    RustCortex -->|Emergency Flatten| AlpacaAPI
     JavaCore <-->|REST/WSS| AlpacaAPI
-    JavaCore <-->|REST| AlpacaTrade
     JavaCore <-->|Secure WSS| Dashboard
 ```
 
@@ -50,6 +58,12 @@ graph TD
 *   **Concurrency:** **Virtual Threads** (Project Loom) instead of Reactive Streams. This allows blocking I/O (API calls) to be written in a simple imperative style while maintaining non-blocking runtime characteristics.
 *   **Framework:** **Javalin** - Extremely lightweight web framework (sub-1ms overhead).
 *   **Resilience:** Custom "Watchdog" implementation that monitors heartbeat, memory pressure, and API latency, capable of "Emergency Flattening" positions if critical thresholds are breached.
+
+### 🛡️ Edge / Safety: The Rust Cortex
+*   **Language:** Rust (compiled to WASM).
+*   **Platform:** Cloudflare Workers (Serverless Edge).
+*   **Role:** Acts as an independent "Dead Man's Switch". If the Java Core crashes or loses connection for >3 minutes, this Rust worker automatically triggers an "Emergency Flatten" to close all positions directly via Alpaca API, bypassing the core entirely.
+*   **Performance:** <10ms cold start, running globally at the edge.
 
 ### 💻 Frontend: Command & Control
 *   **Framework:** React 19 + TypeScript + Vite.
@@ -77,7 +91,7 @@ The bot doesn't just trade blindly; it detects the **Context**:
 *   **PDT Protection:** Built-in pattern day trader protection logic to prevent account locks.
 *   **Cloud Native:** Containerized with **Docker** and deployed to **Google Cloud Run** for serverless scalability.
 
-## � Getting Started
+## 🚀 Getting Started
 
 ### Prerequisites
 *   Java 25 JDK
@@ -89,6 +103,11 @@ The bot doesn't just trade blindly; it detects the **Context**:
 The system is designed for **GitOps** deployment:
 1.  **Backend:** `gcloud run deploy alpaca-bot-core`
 2.  **Frontend:** `wrangler pages deploy dist`
+
+## 📦 Project Structure
+- `alpaca-bot-core/` - The high-performance Java execution engine.
+- `watchdog-worker/` - The Rust/WASM safety cortex deployed to Cloudflare Workers.
+- `test-trade/dashboard/` - The React-based Command & Control interface.
 
 ---
 

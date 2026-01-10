@@ -25,30 +25,18 @@ public class BacktestService {
         this.strategyService = strategyService;
     }
 
-    public record BacktestRequest(String symbol, int days, double capital, boolean useMock, double takeProfitPercent, double stopLossPercent) {}
+    public record BacktestRequest(String symbol, int days, double capital, double takeProfitPercent, double stopLossPercent) {}
 
     public CompletableFuture<Map<String, Object>> runSimulation(BacktestRequest req) {
-        if (req.useMock()) {
-            return CompletableFuture.supplyAsync(() -> {
-               // Generate Mock Data (Sine Wave + Noise)
-               List<Bar> history = new ArrayList<>();
-               double price = 100.0;
-               java.time.Instant now = java.time.Instant.now();
-               for (int i = 0; i < req.days(); i++) {
-                   double change = Math.sin(i * 0.5) * 2 + (Math.random() - 0.5) * 5;
-                   price += change;
-                   if (price < 10) price = 10;
-                   history.add(new Bar(now.minus(java.time.Duration.ofDays(req.days() - i)), price, price+1, price-1, price, 1000));
-               }
-               return runStrategyLoop(req, history);
-            });
-        }
-    
         return client.getMarketHistoryAsync(req.symbol(), req.days())
             .thenApply(history -> {
                 if (history.isEmpty()) throw new RuntimeException("No historical data found for " + req.symbol());
                 return runStrategyLoop(req, history);
             });
+    }
+
+    public Map<String, Object> runSimulation(BacktestRequest req, List<Bar> history) {
+        return runStrategyLoop(req, history);
     }
 
     private Map<String, Object> runStrategyLoop(BacktestRequest req, List<Bar> history) {
@@ -69,7 +57,7 @@ public class BacktestService {
         double slPct = req.stopLossPercent() > 0 ? req.stopLossPercent() / 100.0 : 0.01;     // Default 1.0%
 
         // Simulation Loop
-        for (int i = 0; i < history.size(); i++) {
+        for (int i = 50; i < history.size(); i++) { // Start at 50 to allow for indicators
             Bar currentBar = history.get(i);
             String dateStr = currentBar.timestamp().toString().split("T")[0];
             
@@ -99,48 +87,34 @@ public class BacktestService {
                     shares = 0;
                 }
                 // Standard Signal Exit
-                else if (i > 0) {
-                     // Simple momentum signal for demo
-                     boolean sellSignal = false; 
-                     // In real logic we use strategyService, but for mock support it's safer to keep valid logic
-                     // If mocking, just exit randomly or based on price fall
-                     if (req.useMock()) {
-                         if (currentBar.close() < entryPrice * 0.98) sellSignal = true; 
-                     } else {
-                         // Real strategy logic for non-mock
-                         // We can reuse the loop logic or extract it. 
-                         // To avoid duplicate code, I'll simplify: 
-                         // Only mock bypasses StrategyService if needed, but normally StrategyService works on BAR data.
-                         // So we should use StrategyService for both. 
-                         // But StrategyService might need more context.
-                         // For now, let's just use the previous logic.
-                         var signal = strategyService.generateSignal(req.symbol(), MarketRegime.RANGE_BOUND);
-                         if (signal.action().equals("SELL")) sellSignal = true;
-                     }
+                else {
+                     // Pass historical context (up to current bar)
+                     List<Bar> context = history.subList(0, i + 1);
+                     var signal = strategyService.generateSignal(req.symbol(), MarketRegime.RANGE_BOUND, context);
                      
-                     if (sellSignal) {
-                        double exitPrice = currentBar.close();
-                        double pnl = (exitPrice - entryPrice) * shares;
-                        balance += shares * exitPrice;
-                        trades.add(createTrade(dateStr, "SELL", exitPrice, (int)shares, pnl));
-                        if (pnl > 0) winCount++; else lossCount++;
-                        tradeCount++;
-                        shares = 0;
+                     switch (signal.action()) {
+                         case "SELL" -> {
+                            double exitPrice = currentBar.close();
+                            double pnl = (exitPrice - entryPrice) * shares;
+                            balance += shares * exitPrice;
+                            trades.add(createTrade(dateStr, "SELL", exitPrice, (int)shares, pnl));
+                            if (pnl > 0) winCount++; else lossCount++;
+                            tradeCount++;
+                            shares = 0;
+                         }
+                         case "BUY" -> { /* Already holding, ignore BUY */ }
+                         default -> { /* HOLD */ }
                      }
                 }
             }
 
             // 2. Check Entries if flat
             if (shares == 0) {
-                 boolean buySignal = false;
-                 if (req.useMock()) {
-                     if (i % 5 == 0) buySignal = true; // Random buy
-                 } else {
-                     var signal = strategyService.generateSignal(req.symbol(), MarketRegime.RANGE_BOUND);
-                     if (signal.action().equals("BUY")) buySignal = true;
-                 }
+                 // Pass historical context
+                 List<Bar> context = history.subList(0, i + 1);
+                 var signal = strategyService.generateSignal(req.symbol(), MarketRegime.RANGE_BOUND, context);
                  
-                 if (buySignal && balance >= currentBar.close()) {
+                 if (signal.action().equals("BUY") && balance >= currentBar.close()) {
                     int buyQty = (int) (balance / currentBar.close());
                     if (buyQty > 0) {
                         shares += buyQty;

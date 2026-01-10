@@ -19,15 +19,12 @@ public class PositionSizer {
     public static double calculatePositionPercent(double equity, double winRate, double riskReward) {
         String method = Config.getPositionSizingMethod();
         
-        switch (method) {
-            case "KELLY":
-                return calculateKellyPosition(winRate, riskReward);
-            case "VOLATILITY":
-                return calculateVolatilityPosition(equity);
-            case "FIXED":
-            default:
-                return Config.getDouble("POSITION_SIZING_FIXED_PERCENT", 0.10);
-        }
+        return switch (method) {
+            case "KELLY" -> calculateKellyPosition(winRate, riskReward);
+            case "VOLATILITY" -> calculateVolatilityPosition(equity);
+            case "FIXED" -> Config.getDouble("POSITION_SIZING_FIXED_PERCENT", 0.10);
+            default -> Config.getDouble("POSITION_SIZING_FIXED_PERCENT", 0.10);
+        };
     }
     
     /**
@@ -58,12 +55,22 @@ public class PositionSizer {
     }
     
     /**
-     * Volatility-based position sizing.
+     * Volatility-based position sizing using Market Regime.
+     * Self-Correcting: Automatically reduces exposure in high volatility/bear markets.
      */
     private static double calculateVolatilityPosition(double equity) {
-        double riskPercent = Config.getDouble("POSITION_SIZING_VOLATILITY_RISK_PERCENT", 0.02);
-        // In production, this would use ATR or historical volatility
-        return riskPercent;
+        com.trading.core.model.MarketRegime regime = com.trading.core.analysis.RegimeDetector.getCurrentRegime();
+        
+        // Dynamic Risk Scaling based on Regime
+        return switch (regime) {
+            case HIGH_VOLATILITY -> 0.0;     // 🛡️ CASH IS KING (No new positions)
+            case STRONG_BEAR -> 0.0;         // 🛡️ CASH IS KING
+            case WEAK_BEAR -> 0.02;          // 🔎 Small probe bets only
+            case RANGE_BOUND -> 0.05;        // ⚖️ Standard size
+            case WEAK_BULL -> 0.08;          // 📈 Increasing conviction
+            case STRONG_BULL -> 0.15;        // 🚀 Max aggression
+            default -> 0.02;                 // Safety default
+        };
     }
     
     /**

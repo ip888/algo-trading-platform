@@ -22,19 +22,16 @@ public class OrderExecutionService {
     public List<String> executeSignals(List<AnalysisResult> analysisResults) {
         return analysisResults.stream()
             .map(result -> {
-                String action = result.recommendation();
-                if ("BUY".equalsIgnoreCase(action)) {
-                    // Simple logic: Buy 1 share
-                    return client.postOrderAsync(result.symbol(), 1, "buy", "market", "day")
-                               .thenApply(resp -> "BUY " + result.symbol() + ": " + resp);
-                } else if ("SELL".equalsIgnoreCase(action)) {
-                    // Simple logic: Sell 1 share (or close position)
-                    return client.postOrderAsync(result.symbol(), 1, "sell", "market", "day")
-                               .thenApply(resp -> "SELL " + result.symbol() + ": " + resp);
-                }
-                return CompletableFuture.completedFuture("HOLD " + result.symbol());
+                String action = result.recommendation().toUpperCase();
+                return switch (action) {
+                    case "BUY" -> client.postOrderAsync(result.symbol(), 1, "buy", "market", "day")
+                            .thenApply(resp -> "BUY " + result.symbol() + ": " + resp);
+                    case "SELL" -> client.postOrderAsync(result.symbol(), 1, "sell", "market", "day")
+                            .thenApply(resp -> "SELL " + result.symbol() + ": " + resp);
+                    default -> CompletableFuture.completedFuture("HOLD " + result.symbol());
+                };
             })
-            .map(CompletableFuture::join) // Wait for completion (in VThread this is cheap)
+            .map(CompletableFuture::join) // Wait for completion (cheap on Virtual Threads)
             .toList();
     }
 }

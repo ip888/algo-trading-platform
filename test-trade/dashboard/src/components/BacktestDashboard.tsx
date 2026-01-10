@@ -21,7 +21,7 @@ export const BacktestDashboard = () => {
   const [capital, setCapital] = useState(100000);
   const [takeProfit, setTakeProfit] = useState(0.75);
   const [stopLoss, setStopLoss] = useState(1.0);
-  const [useMock, setUseMock] = useState(false);
+
   const [showComparison, setShowComparison] = useState(true);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -127,10 +127,8 @@ export const BacktestDashboard = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-            symbol, 
             days, 
             capital, 
-            useMock,
             takeProfitPercent: takeProfit,
             stopLossPercent: stopLoss
         })
@@ -172,11 +170,6 @@ export const BacktestDashboard = () => {
             <label>Stop Loss (%)</label>
             <input type="number" value={stopLoss} step="0.05" onChange={e => setStopLoss(Number(e.target.value))} className="input-field" />
           </div>
-          <div className="form-group" style={{ display: 'flex', gap: '20px', alignItems: 'center', paddingTop: '10px' }}>
-             <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '11px' }}>
-                <input type="checkbox" checked={useMock} onChange={e => setUseMock(e.target.checked)} />
-                MOCK DATA MODE
-             </label>
              {result?.comparison && (
                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '11px' }}>
                     <input type="checkbox" checked={showComparison} onChange={e => setShowComparison(e.target.checked)} />
@@ -184,7 +177,7 @@ export const BacktestDashboard = () => {
                 </label>
              )}
           </div>
-        </div>
+
         <button onClick={runBacktest} disabled={loading} className="run-button">
           {loading ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}
           {loading ? 'COMPUTING STRATEGY...' : 'EXECUTE RESEARCH SIMULATION'}

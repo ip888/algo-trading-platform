@@ -22,6 +22,7 @@ public class TradingCore {
     private static final com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
     private static MarketDiscoveryService discoveryService;
     private static BacktestService backtestService;
+    private static com.trading.core.analysis.ParameterOptimizer optimizer;
     private static AlpacaClient clientRef;
     private static MarketAnalysisService analysisRef;
     private static OrderExecutionService executionRef;
@@ -66,13 +67,16 @@ public class TradingCore {
         System.out.println("DEBUG: MarketDiscoveryService initialized.");
         backtestService = new BacktestService(clientRef, strategyService);
         System.out.println("DEBUG: BacktestService initialized.");
+        optimizer = new com.trading.core.analysis.ParameterOptimizer(clientRef, backtestService);
+        System.out.println("DEBUG: ParameterOptimizer initialized.");
         executionRef = new OrderExecutionService(clientRef);
         System.out.println("DEBUG: OrderExecutionService initialized.");
         
         // Initialize Market Hours & Health Monitor
         marketHoursService = new com.trading.core.market.MarketHoursService(clientRef);
         healthMonitor = new com.trading.core.health.HealthMonitor(clientRef, marketHoursService);
-        System.out.println("DEBUG: MarketHoursService and HealthMonitor initialized.");
+        com.trading.core.analysis.RegimeDetector.initialize(clientRef);
+        System.out.println("DEBUG: MarketHoursService, HealthMonitor, and RegimeDetector initialized.");
 
         // Global Error Handling
         app.exception(Exception.class, (e, ctx) -> {
@@ -310,6 +314,30 @@ public class TradingCore {
         }, 5, 60, java.util.concurrent.TimeUnit.SECONDS);
     }
 
+    // ... (existing helper methods)
+
+    // Optimization Loop
+    private static void startOptimizationLoop() {
+        var scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().factory());
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (!com.trading.core.config.Config.isRegimeDetectionEnabled()) return;
+                
+                logger.info("🧬 [Optimizer] Starting Hourly Parameter Optimization...");
+                // Optimization Target: SPY (The Market Proxy)
+                // We tune our global "Experimental" and "Main" settings based on how a strategy would have performed on SPY recently.
+                optimizer.optimize("SPY").thenAccept(result -> {
+                    logger.info("🧬 [Optimizer] Run Complete. Score: {}", String.format("%.2f", result.score()));
+                });
+                
+            } catch (Exception e) {
+                logger.error("Optimizer Loop Error", e);
+            }
+        }, 5, 60, java.util.concurrent.TimeUnit.MINUTES);
+        
+        logger.info("🧬 Optimization Loop started (60m interval)");
+    }
+
     private static void startAutonomousLoop(
             AlpacaClient client,
             com.trading.core.analysis.MarketAnalysisService analysisService,
@@ -317,9 +345,13 @@ public class TradingCore {
         
         var scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().factory());
         
+        // Start Optimization side-car
+        startOptimizationLoop();
+        
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 System.out.println("⏰ [Loop] Heartbeat: Synchronizing Data...");
+                // ... (rest of loop)
                 
                 // 1. Fetch Account & Positions
                 client.getAccountAsync().thenAccept(accStr -> {

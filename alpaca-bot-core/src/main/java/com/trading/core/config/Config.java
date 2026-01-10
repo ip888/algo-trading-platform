@@ -185,9 +185,27 @@ public class Config {
         return getInt("SYMBOL_BATCH_SIZE", 6);
     }
     
+    // Dynamic Overrides for Adaptive Logic
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> overrides = 
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static void setOverride(String key, String value) {
+        overrides.put(key, value);
+        logger.info("🔧 Config Override: {} = {}", key, value);
+    }
+    
+    public static void clearOverrides() {
+        overrides.clear();
+        logger.info("🔧 Config Overrides Cleared");
+    }
+
     // ==================== Utilities ====================
     public static double getDouble(String key, double defaultValue) {
         try {
+            // Check overrides first
+            if (overrides.containsKey(key)) {
+                return Double.parseDouble(overrides.get(key));
+            }
             String value = props.getProperty(key);
             return value != null ? Double.parseDouble(value) : defaultValue;
         } catch (NumberFormatException e) {
@@ -197,6 +215,10 @@ public class Config {
     
     public static int getInt(String key, int defaultValue) {
         try {
+            // Check overrides first
+            if (overrides.containsKey(key)) {
+                return Integer.parseInt(overrides.get(key));
+            }
             String value = props.getProperty(key);
             return value != null ? Integer.parseInt(value) : defaultValue;
         } catch (NumberFormatException e) {

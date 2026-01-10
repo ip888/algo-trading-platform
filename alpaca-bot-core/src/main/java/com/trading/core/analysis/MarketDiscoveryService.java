@@ -37,8 +37,15 @@ public class MarketDiscoveryService {
         this.maxActiveSymbols = Integer.parseInt(System.getenv().getOrDefault("MAX_ACTIVE_SYMBOLS", "10"));
     }
 
-    public synchronized List<String> getActiveWatchlist() {
-        return List.copyOf(activeWatchlist);
+    private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+
+    public List<String> getActiveWatchlist() {
+        lock.lock();
+        try {
+            return List.copyOf(activeWatchlist);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -60,7 +67,8 @@ public class MarketDiscoveryService {
                 .collect(Collectors.toList());
 
             if (!topPicks.isEmpty()) {
-                synchronized (this) {
+                lock.lock();
+                try {
                     var added = topPicks.stream().filter(s -> !activeWatchlist.contains(s)).toList();
                     var removed = activeWatchlist.stream().filter(s -> !topPicks.contains(s)).toList();
                     
@@ -70,6 +78,8 @@ public class MarketDiscoveryService {
                     } else {
                         logger.info("✅ Watchlist is already optimized.");
                     }
+                } finally {
+                    lock.unlock();
                 }
             }
         } catch (Exception e) {

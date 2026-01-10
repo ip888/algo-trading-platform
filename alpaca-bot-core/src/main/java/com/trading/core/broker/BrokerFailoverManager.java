@@ -60,24 +60,34 @@ public class BrokerFailoverManager {
     /**
      * Switch to the next available broker in the list.
      */
-    private synchronized void switchToNextBroker() {
-        BrokerGateway current = activeBroker.get();
-        int currentIndex = brokers.indexOf(current);
-        
-        for (int i = 1; i < brokers.size(); i++) {
-            int nextIndex = (currentIndex + i) % brokers.size();
-            BrokerGateway next = brokers.get(nextIndex);
+    private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+
+    /**
+     * Switch to the next available broker in the list.
+     */
+    private void switchToNextBroker() {
+        lock.lock();
+        try {
+            BrokerGateway current = activeBroker.get();
+            int currentIndex = brokers.indexOf(current);
             
-            if (next.isHealthy()) {
-                activeBroker.set(next);
-                failureCount.set(0);
-                logger.info("🔄 Switched broker from {} to {}", 
-                    current.getBrokerId(), next.getBrokerId());
-                return;
+            for (int i = 1; i < brokers.size(); i++) {
+                int nextIndex = (currentIndex + i) % brokers.size();
+                BrokerGateway next = brokers.get(nextIndex);
+                
+                if (next.isHealthy()) {
+                    activeBroker.set(next);
+                    failureCount.set(0);
+                    logger.info("🔄 Switched broker from {} to {}", 
+                        current.getBrokerId(), next.getBrokerId());
+                    return;
+                }
             }
+            
+            logger.error("🚨 No healthy brokers available for failover!");
+        } finally {
+            lock.unlock();
         }
-        
-        logger.error("🚨 No healthy brokers available for failover!");
     }
     
     /**

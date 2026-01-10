@@ -25,6 +25,9 @@ public class StrategyService {
 
     public record StrategySignal(String symbol, String action, String strategyName, String reason, double price) {}
 
+    /**
+     * Generates a signal by fetching live market data.
+     */
     public StrategySignal generateSignal(String symbol, MarketRegime regime) {
         try {
             // Fetch necessary history (e.g. 100 bars)
@@ -32,32 +35,29 @@ public class StrategyService {
             if (history.isEmpty()) {
                  return new StrategySignal(symbol, "HOLD", "Data Error", "No suitable bars found", 0.0);
             }
+            return generateSignal(symbol, regime, history);
+        } catch (Exception e) {
+            logger.error("Error generating signal for " + symbol, e);
+            return new StrategySignal(symbol, "HOLD", "Error", e.getMessage(), 0.0);
+        }
+    }
+
+    /**
+     * Generates a signal from provided historical data (Pure Function).
+     * Suitable for Backtesting and Live Trading.
+     */
+    public StrategySignal generateSignal(String symbol, MarketRegime regime, List<Bar> history) {
+        try {
             double price = history.get(history.size() - 1).close();
             List<Double> closes = history.stream().map(Bar::close).toList();
 
             // Adaptive Scaling Logic based on Regime
-            double effRsiLower = rsiLower;
-            double effRsiUpper = rsiUpper;
-            double effMacdThreshold = macdThreshold;
+            StrategyParams params = getRegimeParams(regime, rsiLower, rsiUpper, macdThreshold);
+            double effRsiLower = params.rsiLower();
+            double effRsiUpper = params.rsiUpper();
+            double effMacdThreshold = params.macdThreshold();
 
-            switch (regime) {
-                case STRONG_BULL:
-                    effRsiUpper += 5.0;     // Let winners run
-                    effMacdThreshold *= 0.5; // Aggressive trend entry
-                    break;
-                case STRONG_BEAR:
-                    effRsiLower -= 10.0;    // Avoid falling knives
-                    effMacdThreshold *= 2.0; // Conservative trend entry
-                    break;
-                case HIGH_VOLATILITY:
-                    effRsiLower -= 5.0;
-                    effRsiUpper += 5.0;
-                    effMacdThreshold *= 3.0; // Extreme confirmation required
-                    break;
-                default: break; // RANGE_BOUND uses Base
-            }
-
-            logger.info("📡 [{}] Strategy effective thresholds: RSI({}-{}), MACD({})", 
+            logger.debug("📡 [{}] Strategy effective thresholds: RSI({}-{}), MACD({})", 
                 symbol, String.format("%.1f", effRsiLower), String.format("%.1f", effRsiUpper), String.format("%.3f", effMacdThreshold));
 
             return switch (regime) {
@@ -65,13 +65,13 @@ public class StrategyService {
                 case RANGE_BOUND -> executeRSI(symbol, closes, price, effRsiLower, effRsiUpper);
                 default -> executeRSI(symbol, closes, price, effRsiLower, effRsiUpper); 
             };
-
         } catch (Exception e) {
-            logger.error("Error generating signal for " + symbol, e);
-            return new StrategySignal(symbol, "HOLD", "Error", e.getMessage(), 0.0);
+            logger.error("Logic error for " + symbol, e);
+            return new StrategySignal(symbol, "HOLD", "Logic Error", e.getMessage(), 0.0);
         }
     }
-
+    
+    // Explicitly private to prevent usage outside of controlled methods
     private StrategySignal executeRSI(String symbol, List<Double> prices, double currentPrice, double lower, double upper) {
         double rsi = calculateRSI(prices, 14);
         if (rsi < lower) return new StrategySignal(symbol, "BUY", "RSI Mean Reversion", "RSI Oversold: " + rsi, currentPrice);
@@ -163,5 +163,16 @@ public class StrategyService {
         if (avgLoss == 0) return 100.0;
         double rs = avgGain / avgLoss;
         return 100.0 - (100.0 / (1.0 + rs));
+    }
+
+    private record StrategyParams(double rsiLower, double rsiUpper, double macdThreshold) {}
+
+    private StrategyParams getRegimeParams(MarketRegime regime, double baseLower, double baseUpper, double baseMacd) {
+        return switch (regime) {
+            case STRONG_BULL -> new StrategyParams(baseLower, baseUpper + 5.0, baseMacd * 0.5);
+            case STRONG_BEAR -> new StrategyParams(baseLower - 10.0, baseUpper, baseMacd * 2.0);
+            case HIGH_VOLATILITY -> new StrategyParams(baseLower - 5.0, baseUpper + 5.0, baseMacd * 3.0);
+            default -> new StrategyParams(baseLower, baseUpper, baseMacd);
+        };
     }
 }

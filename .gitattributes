@@ -1,0 +1,15 @@
+# Exclude internals from stats
+.internal/** linguist-vendored
+_legacy_archive/** linguist-vendored
+
+# Force Java classification for backend
+alpaca-bot-core/** linguist-language=Java
+
+# Force TypeScript/React for frontend
+test-trade/** linguist-language=TypeScript
+
+# Force Java classification for backend
+alpaca-bot-core/** linguist-language=Java
+
+# Force TypeScript/React for frontend
+test-trade/** linguist-language=TypeScript

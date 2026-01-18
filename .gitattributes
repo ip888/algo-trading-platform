@@ -1,15 +1,14 @@
 # Exclude internals from stats
 .internal/** linguist-vendored
 _legacy_archive/** linguist-vendored
-
-# Force Java classification for backend
-alpaca-bot-core/** linguist-language=Java
-
-# Force TypeScript/React for frontend
-test-trade/** linguist-language=TypeScript
-
-# Force Java classification for backend
-alpaca-bot-core/** linguist-language=Java
-
-# Force TypeScript/React for frontend
-test-trade/** linguist-language=TypeScript
+*.log linguist-generated
+build/** linguist-generated
+dist/** linguist-generated
+node_modules/** linguist-vendored
+vendor/** linguist-vendored
+*.min.js linguist-generated
+*.min.css linguist-generated
+.DS_Store linguist-generated
+Thumbs.db linguist-generated
+.idea/** linguist-vendored
+.vscode/** linguist-vendored

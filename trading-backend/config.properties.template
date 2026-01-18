@@ -1,0 +1,50 @@
+# ============================================================
+# Algo Trading Platform - Configuration Template
+# ============================================================
+# Copy this file to config.properties and fill in your values
+# NEVER commit config.properties with real credentials!
+# ============================================================
+
+# Alpaca API Configuration
+ALPACA_API_KEY=your_alpaca_api_key
+ALPACA_API_SECRET=your_alpaca_secret
+ALPACA_BASE_URL=https://api.alpaca.markets
+
+# Trading Mode
+TRADING_MODE=LIVE
+
+# Account Settings
+INITIAL_CAPITAL=1000
+
+# Risk Management - Per Trade
+MAIN_TAKE_PROFIT_PERCENT=0.75
+MAIN_STOP_LOSS_PERCENT=0.5
+MAIN_TRAILING_STOP_PERCENT=0.5
+
+# Portfolio-Level Emergency Protection
+MAX_LOSS_EXIT_ENABLED=true
+MAX_LOSS_PERCENT=5.0
+PORTFOLIO_STOP_LOSS_ENABLED=true
+PORTFOLIO_STOP_LOSS_PERCENT=3.0
+
+# Kraken API (Crypto Trading)
+KRAKEN_API_KEY=your_kraken_api_key
+KRAKEN_API_SECRET=your_kraken_secret
+
+# Kraken Trading Parameters
+KRAKEN_TAKE_PROFIT_PERCENT=0.75
+KRAKEN_STOP_LOSS_PERCENT=0.5
+KRAKEN_TRAILING_STOP_PERCENT=0.5
+KRAKEN_MAX_POSITIONS=2
+KRAKEN_POSITION_SIZE_USD=75
+KRAKEN_CYCLE_INTERVAL_MS=10000
+
+# Grid Trading
+KRAKEN_GRID_POSITION_SIZE=12
+KRAKEN_MAX_GRID_ORDERS=1
+
+# Rate Limiting
+API_REQUEST_DELAY_MS=300
+
+# Optional: Alpha Vantage (for VIX data)
+ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key

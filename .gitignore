@@ -13,10 +13,23 @@ core.log
 trading-bot.log
 hs_err_pid*.log
 
-# Secrets & Configs
+# Secrets & Configs (NEVER commit real credentials)
 config.properties
 .env
 secret.key
+*.key
+*.pem
+
+# Database files
+*.db
+*.sqlite
+
+# Temp files
+*.txt
+!README.txt
+kraken_*.json
+error_search.*
+startup_logs.*
 
 # Internal Structure (Cleanup)
 .internal/
@@ -29,3 +42,4 @@ backup/
 node_modules/
 dist/
 .wrangler/
+coverage/

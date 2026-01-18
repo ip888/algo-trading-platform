@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: trading-bot
+    restart: always  # Auto-restart on crash or reboot
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist database and logs
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Mount config for easy updates without rebuild
+      - ./config.properties:/app/config.properties:ro
+    environment:
+      - TZ=America/New_York
+      - JAVA_OPTS=--enable-preview -Xmx512m -Xms256m
+      # Alpaca API (required for stock trading)
+      # - ALPACA_API_KEY=your_alpaca_key
+      # - ALPACA_API_SECRET=your_alpaca_secret
+      # Kraken API (optional - for 24/7 crypto trading)
+      # - KRAKEN_API_KEY=your_kraken_key
+      # - KRAKEN_API_SECRET=your_kraken_secret
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Watchtower for automatic updates
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=86400  # Check daily
+      - WATCHTOWER_INCLUDE_STOPPED=true
+    command: trading-bot

@@ -48,6 +48,10 @@ public class KrakenTradingLoop implements Runnable {
     // Cycle timing (independent from Alpaca)
     private final long cycleIntervalMs;
     
+    // Re-entry cooldown to prevent churn (symbol -> timestamp when cooldown expires)
+    private static final long REENTRY_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+    private final ConcurrentHashMap<String, Long> sellCooldowns = new ConcurrentHashMap<>();
+    
     // State
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean paused = new AtomicBoolean(false);
@@ -219,10 +223,17 @@ public class KrakenTradingLoop implements Runnable {
                         double currentPrice = fetchCurrentPrice(symbol);
                         
                         if (entryPrice > 0 && currentPrice > 0) {
+                            double calculatedSL = entryPrice * (1 - stopLossPercent);
+                            double calculatedTP = entryPrice * (1 + takeProfitPercent);
+                            logger.info("🔧 DEBUG SYNC: {} | Entry: ${} | SL%: {} | TP%: {} | SL: ${} | TP: ${}",
+                                symbol, String.format("%.2f", entryPrice), 
+                                String.format("%.6f", stopLossPercent), String.format("%.6f", takeProfitPercent),
+                                String.format("%.2f", calculatedSL), String.format("%.2f", calculatedTP));
+                            
                             var pos = new TradePosition(
                                 symbol, entryPrice, balance,
-                                entryPrice * (1 - stopLossPercent),
-                                entryPrice * (1 + takeProfitPercent),
+                                calculatedSL,
+                                calculatedTP,
                                 Instant.now()
                             );
                             krakenPositions.put(symbol, pos);
@@ -378,9 +389,9 @@ public class KrakenTradingLoop implements Runnable {
                 boolean isOverbought = gridTradingService.isOverbought(symbol);
                 
                 // ALWAYS log position status with RSI
-                logger.info("🔍 {} | ${} | Entry: ${} | PnL: {}% | RSI: {:.1f} | SL: ${}",
+                logger.info("🔍 {} | ${} | Entry: ${} | PnL: {}% | RSI: {} | SL: ${}",
                     symbol, String.format("%.2f", currentPrice), String.format("%.2f", pos.entryPrice()), 
-                    String.format("%+.2f", pnlPercent), rsi, String.format("%.2f", pos.stopLoss()));
+                    String.format("%+.2f", pnlPercent), String.format("%.1f", rsi), String.format("%.2f", pos.stopLoss()));
                 
                 // SL threshold (stopLossPercent=0.005 -> 0.5%)
                 double slThreshold = stopLossPercent * 100;
@@ -405,11 +416,12 @@ public class KrakenTradingLoop implements Runnable {
                     continue;
                 }
                 
-                // ===== RSI OVERBOUGHT EXIT (when in profit) =====
-                // If RSI > 70 and we're profitable, consider taking profits early
-                if (isOverbought && pnlPercent > 0.3) {
-                    logger.info("📊 RSI OVERBOUGHT EXIT: {} @ ${} | RSI: {:.1f} | Profit: {}%", 
-                        symbol, String.format("%.4f", currentPrice), rsi, String.format("%.2f", pnlPercent));
+                // ===== RSI OVERBOUGHT EXIT (when in SIGNIFICANT profit) =====
+                // FIXED: Only exit if profit covers fees + minimum gain
+                // Fees are ~0.4% round trip, so need >0.6% profit to be worthwhile
+                if (isOverbought && pnlPercent > 0.8) {  // Was 0.3% - now 0.8% to ensure net profit
+                    logger.info("📊 RSI OVERBOUGHT EXIT: {} @ ${} | RSI: {} | Profit: {}%", 
+                        symbol, String.format("%.4f", currentPrice), String.format("%.1f", rsi), String.format("%.2f", pnlPercent));
                     executeSell(symbol, pos, "RSI_OVERBOUGHT", currentPrice);
                     gridTradingService.clearTrailingTp(symbol);
                     continue;
@@ -447,6 +459,14 @@ public class KrakenTradingLoop implements Runnable {
             // Check max positions
             if (krakenPositions.size() >= dynamicMaxPositions) break;
             
+            // Check re-entry cooldown (prevent churn)
+            Long cooldownExpiry = sellCooldowns.get(symbol);
+            if (cooldownExpiry != null && System.currentTimeMillis() < cooldownExpiry) {
+                long remainingSec = (cooldownExpiry - System.currentTimeMillis()) / 1000;
+                logger.debug("🦑 {} on cooldown for {} more seconds", symbol, remainingSec);
+                continue;
+            }
+            
             try {
                 String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
                 String tickerJson = krakenClient.getTickerAsync(krakenSymbol).join();
@@ -474,18 +494,42 @@ public class KrakenTradingLoop implements Runnable {
                     : 50;
                 double distanceFromVWAP = ((currentPrice - vwap24h) / vwap24h) * 100;
                 
-                // === MICRO-PROFIT ENTRY CRITERIA ===
-                boolean inBuyZone = rangePosition < 35;          // Lower 35% of range
-                boolean belowVWAP = distanceFromVWAP <= 0.3;     // At or below VWAP
-                boolean notFreefalling = dayChange > -4.0;       // Not crashing
+                // Get RSI for momentum confirmation
+                double rsi = gridTradingService.getRsi(symbol);
+                boolean isOversold = gridTradingService.isOversold(symbol);
+                
+                // === IMPROVED ENTRY CRITERIA (v2.0) ===
+                // 1. Must be in lower part of range
+                boolean inBuyZone = rangePosition < 30;          // Tighter: Lower 30% of range (was 35%)
+                
+                // 2. Must be at or below VWAP (value area)
+                boolean belowVWAP = distanceFromVWAP <= 0.2;     // Tighter: at or below VWAP (was 0.3%)
+                
+                // 3. Must NOT be in a downtrend - KEY FIX!
+                boolean trendOK = dayChange > -1.5;              // Much tighter! Skip if down >1.5% (was -4%)
+                
+                // 4. Must have volume
                 boolean hasVolume = pairData.get("v").get(1).asDouble() > 0;
                 
-                if (inBuyZone && belowVWAP && notFreefalling && hasVolume) {
-                    logger.info("🦑 BUY SIGNAL: {} | Range: {}% | VWAP dist: {}% | Day: {}%",
+                // 5. RSI momentum confirmation (optional but helpful)
+                boolean rsiConfirm = rsi < 45;                   // RSI not overbought
+                
+                // Log current market conditions
+                logger.debug("🦑 {} Market: Range={}% VWAP={}% Day={}% RSI={}",
+                    symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP),
+                    String.format("%.2f", dayChange), String.format("%.1f", rsi));
+                
+                // Entry requires ALL conditions (stricter)
+                if (inBuyZone && belowVWAP && trendOK && hasVolume && rsiConfirm) {
+                    logger.info("🦑 BUY SIGNAL: {} | Range: {}% | VWAP: {}% | Day: {}% | RSI: {}",
                         symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP), 
-                        String.format("%.2f", dayChange));
+                        String.format("%.2f", dayChange), String.format("%.1f", rsi));
                     
                     executeBuy(symbol, currentPrice);
+                } else if (inBuyZone && belowVWAP && !trendOK) {
+                    // Log why we skipped (trend filter)
+                    logger.info("🦑 SKIP: {} | Day change {}% too negative (need > -1.5%)",
+                        symbol, String.format("%.2f", dayChange));
                 }
                 
             } catch (Exception e) {
@@ -561,6 +605,10 @@ public class KrakenTradingLoop implements Runnable {
             // Remove from tracking
             krakenPositions.remove(symbol);
             portfolio.setPosition(symbol, Optional.empty());
+            
+            // Set re-entry cooldown to prevent immediate churn
+            sellCooldowns.put(symbol, System.currentTimeMillis() + REENTRY_COOLDOWN_MS);
+            logger.debug("🦑 {} cooldown set for {} minutes", symbol, REENTRY_COOLDOWN_MS / 60000);
             
             logger.info("🦑 SELL EXECUTED: {} x{} @ ${} | PnL: ${} ({}%) | Reason: {}",
                 symbol, pos.quantity(), price, String.format("%.2f", pnl), 

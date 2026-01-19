@@ -1,115 +1,207 @@
-# ⚡ Alpaca Bot: Autonomous High-Frequency Trading System
+# ⚡ Algo Trading Platform: Multi-Asset Autonomous Trading System
 
-**Enterprise-grade algorithmic trading engine built on Java 25 (Virtual Threads) and React 19.**
+**Enterprise-grade algorithmic trading engine for Stocks (Alpaca) and Crypto (Kraken), built on Java 25 (Virtual Threads) and React 19.**
 
 ![Status](https://img.shields.io/badge/Status-Production-green?style=flat-square)
 ![Java](https://img.shields.io/badge/Java-25%20LTS-orange?style=flat-square)
-![Rust](https://img.shields.io/badge/Rust-WASM%20Edge-red?style=flat-square)
 ![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blue?style=flat-square)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%7C%20Vite-blueviolet?style=flat-square)
-![Native Image](https://img.shields.io/badge/GraalVM-Native%20Image%20Ready-orange?style=flat-square)
+![Cloud](https://img.shields.io/badge/Cloud-Google%20Cloud%20Run-blue?style=flat-square)
 
 ## 📖 Executive Summary
-This project represents a **full-stack, high-concurrency trading platform** designed for the Alpaca Securities API. Unlike typical retail bots usually written in Python, this system leverages **Java 25's Virtual Threads (Project Loom)** to handle thousands of concurrent market data streams with microsecond-level overhead. It features a self-healing "Watchdog" architecture and a real-time Command & Control dashboard.
+
+This project is a **full-stack, high-concurrency multi-asset trading platform** supporting:
+- **Stocks**: Alpaca Securities API (US markets)
+- **Crypto**: Kraken Exchange API (24/7 trading)
+
+Unlike typical retail bots written in Python, this system leverages **Java 25's Virtual Threads (Project Loom)** to handle thousands of concurrent market data streams with microsecond-level overhead.
 
 ## 🏗 System Architecture
 
-The system follows a **modern/hybrid microservice architecture**, separating the execution core from the observability layer.
+The system is a **unified monolith** deployed to Google Cloud Run, combining the execution engine with an embedded React dashboard.
 
 ```mermaid
 graph TD
-    subgraph "Execution Plane (GCP Cloud Run)"
+    subgraph "Google Cloud Run"
         JavaCore["☕ Java 25 Core"]
         VirtualThreads["🧵 Virtual Thread Pool"]
-        Strategy["🧠 Strategy Engine"]
+        AlpacaStrategy["📈 Alpaca Strategy Engine"]
+        KrakenStrategy["🦑 Kraken Trading Loop"]
+        Dashboard["🖥️ React Dashboard (Embedded)"]
         
         JavaCore --> VirtualThreads
-        VirtualThreads --> Strategy
+        VirtualThreads --> AlpacaStrategy
+        VirtualThreads --> KrakenStrategy
+        JavaCore --> Dashboard
     end
 
-    subgraph "Edge Plane (Cloudflare Workers)"
-        RustCortex["🦀 Rust Cortex (WASM)"]
-        EdgeFilter["🛡️ Pre-Trade Filter"]
-        DeadManSwitch["💀 Dead Man's Switch"]
-
-        RustCortex --> EdgeFilter
-        RustCortex --> DeadManSwitch
+    subgraph "External APIs"
+        AlpacaAPI["📡 Alpaca API"]
+        KrakenAPI["🦑 Kraken API"]
     end
 
-    subgraph "Control Plane (Cloudflare Pages)"
-        Dashboard["🖥️ React Command Center"]
-        State["⚡ Real-Time WebSocket"]
-    end
-
-    subgraph "Data Plane"
-        AlpacaAPI["📡 Alpaca Market Data"]
-    end
-
-    JavaCore <-->|Heartbeat| RustCortex
-    RustCortex -->|Emergency Flatten| AlpacaAPI
-    JavaCore <-->|REST/WSS| AlpacaAPI
-    JavaCore <-->|Secure WSS| Dashboard
+    AlpacaStrategy <-->|REST/WSS| AlpacaAPI
+    KrakenStrategy <-->|REST| KrakenAPI
+    Dashboard <-->|WebSocket| JavaCore
 ```
 
-## 🛠 Technology Stack Breakdown
+## 🛠 Technology Stack
 
 ### 🧠 Backend: The Execution Core
-*   **Language:** Java 25 (LTS) - Selected for strict typing and performance.
-*   **Concurrency:** **Virtual Threads** (Project Loom) instead of Reactive Streams. This allows blocking I/O (API calls) to be written in a simple imperative style while maintaining non-blocking runtime characteristics.
-*   **Framework:** **Javalin** - Extremely lightweight web framework (sub-1ms overhead).
-*   **Resilience:** Custom "Watchdog" implementation that monitors heartbeat, memory pressure, and API latency, capable of "Emergency Flattening" positions if critical thresholds are breached.
+- **Language:** Java 25 (LTS) with Virtual Threads (Project Loom)
+- **Framework:** Javalin - lightweight web framework (sub-1ms overhead)
+- **Build:** Maven with Shade plugin for uber-JAR
+- **Resilience:** Circuit breakers (Resilience4j), heartbeat monitoring, emergency protocol
 
-### 🛡️ Edge / Safety: The Rust Cortex
-*   **Language:** Rust (compiled to WASM).
-*   **Platform:** Cloudflare Workers (Serverless Edge).
-*   **Role:** Acts as an independent "Dead Man's Switch". If the Java Core crashes or loses connection for >3 minutes, this Rust worker automatically triggers an "Emergency Flatten" to close all positions directly via Alpaca API, bypassing the core entirely.
-*   **Performance:** <10ms cold start, running globally at the edge.
+### 💻 Frontend: Command & Control Dashboard
+- **Framework:** React 19 + TypeScript + Vite
+- **State:** Zustand for lightweight state management
+- **Charts:** Lightweight Charts (v5) + Recharts
+- **Real-time:** WebSocket for sub-50ms latency updates
 
-### 💻 Frontend: Command & Control
-*   **Framework:** React 19 + TypeScript + Vite.
-*   **State Management:** **Zustand** for lightweight, atomic state updates.
-*   **Visualization:**
-    *   **Lightweight Charts (v5):** For high-performance financial timeseries rendering (used in Backtest Lab).
-    *   **Recharts:** For real-time P&L visualization.
-*   **Communication:** Raw WebSockets for sub-50ms latency updates from the Core.
+### ☁️ Infrastructure
+- **Deployment:** Google Cloud Run (serverless containers)
+- **Registry:** Google Artifact Registry
+- **Container:** Docker with GraalVM JDK 25
 
-## 🧩 Key Solutions & Features
+## 🧩 Key Features
 
-### 1. The Strategy Research Lab
-A built-in **Backtesting Engine** allows for rapid strategy verification without risking capital.
-*   **Dual Mode:** Supports both **Real Market Data** (historical re-simulation) and **Mock Data** (Algorithmic Noise Generation) for offline UI testing.
-*   **Metrics:** Calculates **Sharpe Ratio**, **Max Drawdown**, and **Win Rate** instantly.
-*   **Optimization:** Configurable Take Profit / Stop Loss parameters to tune outcomes.
+### 1. Multi-Profile Trading (Alpaca)
+- **MAIN Profile**: Conservative, momentum-based trading
+- **EXPERIMENTAL Profile**: Aggressive, volatility-adjusted strategies
+- **Kelly Criterion**: Dynamic position sizing based on edge estimation
+- **VIX Integration**: Automatic strategy adjustment based on market fear
 
-### 2. Autonomous Market Regime Detection
-The bot doesn't just trade blindly; it detects the **Context**:
-*   **VIX Volatility Analysis:** Automatically switches strategies based on fear index (VIX).
-*   **Regime Classification:** Identifies `BULLISH`, `BEARISH`, or `SIDELINE` markets and adjusts position sizing (Kelly Criterion) dynamically.
+### 2. Kraken Crypto Trading (24/7)
+- **Grid Trading**: Automated buy/sell grid with dynamic sizing
+- **Stop-Loss/Take-Profit**: Configurable SL (0.5%) and TP (0.75%) per position
+- **Volatility Detection**: Position sizing adjusted for high-volatility periods
+- **Selective Liquidation**: Close only losing positions on demand
 
-### 3. Reliability First
-*   **Self-Healing:** The system monitors its own connection health.
-*   **PDT Protection:** Built-in pattern day trader protection logic to prevent account locks.
-*   **Cloud Native:** Containerized with **Docker** and deployed to **Google Cloud Run** for serverless scalability.
+### 3. Risk Management
+- **Emergency Protocol**: Manual panic button to flatten all positions
+- **Heartbeat Monitoring**: System health checks every 5 seconds
+- **PDT Protection**: Pattern day trader safeguards (Alpaca)
+- **Position Tracking**: Real-time P&L monitoring with entry prices
 
 ## 🚀 Getting Started
 
 ### Prerequisites
-*   Java 25 JDK
-*   Node.js 20+
-*   Docker
-*   Alpaca API Keys (Live or Paper)
+- Java 25 JDK (Temurin or GraalVM)
+- Node.js 20+
+- Docker
+- Google Cloud SDK (for deployment)
+- API Keys: Alpaca + Kraken
 
-### Deployment
-The system is designed for **GitOps** deployment:
-1.  **Backend:** `gcloud run deploy alpaca-bot-core`
-2.  **Frontend:** `wrangler pages deploy dist`
+### Local Development
+```bash
+# Clone and navigate
+cd trading-backend
+
+# Build dashboard
+cd dashboard && npm install && npm run build && cd ..
+
+# Set environment variables
+export ALPACA_API_KEY=your_key
+export ALPACA_API_SECRET=your_secret
+export KRAKEN_API_KEY=your_key
+export KRAKEN_API_SECRET=your_secret
+
+# Build and run
+mvn clean package -DskipTests
+java --enable-preview -jar target/trading-backend-1.0-SNAPSHOT.jar
+```
+
+### Deployment (Google Cloud Run)
+```bash
+# Build with Cloud Build (for amd64)
+gcloud builds submit --project=YOUR_PROJECT \
+  --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/algo-trading-backend:latest
+
+# Deploy
+gcloud run deploy algo-trading-backend \
+  --project=YOUR_PROJECT \
+  --region=us-central1 \
+  --image=us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/algo-trading-backend:latest \
+  --allow-unauthenticated
+```
+
+## 📡 API Endpoints
+
+### Health & Status
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | System health check |
+| `/api/heartbeat` | GET | Component heartbeat status |
+| `/api/status` | GET | Bot running status |
+
+### Alpaca (Stocks)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/account` | GET | Alpaca account info |
+| `/api/positions` | GET | Current stock positions |
+| `/api/orders` | GET | Open orders |
+
+### Kraken (Crypto)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/kraken/balance` | GET | Kraken wallet balance |
+| `/api/kraken/holdings` | GET | Crypto holdings with prices |
+| `/api/kraken/positions` | GET | Margin positions |
+| `/api/kraken/grid` | GET | Grid trading status |
+| `/api/kraken/liquidate-losers` | POST | Sell only losing positions |
+
+### Emergency Controls
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/emergency/panic` | POST | Flatten ALL Alpaca positions |
+| `/api/emergency/reset` | POST | Reset emergency state |
+| `/api/emergency/status` | GET | Emergency protocol status |
 
 ## 📦 Project Structure
-- `alpaca-bot-core/` - The high-performance Java execution engine.
-- `watchdog-worker/` - The Rust/WASM safety cortex deployed to Cloudflare Workers.
-- `test-trade/dashboard/` - The React-based Command & Control interface.
+```
+trading-backend/
+├── src/main/java/com/trading/
+│   ├── api/controller/      # REST API controllers
+│   ├── bot/                 # Main TradingBot orchestrator
+│   ├── broker/              # KrakenClient, BrokerRouter
+│   ├── crypto/              # KrakenTradingLoop (24/7)
+│   ├── portfolio/           # ProfileManager, strategies
+│   ├── protection/          # EmergencyProtocol, HeartbeatMonitor
+│   └── strategy/            # GridTradingService, algorithms
+├── dashboard/               # React frontend (embedded)
+│   ├── src/components/      # UI widgets
+│   └── dist/                # Built assets (copied to JAR)
+├── Dockerfile               # Multi-stage build
+├── pom.xml                  # Maven configuration
+└── config.properties        # Trading parameters
+```
+
+## ⚙️ Configuration (config.properties)
+
+```properties
+# Kraken Trading
+KRAKEN_STOP_LOSS_PERCENT=0.5
+KRAKEN_TAKE_PROFIT_PERCENT=0.75
+KRAKEN_CYCLE_INTERVAL_MS=10000
+
+# Grid Trading
+GRID_ORDER_SIZE=100.0
+GRID_VOLATILITY_THRESHOLD=0.02
+
+# Alpaca Profiles
+MAIN_TAKE_PROFIT_PERCENT=0.02
+MAIN_STOP_LOSS_PERCENT=0.01
+```
+
+## 🔒 Security Notes
+- API keys stored in `config.properties` (git-ignored)
+- Use `config.properties.template` as reference
+- Cloud Run uses Secret Manager (recommended for production)
 
 ---
 
-## 👨‍💻 About the Author
-Built by [Ihor Petrov] as a specialized research project into **Low-Latency Java Systems** and **React-based Financial Visualization**. Open to consulting in FinTech, Algo-Trading, and High-Performance Systems.
+## 👨‍💻 Author
+Built by **Ihor Petrov** as a research project in **Low-Latency Java Systems** and **Algorithmic Trading**.
+
+Open to consulting in FinTech, Algo-Trading, and High-Performance Systems.

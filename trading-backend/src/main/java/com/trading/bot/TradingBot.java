@@ -38,6 +38,9 @@ public final class TradingBot {
     private static com.trading.protection.HeartbeatMonitor heartbeatMonitor;
     private static com.trading.protection.EmergencyProtocol emergencyProtocol;
     
+    // Kraken trading loop reference for API access
+    private static com.trading.crypto.KrakenTradingLoop krakenTradingLoop;
+    
     // Symbol selector will be initialized in main() based on config
     private static SymbolSelector symbolSelector;
     
@@ -220,6 +223,7 @@ public final class TradingBot {
             config.getKrakenPositionSizeUsd(),     // Configurable position size
             config.getKrakenCycleIntervalMs()      // Configurable cycle interval
         );
+        krakenTradingLoop = krakenLoop; // Store reference for API access
         Thread krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoop);
         logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
         
@@ -952,6 +956,13 @@ public final class TradingBot {
             return heartbeatMonitor.getDetails();
         }
         return new HashMap<>();
+    }
+    
+    /**
+     * Get the Kraken trading loop for API access to tracked positions.
+     */
+    public static com.trading.crypto.KrakenTradingLoop getKrakenTradingLoop() {
+        return krakenTradingLoop;
     }
 
     public static void beat(String component) {

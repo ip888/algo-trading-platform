@@ -23,6 +23,7 @@ public final class KrakenController {
         app.get("/api/kraken/status", this::getKrakenStatus);
         app.get("/api/kraken/grid", this::getGridStatus);
         app.get("/api/kraken/holdings", this::getKrakenHoldings);
+        app.post("/api/kraken/liquidate-losers", this::liquidateLosers);
     }
     
     /**
@@ -212,6 +213,162 @@ public final class KrakenController {
         } catch (Exception e) {
             logger.error("Failed to fetch Kraken holdings", e);
             ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+    
+    /**
+     * Liquidate only losing Kraken positions.
+     * Sells crypto holdings that have negative P&L (based on tracked entry prices).
+     * Preserves profitable positions.
+     */
+    private void liquidateLosers(Context ctx) {
+        logger.warn("🦑 KRAKEN LIQUIDATE LOSERS - Requested from Dashboard");
+        
+        try {
+            var krakenClient = new KrakenClient();
+            
+            if (!krakenClient.isConfigured()) {
+                ctx.status(503).json(Map.of(
+                    "error", "Kraken not configured",
+                    "message", "Set KRAKEN_API_KEY and KRAKEN_API_SECRET"
+                ));
+                return;
+            }
+            
+            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            
+            // Get tracked positions from the trading loop
+            var krakenLoop = com.trading.bot.TradingBot.getKrakenTradingLoop();
+            var trackedPositions = krakenLoop != null ? krakenLoop.getPositions() : new java.util.concurrent.ConcurrentHashMap<String, com.trading.risk.TradePosition>();
+            
+            // Get current balance
+            var balanceJson = objectMapper.readTree(krakenClient.getBalanceAsync().join());
+            var assets = balanceJson.get("result");
+            
+            if (assets == null || assets.isEmpty()) {
+                ctx.json(Map.of(
+                    "status", "no_positions",
+                    "message", "No crypto holdings to liquidate",
+                    "sold", java.util.Collections.emptyList()
+                ));
+                return;
+            }
+            
+            // Map Kraken symbols to trading pairs
+            var symbolMap = Map.of(
+                "XXRP", "XXRPZUSD",
+                "XXDG", "XDGUSD",
+                "SOL", "SOLUSD",
+                "XXBT", "XXBTZUSD",
+                "XETH", "XETHZUSD",
+                "XBT", "XXBTZUSD"
+            );
+            
+            var sold = new java.util.ArrayList<Map<String, Object>>();
+            var preserved = new java.util.ArrayList<Map<String, Object>>();
+            
+            var fields = assets.fieldNames();
+            while (fields.hasNext()) {
+                var symbol = fields.next();
+                
+                // Skip USD balances
+                if (symbol.contains("USD") || symbol.equals("ZUSD")) continue;
+                
+                double amount = assets.get(symbol).asDouble();
+                if (amount < 0.0001) continue; // Skip dust
+                
+                String tradingPair = symbolMap.get(symbol);
+                if (tradingPair == null) {
+                    logger.warn("Unknown symbol {}, skipping", symbol);
+                    continue;
+                }
+                
+                try {
+                    // Get current price
+                    var tickerJson = objectMapper.readTree(krakenClient.getTickerAsync(tradingPair).join());
+                    var tickerResult = tickerJson.get("result");
+                    
+                    if (tickerResult == null || !tickerResult.has(tradingPair)) {
+                        logger.warn("No ticker data for {}", tradingPair);
+                        continue;
+                    }
+                    
+                    var ticker = tickerResult.get(tradingPair);
+                    double currentPrice = ticker.get("c").get(0).asDouble();
+                    
+                    // Determine P&L
+                    double entryPrice = currentPrice; // Default to current if not tracked
+                    double pnlPercent = 0.0;
+                    
+                    // Check tracked positions for entry price
+                    String normalizedSymbol = symbol.replaceAll("^X+", ""); // Remove leading X's
+                    for (var entry : trackedPositions.entrySet()) {
+                        if (entry.getKey().contains(normalizedSymbol) || entry.getKey().contains(symbol)) {
+                            entryPrice = entry.getValue().entryPrice();
+                            pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+                            break;
+                        }
+                    }
+                    
+                    // If not found in tracked positions, use 24h open as proxy
+                    if (pnlPercent == 0.0) {
+                        double openPrice = ticker.get("o").asDouble();
+                        pnlPercent = ((currentPrice - openPrice) / openPrice) * 100;
+                        entryPrice = openPrice;
+                    }
+                    
+                    double value = currentPrice * amount;
+                    
+                    if (pnlPercent < 0) {
+                        // SELL - Position is losing
+                        logger.warn("🔴 SELLING {} @ ${} (P&L: {:.2f}%)", symbol, currentPrice, pnlPercent);
+                        
+                        String orderResult = krakenClient.placeMarketOrderAsync(tradingPair, "sell", amount).join();
+                        
+                        sold.add(Map.of(
+                            "symbol", symbol,
+                            "amount", amount,
+                            "price", currentPrice,
+                            "value", value,
+                            "pnlPercent", pnlPercent,
+                            "entryPrice", entryPrice,
+                            "orderResult", orderResult.contains("ERROR") ? "FAILED" : "SOLD"
+                        ));
+                        
+                    } else {
+                        // PRESERVE - Position is profitable or breakeven
+                        logger.info("🟢 PRESERVING {} @ ${} (P&L: +{:.2f}%)", symbol, currentPrice, pnlPercent);
+                        
+                        preserved.add(Map.of(
+                            "symbol", symbol,
+                            "amount", amount,
+                            "price", currentPrice,
+                            "value", value,
+                            "pnlPercent", pnlPercent,
+                            "entryPrice", entryPrice
+                        ));
+                    }
+                    
+                } catch (Exception e) {
+                    logger.error("Failed to process {}: {}", symbol, e.getMessage());
+                }
+            }
+            
+            logger.warn("🦑 Liquidate Losers Complete: {} sold, {} preserved", sold.size(), preserved.size());
+            
+            ctx.json(Map.of(
+                "status", "completed",
+                "sold", sold,
+                "preserved", preserved,
+                "summary", String.format("Sold %d losing positions, preserved %d profitable positions", sold.size(), preserved.size())
+            ));
+            
+        } catch (Exception e) {
+            logger.error("Failed to liquidate losers", e);
+            ctx.status(500).json(Map.of(
+                "error", "Failed to liquidate losers",
+                "message", e.getMessage()
+            ));
         }
     }
 }

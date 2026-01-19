@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { RefreshCw, CheckCircle, AlertTriangle, CloudOff, TrendingUp, TrendingDown } from 'lucide-react';
+import { RefreshCw, CheckCircle, AlertTriangle, CloudOff, TrendingUp, TrendingDown, Trash2 } from 'lucide-react';
 
 interface KrakenBalance {
     assets: Record<string, string> | null;
@@ -37,6 +37,13 @@ interface GridStatus {
     performanceStats: Record<string, { wins: number; losses: number; winRate: number }>;
 }
 
+interface LiquidateResult {
+    status: string;
+    sold: Array<{ symbol: string; amount: number; pnlPercent: number }>;
+    preserved: Array<{ symbol: string; amount: number; pnlPercent: number }>;
+    summary: string;
+}
+
 import { CONFIG } from '../config';
 
 const KrakenWidget: React.FC = () => {
@@ -46,6 +53,8 @@ const KrakenWidget: React.FC = () => {
     const [_gridStatus, setGridStatus] = useState<GridStatus | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState<boolean>(true);
+    const [liquidating, setLiquidating] = useState<boolean>(false);
+    const [liquidateResult, setLiquidateResult] = useState<LiquidateResult | null>(null);
 
     const fetchBalance = async () => {
         try {
@@ -99,6 +108,38 @@ const KrakenWidget: React.FC = () => {
         }
     };
 
+    const handleLiquidateLosers = async () => {
+        if (!window.confirm('🦑 Sell all LOSING crypto positions?\n\nThis will:\n• Sell holdings with negative P&L\n• Preserve profitable positions\n• Does NOT affect Alpaca stocks')) {
+            return;
+        }
+        
+        setLiquidating(true);
+        setLiquidateResult(null);
+        
+        try {
+            const response = await fetch(`${CONFIG.API_BASE_URL}/api/kraken/liquidate-losers`, {
+                method: 'POST'
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                setLiquidateResult(result);
+                // Refresh balance after liquidation
+                setTimeout(() => {
+                    fetchBalance();
+                    fetchHoldings();
+                }, 2000);
+            } else {
+                const error = await response.json();
+                alert(`Failed: ${error.message || 'Unknown error'}`);
+            }
+        } catch (err) {
+            alert(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        } finally {
+            setLiquidating(false);
+        }
+    };
+
     useEffect(() => {
         fetchBalance();
         fetchHoldings();
@@ -125,14 +166,64 @@ const KrakenWidget: React.FC = () => {
                     <span className="text-2xl">🦑</span>
                     <h3 className="font-bold text-white">Kraken Status</h3>
                 </div>
-                {loading ? (
-                    <RefreshCw className="w-4 h-4 text-blue-400 animate-spin" />
-                ) : error ? (
-                    <CloudOff className="w-4 h-4 text-red-400" />
-                ) : (
-                    <CheckCircle className="w-4 h-4 text-green-400" />
-                )}
+                <div className="flex items-center gap-2">
+                    {/* Liquidate Losers Button */}
+                    {!error && balance && holdings.some(h => h.changePercent < 0) && (
+                        <button
+                            onClick={handleLiquidateLosers}
+                            disabled={liquidating}
+                            className={`flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors ${
+                                liquidating 
+                                    ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                                    : 'bg-red-600/80 hover:bg-red-600 text-white'
+                            }`}
+                            title="Sell only losing positions (preserves profitable ones)"
+                        >
+                            {liquidating ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                            ) : (
+                                <Trash2 className="w-3 h-3" />
+                            )}
+                            <span>{liquidating ? 'Selling...' : 'Sell Losers'}</span>
+                        </button>
+                    )}
+                    {loading ? (
+                        <RefreshCw className="w-4 h-4 text-blue-400 animate-spin" />
+                    ) : error ? (
+                        <CloudOff className="w-4 h-4 text-red-400" />
+                    ) : (
+                        <CheckCircle className="w-4 h-4 text-green-400" />
+                    )}
+                </div>
             </div>
+
+            {/* Liquidation Result Banner */}
+            {liquidateResult && (
+                <div className={`mb-3 p-2 rounded text-xs ${
+                    liquidateResult.sold.length > 0 ? 'bg-red-900/30 border border-red-700' : 'bg-green-900/30 border border-green-700'
+                }`}>
+                    <div className="font-semibold mb-1">
+                        {liquidateResult.sold.length > 0 ? '🔴 Sold Losers' : '✅ No Losers Found'}
+                    </div>
+                    <div className="text-gray-300">{liquidateResult.summary}</div>
+                    {liquidateResult.sold.length > 0 && (
+                        <div className="mt-1 text-red-400">
+                            Sold: {liquidateResult.sold.map(s => `${s.symbol} (${s.pnlPercent.toFixed(2)}%)`).join(', ')}
+                        </div>
+                    )}
+                    {liquidateResult.preserved.length > 0 && (
+                        <div className="mt-1 text-green-400">
+                            Kept: {liquidateResult.preserved.map(p => `${p.symbol} (+${p.pnlPercent.toFixed(2)}%)`).join(', ')}
+                        </div>
+                    )}
+                    <button 
+                        onClick={() => setLiquidateResult(null)}
+                        className="mt-2 text-gray-500 hover:text-gray-300 text-xs"
+                    >
+                        Dismiss
+                    </button>
+                </div>
+            )}
 
             {error ? (
                 <div className="flex flex-col gap-2 text-amber-300 text-sm bg-amber-900/20 p-3 rounded">

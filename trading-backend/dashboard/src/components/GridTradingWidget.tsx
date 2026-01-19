@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { CONFIG } from '../config';
 
 interface SymbolStats {
   wins: number;
@@ -31,7 +32,7 @@ export function GridTradingWidget() {
 
   const fetchGridStatus = async () => {
     try {
-      const response = await fetch('http://localhost:8080/api/kraken/grid');
+      const response = await fetch(`${CONFIG.API_BASE_URL}/api/kraken/grid`);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }

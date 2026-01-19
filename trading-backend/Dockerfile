@@ -1,18 +1,23 @@
-# Build Stage
-FROM ghcr.io/graalvm/jdk-community:25 AS build
+# Build Stage - Ubuntu with OpenJDK 25
+FROM ubuntu:24.04 AS build
 WORKDIR /app
 
-# Oracle Linux 9 uses microdnf. Download Maven manually to avoid extra JDK dependencies.
-# Also install Node.js for building the dashboard
-RUN microdnf install -y tar gzip curl ca-certificates nodejs npm && \
+# Install Java 25.0.1, Maven, and Node.js
+RUN apt-get update && apt-get install -y curl wget nodejs npm && \
+    wget -q https://download.java.net/java/GA/jdk25.0.1/2fbf10d8c78e40bd87641c434705079d/8/GPL/openjdk-25.0.1_linux-x64_bin.tar.gz && \
+    mkdir -p /opt/java && \
+    tar -xzf openjdk-25.0.1_linux-x64_bin.tar.gz -C /opt/java --strip-components=1 && \
+    rm openjdk-25.0.1_linux-x64_bin.tar.gz && \
     curl -o maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz && \
     mkdir -p /opt/maven && \
     tar -xzf maven.tar.gz -C /opt/maven --strip-components=1 && \
-    rm maven.tar.gz
+    rm maven.tar.gz && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENV PATH=/opt/maven/bin:$PATH
+ENV JAVA_HOME=/opt/java
+ENV PATH=/opt/java/bin:/opt/maven/bin:$PATH
 
-# Verify only 1 JDK exists (should be 25)
+# Verify Java 25
 RUN java -version
 
 # Copy everything
@@ -26,12 +31,20 @@ RUN cd dashboard && npm ci && npm run build && \
 # Now build JAR with embedded dashboard
 RUN mvn -B clean package -DskipTests
 
-# Run Stage
-FROM ghcr.io/graalvm/jdk-community:25
+# Run Stage - Ubuntu with OpenJDK 25
+FROM ubuntu:24.04
 WORKDIR /app
 
-# Install curl for healthchecks
-RUN microdnf install -y curl && microdnf clean all
+# Install Java 25.0.1 and curl for healthchecks
+RUN apt-get update && apt-get install -y curl wget && \
+    wget -q https://download.java.net/java/GA/jdk25.0.1/2fbf10d8c78e40bd87641c434705079d/8/GPL/openjdk-25.0.1_linux-x64_bin.tar.gz && \
+    mkdir -p /opt/java && \
+    tar -xzf openjdk-25.0.1_linux-x64_bin.tar.gz -C /opt/java --strip-components=1 && \
+    rm openjdk-25.0.1_linux-x64_bin.tar.gz && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/opt/java
+ENV PATH=/opt/java/bin:$PATH
 
 COPY --from=build /app/target/trading-backend-1.0-SNAPSHOT.jar app.jar
 COPY --from=build /app/config.properties config.properties

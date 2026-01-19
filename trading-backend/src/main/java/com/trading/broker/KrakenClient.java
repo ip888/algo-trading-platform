@@ -65,8 +65,11 @@ public class KrakenClient {
     private static volatile long minuteStartTime = 0;
     private static final int MAX_CALLS_PER_MINUTE = 8;  // Very conservative limit (Kraken allows 15)
     
-    // Backoff for rate limit errors
+    // Backoff for rate limit errors - EXPONENTIAL BACKOFF
     private static volatile long rateLimitBackoffUntil = 0;
+    private static volatile long currentBackoffSeconds = 120;  // Start at 2 minutes
+    private static final long MAX_BACKOFF_SECONDS = 600;  // Max 10 minutes
+    private static volatile long lastSuccessfulCall = System.currentTimeMillis();
     
     public KrakenClient() {
         this.httpClient = HttpClient.newBuilder()
@@ -158,13 +161,23 @@ public class KrakenClient {
     /**
      * Enhanced error handling for Kraken API errors
      * Source: https://support.kraken.com/articles/360001491786
+     * 
+     * CRITICAL: Also triggers EXPONENTIAL rate limit backoff when appropriate
      */
     private String handleKrakenError(String errorCode) {
+        // Trigger EXPONENTIAL backoff for rate limit errors
+        if (errorCode.contains("Rate limit")) {
+            // Double the backoff each time, capped at MAX_BACKOFF_SECONDS
+            currentBackoffSeconds = Math.min(currentBackoffSeconds * 2, MAX_BACKOFF_SECONDS);
+            rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
+            logger.warn("🛑 Rate limit detected! Setting {}-second exponential backoff", currentBackoffSeconds);
+        }
+        
         return switch (errorCode) {
             case "EOrder:Insufficient funds" -> 
                 "Insufficient funds. Check: 1) Open orders locking funds, 2) Deposit holds, 3) Minimum order size";
             case "EAPI:Rate limit exceeded" -> 
-                "Rate limit exceeded. Backing off for 60 seconds...";
+                "Rate limit exceeded. Backing off for " + currentBackoffSeconds + " seconds...";
             case "EOrder:Order minimum not met" -> 
                 "Order below minimum size. Check pair-specific minimums.";
             case "EGeneral:Temporary lockout" -> 
@@ -566,6 +579,16 @@ public class KrakenClient {
         
         // Rate limiting check
         if (!checkRateLimit()) {
+            // If in backoff period, return error immediately instead of making the call
+            long now = System.currentTimeMillis();
+            if (now < rateLimitBackoffUntil) {
+                long waitTime = (rateLimitBackoffUntil - now) / 1000;
+                logger.debug("⏳ Skipping Kraken call - rate limit backoff: {}s remaining", waitTime);
+                return CompletableFuture.completedFuture(
+                    "{\"error\":[\"EAPI:Rate limit exceeded\"],\"backoff\":" + waitTime + "}");
+            }
+            
+            // Otherwise just delay (hitting per-minute or per-call limits)
             logger.warn("⚠️ Rate limit protection: delaying Kraken API call");
             try {
                 Thread.sleep(MIN_CALL_INTERVAL_MS);
@@ -599,7 +622,25 @@ public class KrakenClient {
                 .orTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                 .thenApply(response -> {
                     recordApiCall();
-                    return response.body();
+                    String body = response.body();
+                    
+                    // Check if response is successful (no errors)
+                    // Reset exponential backoff on success
+                    try {
+                        var json = objectMapper.readTree(body);
+                        if (!json.has("error") || json.get("error").size() == 0) {
+                            // Success! Reset backoff
+                            if (currentBackoffSeconds > 120) {
+                                logger.info("✅ Kraken API call successful! Resetting backoff to 2 minutes");
+                                currentBackoffSeconds = 120;
+                            }
+                            lastSuccessfulCall = System.currentTimeMillis();
+                        }
+                    } catch (Exception e) {
+                        // Ignore parsing errors here
+                    }
+                    
+                    return body;
                 })
                 .exceptionally(ex -> {
                     logger.error("Kraken Private Request Failed: {}", ex.getMessage());

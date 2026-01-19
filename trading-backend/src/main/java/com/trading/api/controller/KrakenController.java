@@ -12,11 +12,16 @@ import java.util.Map;
 
 /**
  * Kraken API Controller
- * Handles crypto trading endpoints for Kraken exchange
+ * Handles crypto trading endpoints for Kraken exchange.
+ * 
+ * RATE LIMIT STRATEGY: All read-only endpoints use KrakenDataCache which batches
+ * Kraken API calls into a single refresh every 60 seconds. This prevents the
+ * dashboard from exceeding Kraken's ~15 calls/minute limit.
  */
 public final class KrakenController {
     private static final Logger logger = LoggerFactory.getLogger(KrakenController.class);
     private GridTradingService gridTradingService;
+    private final KrakenDataCache dataCache = KrakenDataCache.getInstance();
     
     public void registerRoutes(Javalin app) {
         app.get("/api/kraken/balance", this::getKrakenBalance);
@@ -37,6 +42,7 @@ public final class KrakenController {
     
     /**
      * Get Kraken balance (crypto trading).
+     * Uses centralized cache to prevent rate limit issues.
      */
     private void getKrakenBalance(Context ctx) {
         try {
@@ -50,40 +56,9 @@ public final class KrakenController {
                 return;
             }
             
-            // Fetch both balance and trade balance
-            var balanceFuture = krakenClient.getBalanceAsync();
-            var tradeBalanceFuture = krakenClient.getTradeBalanceAsync();
-            
-            // Wait for both
-            var balance = balanceFuture.join();
-            var tradeBalance = tradeBalanceFuture.join();
-            
-            // Parse and combine
-            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            var balanceJson = objectMapper.readTree(balance);
-            var tradeBalanceJson = objectMapper.readTree(tradeBalance);
-            
-            var response = new HashMap<String, Object>();
-            
-            // Check for Kraken API errors
-            if (balanceJson.has("error") && balanceJson.get("error").size() > 0) {
-                String error = balanceJson.get("error").get(0).asText();
-                logger.warn("Kraken Balance API error: {}", error);
-                response.put("assets", null);
-                response.put("error", error);
-            } else {
-                response.put("assets", balanceJson.get("result"));
-            }
-            
-            if (tradeBalanceJson.has("error") && tradeBalanceJson.get("error").size() > 0) {
-                String error = tradeBalanceJson.get("error").get(0).asText();
-                logger.warn("Kraken TradeBalance API error: {}", error);
-                response.put("tradeBalance", null);
-                response.put("tradeBalanceError", error);
-            } else {
-                response.put("tradeBalance", tradeBalanceJson.get("result"));
-            }
-            
+            // Use cached response
+            var response = dataCache.getBalanceResponse();
+            response.put("cacheAgeSeconds", dataCache.getCacheAgeSeconds());
             ctx.json(response);
             
         } catch (Exception e) {
@@ -131,7 +106,7 @@ public final class KrakenController {
     
     /**
      * Get Kraken holdings with live prices and 24h change.
-     * Shows each asset with current price, value, and direction (up/down).
+     * Uses centralized cache to prevent rate limit issues.
      */
     private void getKrakenHoldings(Context ctx) {
         try {
@@ -142,91 +117,8 @@ public final class KrakenController {
                 return;
             }
             
-            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            
-            // Fetch balance
-            var balanceJson = objectMapper.readTree(krakenClient.getBalanceAsync().join());
-            var assets = balanceJson.get("result");
-            
-            if (assets == null || assets.isEmpty()) {
-                ctx.json(java.util.Collections.emptyList());
-                return;
-            }
-            
-            var holdings = new java.util.ArrayList<Map<String, Object>>();
-            
-            // Map Kraken symbols to trading pairs
-            var symbolMap = Map.of(
-                "XXRP", "XXRPZUSD",
-                "XXDG", "XDGUSD", // DOGE
-                "SOL", "SOLUSD",
-                "XXBT", "XXBTZUSD", // BTC
-                "XETH", "XETHZUSD", // ETH
-                "XBT", "XXBTZUSD"
-            );
-            
-            var displayNames = Map.of(
-                "XXRP", "XRP",
-                "XXDG", "DOGE",
-                "SOL", "SOL",
-                "XXBT", "BTC",
-                "XETH", "ETH",
-                "XBT", "BTC"
-            );
-            
-            var fields = assets.fieldNames();
-            while (fields.hasNext()) {
-                var symbol = fields.next();
-                
-                // Skip USD balances
-                if (symbol.contains("USD") || symbol.equals("ZUSD")) continue;
-                
-                double amount = assets.get(symbol).asDouble();
-                if (amount < 0.0001) continue; // Skip dust
-                
-                var holding = new HashMap<String, Object>();
-                holding.put("symbol", symbol);
-                holding.put("displayName", displayNames.getOrDefault(symbol, symbol));
-                holding.put("amount", amount);
-                
-                // Get ticker for this asset
-                String tradingPair = symbolMap.get(symbol);
-                if (tradingPair != null) {
-                    try {
-                        var tickerJson = objectMapper.readTree(krakenClient.getTickerAsync(tradingPair).join());
-                        var tickerResult = tickerJson.get("result");
-                        
-                        if (tickerResult != null && tickerResult.has(tradingPair)) {
-                            var ticker = tickerResult.get(tradingPair);
-                            
-                            // c = last trade closed [price, volume]
-                            double currentPrice = ticker.get("c").get(0).asDouble();
-                            // o = today's opening price
-                            double openPrice = ticker.get("o").asDouble();
-                            // h = today's high [today, 24h]
-                            double high24h = ticker.get("h").get(1).asDouble();
-                            // l = today's low [today, 24h]
-                            double low24h = ticker.get("l").get(1).asDouble();
-                            
-                            double change24h = currentPrice - openPrice;
-                            double changePercent = openPrice > 0 ? (change24h / openPrice) * 100 : 0;
-                            
-                            holding.put("price", currentPrice);
-                            holding.put("value", currentPrice * amount);
-                            holding.put("change24h", change24h);
-                            holding.put("changePercent", changePercent);
-                            holding.put("high24h", high24h);
-                            holding.put("low24h", low24h);
-                            holding.put("direction", change24h >= 0 ? "up" : "down");
-                        }
-                    } catch (Exception e) {
-                        logger.warn("Failed to fetch ticker for {}: {}", tradingPair, e.getMessage());
-                    }
-                }
-                
-                holdings.add(holding);
-            }
-            
+            // Use cached response
+            var holdings = dataCache.getHoldingsResponse();
             ctx.json(holdings);
             
         } catch (Exception e) {
@@ -375,6 +267,9 @@ public final class KrakenController {
             
             logger.warn("🦑 Liquidate Losers Complete: {} sold, {} preserved", sold.size(), preserved.size());
             
+            // Invalidate cache after trading action
+            dataCache.invalidate();
+            
             ctx.json(Map.of(
                 "status", "completed",
                 "sold", sold,
@@ -393,7 +288,7 @@ public final class KrakenController {
     
     /**
      * Get recent trades history from Kraken.
-     * Returns last 50 trades with PnL data.
+     * Uses centralized cache to prevent rate limit issues.
      */
     private void getTradesHistory(Context ctx) {
         try {
@@ -404,70 +299,8 @@ public final class KrakenController {
                 return;
             }
             
-            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            var tradesJson = objectMapper.readTree(krakenClient.getTradesHistoryAsync().join());
-            var tradesResult = tradesJson.get("result");
-            
-            if (tradesResult == null || !tradesResult.has("trades")) {
-                ctx.json(Map.of("trades", java.util.Collections.emptyList()));
-                return;
-            }
-            
-            var trades = new java.util.ArrayList<Map<String, Object>>();
-            var tradesNode = tradesResult.get("trades");
-            
-            // Convert trades to sorted list
-            var tradeList = new java.util.ArrayList<Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>>();
-            tradesNode.fields().forEachRemaining(tradeList::add);
-            
-            // Sort by time descending (most recent first)
-            tradeList.sort((a, b) -> Double.compare(
-                b.getValue().get("time").asDouble(),
-                a.getValue().get("time").asDouble()
-            ));
-            
-            // Take last 50 trades
-            int count = 0;
-            for (var entry : tradeList) {
-                if (count++ >= 50) break;
-                
-                var trade = entry.getValue();
-                var tradeMap = new HashMap<String, Object>();
-                
-                tradeMap.put("id", entry.getKey());
-                tradeMap.put("pair", trade.get("pair").asText());
-                tradeMap.put("type", trade.get("type").asText()); // buy/sell
-                tradeMap.put("price", trade.get("price").asDouble());
-                tradeMap.put("volume", trade.get("vol").asDouble());
-                tradeMap.put("cost", trade.get("cost").asDouble());
-                tradeMap.put("fee", trade.get("fee").asDouble());
-                tradeMap.put("time", trade.get("time").asDouble());
-                tradeMap.put("ordertype", trade.get("ordertype").asText());
-                
-                // Format readable timestamp
-                long epochSeconds = (long) trade.get("time").asDouble();
-                var instant = java.time.Instant.ofEpochSecond(epochSeconds);
-                var formatted = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm")
-                    .withZone(java.time.ZoneId.systemDefault())
-                    .format(instant);
-                tradeMap.put("formattedTime", formatted);
-                
-                // Map Kraken pair to readable symbol
-                String pair = trade.get("pair").asText();
-                String symbol = switch (pair) {
-                    case "XXBTZUSD" -> "BTC/USD";
-                    case "XETHZUSD" -> "ETH/USD";
-                    case "SOLUSD" -> "SOL/USD";
-                    case "XDGUSD" -> "DOGE/USD";
-                    case "XXRPZUSD" -> "XRP/USD";
-                    default -> pair;
-                };
-                tradeMap.put("symbol", symbol);
-                
-                trades.add(tradeMap);
-            }
-            
-            ctx.json(Map.of("trades", trades, "count", trades.size()));
+            // Use cached response
+            ctx.json(dataCache.getTradesResponse());
             
         } catch (Exception e) {
             logger.error("Failed to fetch trades history", e);
@@ -477,7 +310,7 @@ public final class KrakenController {
     
     /**
      * Get Kraken capital deployment summary.
-     * Shows total capital, deployed capital, available capital, and position breakdown.
+     * Uses centralized cache to prevent rate limit issues.
      */
     private void getCapitalDeployment(Context ctx) {
         try {
@@ -488,76 +321,8 @@ public final class KrakenController {
                 return;
             }
             
-            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            
-            // Fetch balance and trade balance
-            var balanceFuture = krakenClient.getBalanceAsync();
-            var tradeBalanceFuture = krakenClient.getTradeBalanceAsync();
-            
-            var balanceJson = objectMapper.readTree(balanceFuture.join());
-            var tradeBalanceJson = objectMapper.readTree(tradeBalanceFuture.join());
-            
-            var assets = balanceJson.get("result");
-            var tb = tradeBalanceJson.get("result");
-            
-            // Calculate deployed capital
-            double totalEquity = tb != null && tb.has("eb") ? tb.get("eb").asDouble() : 0;
-            double freeMargin = tb != null && tb.has("mf") ? tb.get("mf").asDouble() : 0;
-            double deployedCapital = totalEquity - freeMargin;
-            double deploymentPercent = totalEquity > 0 ? (deployedCapital / totalEquity) * 100 : 0;
-            
-            // Build positions breakdown
-            var positions = new java.util.ArrayList<Map<String, Object>>();
-            
-            if (assets != null) {
-                var symbolMap = Map.of(
-                    "XXRP", "XXRPZUSD", "XXDG", "XDGUSD", "SOL", "SOLUSD",
-                    "XXBT", "XXBTZUSD", "XETH", "XETHZUSD", "XBT", "XXBTZUSD"
-                );
-                var displayNames = Map.of(
-                    "XXRP", "XRP", "XXDG", "DOGE", "SOL", "SOL",
-                    "XXBT", "BTC", "XETH", "ETH", "XBT", "BTC"
-                );
-                
-                var fields = assets.fieldNames();
-                while (fields.hasNext()) {
-                    var symbol = fields.next();
-                    if (symbol.contains("USD") || symbol.equals("ZUSD")) continue;
-                    
-                    double amount = assets.get(symbol).asDouble();
-                    if (amount < 0.0001) continue;
-                    
-                    var pos = new HashMap<String, Object>();
-                    pos.put("asset", displayNames.getOrDefault(symbol, symbol));
-                    pos.put("amount", amount);
-                    
-                    // Get current price
-                    String tradingPair = symbolMap.get(symbol);
-                    if (tradingPair != null) {
-                        try {
-                            var tickerJson = objectMapper.readTree(krakenClient.getTickerAsync(tradingPair).join());
-                            var tickerResult = tickerJson.get("result");
-                            if (tickerResult != null && tickerResult.has(tradingPair)) {
-                                double price = tickerResult.get(tradingPair).get("c").get(0).asDouble();
-                                double value = price * amount;
-                                pos.put("price", price);
-                                pos.put("value", value);
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                    
-                    positions.add(pos);
-                }
-            }
-            
-            ctx.json(Map.of(
-                "totalEquity", totalEquity,
-                "freeMargin", freeMargin,
-                "deployedCapital", deployedCapital,
-                "deploymentPercent", deploymentPercent,
-                "positions", positions,
-                "positionCount", positions.size()
-            ));
+            // Use cached response
+            ctx.json(dataCache.getCapitalResponse());
             
         } catch (Exception e) {
             logger.error("Failed to fetch capital deployment", e);

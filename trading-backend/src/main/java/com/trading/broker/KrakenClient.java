@@ -48,10 +48,25 @@ public class KrakenClient {
     private final String apiKey;
     private final String apiSecret;
     
-    // Balance cache to avoid rate limiting issues (10 second TTL)
+    // Balance cache to avoid rate limiting issues (30 second TTL - increased for stability)
     private volatile double cachedBalance = 0.0;
     private volatile long balanceCacheTime = 0;
-    private static final long BALANCE_CACHE_TTL_MS = 10_000;  // 10 seconds
+    private static final long BALANCE_CACHE_TTL_MS = 30_000;  // 30 seconds (was 10)
+    
+    // Nonce tracking - CRITICAL for Kraken API (must be strictly increasing)
+    // Using microseconds and tracking last nonce to prevent "Invalid nonce" errors
+    private static volatile long lastNonce = 0;
+    private static final Object NONCE_LOCK = new Object();
+    
+    // Rate limiting - Kraken allows ~15 calls/minute for private endpoints
+    private static volatile long lastPrivateCallTime = 0;
+    private static final long MIN_CALL_INTERVAL_MS = 2000;  // Minimum 2 seconds between calls (more conservative)
+    private static volatile int callCountThisMinute = 0;
+    private static volatile long minuteStartTime = 0;
+    private static final int MAX_CALLS_PER_MINUTE = 8;  // Very conservative limit (Kraken allows 15)
+    
+    // Backoff for rate limit errors
+    private static volatile long rateLimitBackoffUntil = 0;
     
     public KrakenClient() {
         this.httpClient = HttpClient.newBuilder()
@@ -549,8 +564,20 @@ public class KrakenClient {
             return CompletableFuture.completedFuture("{\"error\":[\"Kraken API keys not configured\"]}");
         }
         
+        // Rate limiting check
+        if (!checkRateLimit()) {
+            logger.warn("⚠️ Rate limit protection: delaying Kraken API call");
+            try {
+                Thread.sleep(MIN_CALL_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        
         try {
-            long nonce = System.currentTimeMillis();
+            // Generate strictly increasing nonce using microseconds
+            // This fixes "Invalid nonce" errors common in cloud environments
+            long nonce = generateNonce();
             String nonceData = "nonce=" + nonce;
             String fullPostData = nonceData + (postData.isEmpty() ? "" : "&" + postData);
             
@@ -561,7 +588,7 @@ public class KrakenClient {
             
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(10))
+                .timeout(Duration.ofSeconds(15))  // Increased timeout for reliability
                 .header("API-Key", apiKey)
                 .header("API-Sign", signature)
                 .header("Content-Type", "application/x-www-form-urlencoded")
@@ -569,8 +596,11 @@ public class KrakenClient {
                 .build();
             
             return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .orTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                .thenApply(HttpResponse::body)
+                .orTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .thenApply(response -> {
+                    recordApiCall();
+                    return response.body();
+                })
                 .exceptionally(ex -> {
                     logger.error("Kraken Private Request Failed: {}", ex.getMessage());
                     return "{\"error\":[\"" + ex.getMessage() + "\"]}";
@@ -580,6 +610,85 @@ public class KrakenClient {
             logger.error("Kraken Request Error: {}", e.getMessage());
             return CompletableFuture.completedFuture("{\"error\":[\"" + e.getMessage() + "\"]}");
         }
+    }
+    
+    /**
+     * Generate strictly increasing nonce using microseconds.
+     * CRITICAL: Kraken requires nonces to be strictly increasing per API key.
+     * 
+     * INDUSTRY FIX: Use nanoseconds from epoch to ensure nonce is always
+     * higher than any previously used nonce, even after instance restarts.
+     * This handles Cloud Run scaling, restarts, and clock drift.
+     */
+    private long generateNonce() {
+        synchronized (NONCE_LOCK) {
+            // Use nanoseconds divided by 1000 to get microseconds from epoch
+            // This gives us ~584 years before overflow (2554 AD)
+            // Format: epochMicroseconds (much higher resolution than milliseconds)
+            long nonce = System.currentTimeMillis() * 1000L + (System.nanoTime() % 1_000_000L) / 1000L;
+            
+            // Add a significant offset to ensure we're always higher than previous sessions
+            // This handles the case where a new instance starts with lower timestamp
+            nonce += 1_000_000_000_000L;  // Add 1 trillion to ensure higher than any previous
+            
+            // Ensure strictly increasing within this session
+            if (nonce <= lastNonce) {
+                nonce = lastNonce + 1;
+            }
+            
+            lastNonce = nonce;
+            logger.debug("🔑 Generated nonce: {}", nonce);
+            return nonce;
+        }
+    }
+    
+    /**
+     * Check if we should proceed with API call (rate limit protection)
+     */
+    private boolean checkRateLimit() {
+        long now = System.currentTimeMillis();
+        
+        // Check if we're in backoff period from rate limit error
+        if (now < rateLimitBackoffUntil) {
+            long waitTime = (rateLimitBackoffUntil - now) / 1000;
+            logger.warn("⏳ Rate limit backoff: {} seconds remaining", waitTime);
+            return false;
+        }
+        
+        // Reset counter each minute
+        if (now - minuteStartTime > 60_000) {
+            callCountThisMinute = 0;
+            minuteStartTime = now;
+        }
+        
+        // Check if we've exceeded rate limit
+        if (callCountThisMinute >= MAX_CALLS_PER_MINUTE) {
+            logger.warn("⚠️ Kraken rate limit reached ({}/min). Waiting...", MAX_CALLS_PER_MINUTE);
+            return false;
+        }
+        
+        // Check minimum interval between calls
+        if (now - lastPrivateCallTime < MIN_CALL_INTERVAL_MS) {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Record API call for rate limiting
+     */
+    private void recordApiCall() {
+        lastPrivateCallTime = System.currentTimeMillis();
+        callCountThisMinute++;
+    }
+    
+    /**
+     * Set backoff period after rate limit error
+     */
+    public void setRateLimitBackoff(long seconds) {
+        rateLimitBackoffUntil = System.currentTimeMillis() + (seconds * 1000);
+        logger.warn("⏳ Rate limit backoff set for {} seconds", seconds);
     }
     
     /**

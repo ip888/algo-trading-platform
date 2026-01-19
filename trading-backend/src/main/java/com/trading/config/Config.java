@@ -195,10 +195,11 @@ public final class Config {
     }
     
     /**
-     * Kraken trading loop cycle interval in milliseconds (default 15000 = 15 sec)
+     * Kraken trading loop cycle interval in milliseconds (default 30000 = 30 sec)
+     * Increased from 15s to reduce API calls and prevent rate limiting
      */
     public long getKrakenCycleIntervalMs() {
-        return Long.parseLong(getProperty("KRAKEN_CYCLE_INTERVAL_MS", "15000"));
+        return Long.parseLong(getProperty("KRAKEN_CYCLE_INTERVAL_MS", "30000"));
     }
     
     /**

@@ -64,8 +64,25 @@ public final class KrakenController {
             var tradeBalanceJson = objectMapper.readTree(tradeBalance);
             
             var response = new HashMap<String, Object>();
-            response.put("assets", balanceJson.get("result"));
-            response.put("tradeBalance", tradeBalanceJson.get("result"));
+            
+            // Check for Kraken API errors
+            if (balanceJson.has("error") && balanceJson.get("error").size() > 0) {
+                String error = balanceJson.get("error").get(0).asText();
+                logger.warn("Kraken Balance API error: {}", error);
+                response.put("assets", null);
+                response.put("error", error);
+            } else {
+                response.put("assets", balanceJson.get("result"));
+            }
+            
+            if (tradeBalanceJson.has("error") && tradeBalanceJson.get("error").size() > 0) {
+                String error = tradeBalanceJson.get("error").get(0).asText();
+                logger.warn("Kraken TradeBalance API error: {}", error);
+                response.put("tradeBalance", null);
+                response.put("tradeBalanceError", error);
+            } else {
+                response.put("tradeBalance", tradeBalanceJson.get("result"));
+            }
             
             ctx.json(response);
             

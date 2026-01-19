@@ -23,6 +23,8 @@ public final class KrakenController {
         app.get("/api/kraken/status", this::getKrakenStatus);
         app.get("/api/kraken/grid", this::getGridStatus);
         app.get("/api/kraken/holdings", this::getKrakenHoldings);
+        app.get("/api/kraken/trades", this::getTradesHistory);
+        app.get("/api/kraken/capital", this::getCapitalDeployment);
         app.post("/api/kraken/liquidate-losers", this::liquidateLosers);
     }
     
@@ -369,6 +371,180 @@ public final class KrakenController {
                 "error", "Failed to liquidate losers",
                 "message", e.getMessage()
             ));
+        }
+    }
+    
+    /**
+     * Get recent trades history from Kraken.
+     * Returns last 50 trades with PnL data.
+     */
+    private void getTradesHistory(Context ctx) {
+        try {
+            var krakenClient = new KrakenClient();
+            
+            if (!krakenClient.isConfigured()) {
+                ctx.status(503).json(Map.of("error", "Kraken not configured"));
+                return;
+            }
+            
+            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            var tradesJson = objectMapper.readTree(krakenClient.getTradesHistoryAsync().join());
+            var tradesResult = tradesJson.get("result");
+            
+            if (tradesResult == null || !tradesResult.has("trades")) {
+                ctx.json(Map.of("trades", java.util.Collections.emptyList()));
+                return;
+            }
+            
+            var trades = new java.util.ArrayList<Map<String, Object>>();
+            var tradesNode = tradesResult.get("trades");
+            
+            // Convert trades to sorted list
+            var tradeList = new java.util.ArrayList<Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>>();
+            tradesNode.fields().forEachRemaining(tradeList::add);
+            
+            // Sort by time descending (most recent first)
+            tradeList.sort((a, b) -> Double.compare(
+                b.getValue().get("time").asDouble(),
+                a.getValue().get("time").asDouble()
+            ));
+            
+            // Take last 50 trades
+            int count = 0;
+            for (var entry : tradeList) {
+                if (count++ >= 50) break;
+                
+                var trade = entry.getValue();
+                var tradeMap = new HashMap<String, Object>();
+                
+                tradeMap.put("id", entry.getKey());
+                tradeMap.put("pair", trade.get("pair").asText());
+                tradeMap.put("type", trade.get("type").asText()); // buy/sell
+                tradeMap.put("price", trade.get("price").asDouble());
+                tradeMap.put("volume", trade.get("vol").asDouble());
+                tradeMap.put("cost", trade.get("cost").asDouble());
+                tradeMap.put("fee", trade.get("fee").asDouble());
+                tradeMap.put("time", trade.get("time").asDouble());
+                tradeMap.put("ordertype", trade.get("ordertype").asText());
+                
+                // Format readable timestamp
+                long epochSeconds = (long) trade.get("time").asDouble();
+                var instant = java.time.Instant.ofEpochSecond(epochSeconds);
+                var formatted = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm")
+                    .withZone(java.time.ZoneId.systemDefault())
+                    .format(instant);
+                tradeMap.put("formattedTime", formatted);
+                
+                // Map Kraken pair to readable symbol
+                String pair = trade.get("pair").asText();
+                String symbol = switch (pair) {
+                    case "XXBTZUSD" -> "BTC/USD";
+                    case "XETHZUSD" -> "ETH/USD";
+                    case "SOLUSD" -> "SOL/USD";
+                    case "XDGUSD" -> "DOGE/USD";
+                    case "XXRPZUSD" -> "XRP/USD";
+                    default -> pair;
+                };
+                tradeMap.put("symbol", symbol);
+                
+                trades.add(tradeMap);
+            }
+            
+            ctx.json(Map.of("trades", trades, "count", trades.size()));
+            
+        } catch (Exception e) {
+            logger.error("Failed to fetch trades history", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+    
+    /**
+     * Get Kraken capital deployment summary.
+     * Shows total capital, deployed capital, available capital, and position breakdown.
+     */
+    private void getCapitalDeployment(Context ctx) {
+        try {
+            var krakenClient = new KrakenClient();
+            
+            if (!krakenClient.isConfigured()) {
+                ctx.status(503).json(Map.of("error", "Kraken not configured"));
+                return;
+            }
+            
+            var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            
+            // Fetch balance and trade balance
+            var balanceFuture = krakenClient.getBalanceAsync();
+            var tradeBalanceFuture = krakenClient.getTradeBalanceAsync();
+            
+            var balanceJson = objectMapper.readTree(balanceFuture.join());
+            var tradeBalanceJson = objectMapper.readTree(tradeBalanceFuture.join());
+            
+            var assets = balanceJson.get("result");
+            var tb = tradeBalanceJson.get("result");
+            
+            // Calculate deployed capital
+            double totalEquity = tb != null && tb.has("eb") ? tb.get("eb").asDouble() : 0;
+            double freeMargin = tb != null && tb.has("mf") ? tb.get("mf").asDouble() : 0;
+            double deployedCapital = totalEquity - freeMargin;
+            double deploymentPercent = totalEquity > 0 ? (deployedCapital / totalEquity) * 100 : 0;
+            
+            // Build positions breakdown
+            var positions = new java.util.ArrayList<Map<String, Object>>();
+            
+            if (assets != null) {
+                var symbolMap = Map.of(
+                    "XXRP", "XXRPZUSD", "XXDG", "XDGUSD", "SOL", "SOLUSD",
+                    "XXBT", "XXBTZUSD", "XETH", "XETHZUSD", "XBT", "XXBTZUSD"
+                );
+                var displayNames = Map.of(
+                    "XXRP", "XRP", "XXDG", "DOGE", "SOL", "SOL",
+                    "XXBT", "BTC", "XETH", "ETH", "XBT", "BTC"
+                );
+                
+                var fields = assets.fieldNames();
+                while (fields.hasNext()) {
+                    var symbol = fields.next();
+                    if (symbol.contains("USD") || symbol.equals("ZUSD")) continue;
+                    
+                    double amount = assets.get(symbol).asDouble();
+                    if (amount < 0.0001) continue;
+                    
+                    var pos = new HashMap<String, Object>();
+                    pos.put("asset", displayNames.getOrDefault(symbol, symbol));
+                    pos.put("amount", amount);
+                    
+                    // Get current price
+                    String tradingPair = symbolMap.get(symbol);
+                    if (tradingPair != null) {
+                        try {
+                            var tickerJson = objectMapper.readTree(krakenClient.getTickerAsync(tradingPair).join());
+                            var tickerResult = tickerJson.get("result");
+                            if (tickerResult != null && tickerResult.has(tradingPair)) {
+                                double price = tickerResult.get(tradingPair).get("c").get(0).asDouble();
+                                double value = price * amount;
+                                pos.put("price", price);
+                                pos.put("value", value);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    
+                    positions.add(pos);
+                }
+            }
+            
+            ctx.json(Map.of(
+                "totalEquity", totalEquity,
+                "freeMargin", freeMargin,
+                "deployedCapital", deployedCapital,
+                "deploymentPercent", deploymentPercent,
+                "positions", positions,
+                "positionCount", positions.size()
+            ));
+            
+        } catch (Exception e) {
+            logger.error("Failed to fetch capital deployment", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
         }
     }
 }

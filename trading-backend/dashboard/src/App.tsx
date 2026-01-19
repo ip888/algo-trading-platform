@@ -22,6 +22,7 @@ import OperationalEventsPanel from './components/OperationalEventsPanel';
 import { Activity, TrendingUp } from 'lucide-react';
 import KrakenWidget from './components/KrakenWidget';
 import GridTradingWidget from './components/GridTradingWidget';
+import { TradingActivityWidget } from './components/TradingActivityWidget';
 
 import './App.css';
 
@@ -150,6 +151,9 @@ function App() {
               </ComponentErrorBoundary>
               <ComponentErrorBoundary name="Grid Trading">
                 <GridTradingWidget />
+              </ComponentErrorBoundary>
+              <ComponentErrorBoundary name="Trading Activity">
+                <TradingActivityWidget />
               </ComponentErrorBoundary>
               <ComponentErrorBoundary name="Profit Targets">
                 <ProfitTargetsMonitor />

@@ -35,6 +35,11 @@ public class EmergencyProtocol {
     // Modern: AtomicBoolean for lock-free state management
     private final AtomicBoolean triggered = new AtomicBoolean(false);
     
+    // SAFETY: Disable auto-liquidation for Kraken on heartbeat failures
+    // Kraken trading loop has its own SL/TP management
+    // Auto-liquidation on cloud restarts causes more harm than good
+    private volatile boolean krakenAutoLiquidationEnabled = false;
+    
     // Track last execution results
     private volatile Map<String, Object> lastExecutionResult;
     private volatile long lastTriggerTime;
@@ -46,10 +51,27 @@ public class EmergencyProtocol {
     
     /**
      * Set Kraken client for crypto liquidation support.
+     * NOTE: Auto-liquidation is DISABLED by default to prevent unwanted sales
+     * on Cloud Run restarts. Use setKrakenAutoLiquidationEnabled(true) to enable.
      */
     public void setKrakenClient(KrakenClient krakenClient) {
         this.krakenClient = krakenClient;
-        logger.info("EmergencyProtocol: Kraken client configured for crypto liquidation");
+        logger.info("EmergencyProtocol: Kraken client configured (auto-liquidation: {})", 
+            krakenAutoLiquidationEnabled ? "ENABLED" : "DISABLED");
+    }
+    
+    /**
+     * Enable or disable automatic Kraken liquidation during emergency.
+     * DISABLED by default - Kraken trading loop manages its own SL/TP.
+     * Only enable for manual panic button or true emergencies.
+     */
+    public void setKrakenAutoLiquidationEnabled(boolean enabled) {
+        this.krakenAutoLiquidationEnabled = enabled;
+        logger.warn("⚠️ Kraken auto-liquidation {}", enabled ? "ENABLED - all crypto will be sold on emergency!" : "DISABLED");
+    }
+    
+    public boolean isKrakenAutoLiquidationEnabled() {
+        return krakenAutoLiquidationEnabled;
     }
 
     /**
@@ -160,78 +182,85 @@ public class EmergencyProtocol {
         
         // ===== STEP 3: Cancel ALL Kraken Orders =====
         if (krakenClient != null && krakenClient.isConfigured()) {
-            logger.warn("STEP 3: Cancelling all Kraken open orders...");
-            try {
-                String cancelResult = krakenClient.cancelAllOpenOrdersAsync().join();
-                result.put("krakenOrdersCancelled", true);
-                logger.info("✅ All Kraken orders cancelled: {}", cancelResult);
-            } catch (Exception e) {
-                logger.error("❌ Failed to cancel Kraken orders", e);
-                result.put("krakenOrdersCancelled", false);
-                result.put("krakenOrdersError", e.getMessage());
-            }
-            
-            // ===== STEP 4: Close ALL Kraken Positions =====
-            logger.warn("STEP 4: Closing all Kraken positions...");
-            try {
-                String balanceJson = krakenClient.getBalanceAsync().join();
-                JsonNode balanceNode = objectMapper.readTree(balanceJson);
-                JsonNode balanceResult = balanceNode.path("result");
+            if (!krakenAutoLiquidationEnabled) {
+                logger.warn("STEP 3-4: SKIPPING Kraken liquidation (auto-liquidation disabled)");
+                logger.warn("⚠️ Kraken positions preserved - managed by Kraken trading loop SL/TP");
+                result.put("krakenSkipped", true);
+                result.put("krakenSkipReason", "auto-liquidation disabled for safety");
+            } else {
+                logger.warn("STEP 3: Cancelling all Kraken open orders...");
+                try {
+                    String cancelResult = krakenClient.cancelAllOpenOrdersAsync().join();
+                    result.put("krakenOrdersCancelled", true);
+                    logger.info("✅ All Kraken orders cancelled: {}", cancelResult);
+                } catch (Exception e) {
+                    logger.error("❌ Failed to cancel Kraken orders", e);
+                    result.put("krakenOrdersCancelled", false);
+                    result.put("krakenOrdersError", e.getMessage());
+                }
                 
-                if (balanceResult.isObject()) {
-                    var fields = balanceResult.fields();
-                    while (fields.hasNext()) {
-                        var entry = fields.next();
-                        String asset = entry.getKey();
-                        double balance = entry.getValue().asDouble();
-                        
-                        // Skip stablecoins and fiat (USD, EUR, etc.)
-                        if (asset.equals("ZUSD") || asset.equals("USD") || asset.equals("EUR") || 
-                            asset.equals("ZEUR") || asset.equals("USDT") || asset.equals("USDC") ||
-                            balance < 0.0001) {
-                            continue;
-                        }
-                        
-                        // Convert Kraken asset to trading pair using proper mapping
-                        // Kraken balance returns assets like: SOL, XBT, ETH (some with X prefix already)
-                        String pair = assetToKrakenPair(asset);
-                        
-                        try {
-                            logger.warn("Closing Kraken position: {} ({})", asset, balance);
-                            String orderResult = krakenClient.placeMarketOrderAsync(pair, "sell", balance).join();
+                // ===== STEP 4: Close ALL Kraken Positions =====
+                logger.warn("STEP 4: Closing all Kraken positions...");
+                try {
+                    String balanceJson = krakenClient.getBalanceAsync().join();
+                    JsonNode balanceNode = objectMapper.readTree(balanceJson);
+                    JsonNode balanceResult = balanceNode.path("result");
+                    
+                    if (balanceResult.isObject()) {
+                        var fields = balanceResult.fields();
+                        while (fields.hasNext()) {
+                            var entry = fields.next();
+                            String asset = entry.getKey();
+                            double balance = entry.getValue().asDouble();
                             
-                            if (orderResult.contains("ERROR")) {
+                            // Skip stablecoins and fiat (USD, EUR, etc.)
+                            if (asset.equals("ZUSD") || asset.equals("USD") || asset.equals("EUR") || 
+                                asset.equals("ZEUR") || asset.equals("USDT") || asset.equals("USDC") ||
+                                balance < 0.0001) {
+                                continue;
+                            }
+                            
+                            // Convert Kraken asset to trading pair using proper mapping
+                            // Kraken balance returns assets like: SOL, XBT, ETH (some with X prefix already)
+                            String pair = assetToKrakenPair(asset);
+                            
+                            try {
+                                logger.warn("Closing Kraken position: {} ({})", asset, balance);
+                                String orderResult = krakenClient.placeMarketOrderAsync(pair, "sell", balance).join();
+                                
+                                if (orderResult.contains("ERROR")) {
+                                    krakenClosed.add(Map.of(
+                                        "symbol", asset,
+                                        "quantity", balance,
+                                        "platform", "kraken",
+                                        "status", "failed",
+                                        "error", orderResult
+                                    ));
+                                } else {
+                                    krakenClosed.add(Map.of(
+                                        "symbol", asset,
+                                        "quantity", balance,
+                                        "platform", "kraken",
+                                        "status", "close_ordered"
+                                    ));
+                                }
+                            } catch (Exception e) {
+                                logger.error("❌ Failed to close Kraken position for {}", asset, e);
                                 krakenClosed.add(Map.of(
                                     "symbol", asset,
                                     "quantity", balance,
                                     "platform", "kraken",
                                     "status", "failed",
-                                    "error", orderResult
-                                ));
-                            } else {
-                                krakenClosed.add(Map.of(
-                                    "symbol", asset,
-                                    "quantity", balance,
-                                    "platform", "kraken",
-                                    "status", "close_ordered"
+                                    "error", e.getMessage()
                                 ));
                             }
-                        } catch (Exception e) {
-                            logger.error("❌ Failed to close Kraken position for {}", asset, e);
-                            krakenClosed.add(Map.of(
-                                "symbol", asset,
-                                "quantity", balance,
-                                "platform", "kraken",
-                                "status", "failed",
-                                "error", e.getMessage()
-                            ));
                         }
                     }
+                    logger.info("✅ Kraken close commands sent for {} positions.", krakenClosed.size());
+                } catch (Exception e) {
+                    logger.error("❌ Failed to process Kraken positions for closure", e);
+                    result.put("krakenPositionsError", e.getMessage());
                 }
-                logger.info("✅ Kraken close commands sent for {} positions.", krakenClosed.size());
-            } catch (Exception e) {
-                logger.error("❌ Failed to process Kraken positions for closure", e);
-                result.put("krakenPositionsError", e.getMessage());
             }
         } else {
             logger.info("Kraken client not configured, skipping crypto liquidation.");

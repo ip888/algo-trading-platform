@@ -182,12 +182,16 @@ public final class TradingBot {
         // Initialize Safety Autopilot
         emergencyProtocol = new com.trading.protection.EmergencyProtocol(resilientClient);
         emergencyProtocol.setKrakenClient(krakenClient); // Enable crypto liquidation
+        // CRITICAL: Keep Kraken auto-liquidation DISABLED to prevent unwanted sales
+        // on Cloud Run restarts. Kraken trading loop manages its own SL/TP.
+        emergencyProtocol.setKrakenAutoLiquidationEnabled(false);
         heartbeatMonitor = new com.trading.protection.HeartbeatMonitor(emergencyProtocol);
         
-        heartbeatMonitor.registerComponent("Main Loop", Duration.ofSeconds(60));
-        heartbeatMonitor.registerComponent("API Connection", Duration.ofSeconds(60));
-        heartbeatMonitor.registerComponent("Profile-MAIN", Duration.ofSeconds(120)); // Give profiles more slack
-        heartbeatMonitor.registerComponent("Profile-EXPERIMENTAL", Duration.ofSeconds(120));
+        // Cloud Run compatible timeouts - 5 min to handle cold starts gracefully
+        heartbeatMonitor.registerComponent("Main Loop", Duration.ofSeconds(300));
+        heartbeatMonitor.registerComponent("API Connection", Duration.ofSeconds(300));
+        heartbeatMonitor.registerComponent("Profile-MAIN", Duration.ofSeconds(300));
+        heartbeatMonitor.registerComponent("Profile-EXPERIMENTAL", Duration.ofSeconds(300));
         
         // Start Heartbeat Monitor Thread
         Thread.ofVirtual().name("heartbeat-monitor").start(() -> {

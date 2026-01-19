@@ -43,7 +43,7 @@ const KrakenWidget: React.FC = () => {
     const [balance, setBalance] = useState<KrakenBalance | null>(null);
     const [holdings, setHoldings] = useState<KrakenHolding[]>([]);
     const [positions, setPositions] = useState<KrakenPosition[]>([]);
-    const [gridStatus, setGridStatus] = useState<GridStatus | null>(null);
+    const [_gridStatus, setGridStatus] = useState<GridStatus | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState<boolean>(true);
 

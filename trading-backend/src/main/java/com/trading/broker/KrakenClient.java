@@ -443,6 +443,14 @@ public class KrakenClient {
     }
     
     /**
+     * Get trade history (for fetching actual entry prices)
+     * Returns up to 50 most recent trades
+     */
+    public CompletableFuture<String> getTradesHistoryAsync() {
+        return privateRequest("/private/TradesHistory", "");
+    }
+    
+    /**
      * Place a market order
      * @param pair Trading pair (e.g., "XXBTZUSD")
      * @param type "buy" or "sell"

@@ -185,6 +185,7 @@ public class KrakenTradingLoop implements Runnable {
     
     /**
      * Sync positions from Kraken balance (spot holdings)
+     * FIXED: Fetches actual entry price from Kraken trade history instead of using current price
      */
     private void syncKrakenPositions() {
         try {
@@ -212,19 +213,28 @@ public class KrakenTradingLoop implements Runnable {
                 
                 // Check if we already track this position
                 if (!krakenPositions.containsKey(symbol)) {
-                    // New position discovered - fetch current price for entry estimation
+                    // New position discovered - fetch ACTUAL entry price from trade history
                     try {
-                        double price = fetchCurrentPrice(symbol);
-                        if (price > 0) {
+                        double entryPrice = fetchActualEntryPrice(symbol, balance);
+                        double currentPrice = fetchCurrentPrice(symbol);
+                        
+                        if (entryPrice > 0 && currentPrice > 0) {
                             var pos = new TradePosition(
-                                symbol, price, balance,
-                                price * (1 - stopLossPercent),
-                                price * (1 + takeProfitPercent),
+                                symbol, entryPrice, balance,
+                                entryPrice * (1 - stopLossPercent),
+                                entryPrice * (1 + takeProfitPercent),
                                 Instant.now()
                             );
                             krakenPositions.put(symbol, pos);
                             portfolio.setPosition(symbol, Optional.of(pos));
-                            logger.info("🦑 Synced position: {} x{} @ ${}", symbol, balance, price);
+                            
+                            // Initialize trailing TP
+                            gridTradingService.initTrailingTp(symbol, entryPrice);
+                            
+                            double pnl = (currentPrice - entryPrice) / entryPrice * 100;
+                            logger.info("🦑 Synced position: {} x{} | Entry: ${} | Current: ${} | PnL: {}%", 
+                                symbol, String.format("%.6f", balance), String.format("%.2f", entryPrice),
+                                String.format("%.2f", currentPrice), String.format("%+.2f", pnl));
                         }
                     } catch (Exception e) {
                         logger.warn("🦑 Failed to sync {}: {}", symbol, e.getMessage());
@@ -249,7 +259,107 @@ public class KrakenTradingLoop implements Runnable {
     }
     
     /**
+     * Fetch actual entry price from Kraken trade history.
+     * Uses weighted average of recent buy trades for this asset.
+     * Falls back to 24h open price if no trade history found.
+     */
+    private double fetchActualEntryPrice(String symbol, double currentBalance) {
+        try {
+            String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
+            
+            // Try to get trade history from Kraken
+            String tradesJson = krakenClient.getTradesHistoryAsync().join();
+            JsonNode tradesNode = mapper.readTree(tradesJson);
+            
+            if (tradesNode.has("error") && tradesNode.get("error").size() > 0) {
+                logger.debug("Trade history error: {}", tradesNode.get("error"));
+                return fetchFallbackEntryPrice(symbol);
+            }
+            
+            JsonNode tradesResult = tradesNode.path("result").path("trades");
+            if (!tradesResult.isObject()) {
+                return fetchFallbackEntryPrice(symbol);
+            }
+            
+            // Calculate weighted average entry price from buy trades
+            double totalCost = 0;
+            double totalVolume = 0;
+            
+            var tradeIds = tradesResult.fieldNames();
+            while (tradeIds.hasNext()) {
+                String tradeId = tradeIds.next();
+                JsonNode trade = tradesResult.get(tradeId);
+                
+                String pair = trade.path("pair").asText();
+                String type = trade.path("type").asText();
+                
+                // Match our symbol (handle Kraken pair naming variations)
+                if (!pair.contains(krakenSymbol.replace("/", "")) && 
+                    !pair.contains(symbol.replace("/USD", "").toUpperCase())) {
+                    continue;
+                }
+                
+                // Only count BUY trades
+                if (!"buy".equals(type)) continue;
+                
+                double price = trade.path("price").asDouble();
+                double volume = trade.path("vol").asDouble();
+                
+                if (price > 0 && volume > 0) {
+                    totalCost += price * volume;
+                    totalVolume += volume;
+                }
+            }
+            
+            if (totalVolume > 0) {
+                double avgPrice = totalCost / totalVolume;
+                logger.info("📊 {} actual entry price from trades: ${} (from {} units)", 
+                    symbol, String.format("%.4f", avgPrice), String.format("%.6f", totalVolume));
+                return avgPrice;
+            }
+            
+            // No matching trades found - use fallback
+            return fetchFallbackEntryPrice(symbol);
+            
+        } catch (Exception e) {
+            logger.debug("Failed to fetch trade history for {}: {}", symbol, e.getMessage());
+            return fetchFallbackEntryPrice(symbol);
+        }
+    }
+    
+    /**
+     * Fallback: Use 24h open price as estimated entry.
+     * Better than current price because it's more likely to be closer to actual entry.
+     */
+    private double fetchFallbackEntryPrice(String symbol) {
+        try {
+            String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
+            String tickerJson = krakenClient.getTickerAsync(krakenSymbol).join();
+            JsonNode ticker = mapper.readTree(tickerJson);
+            
+            JsonNode result = ticker.path("result");
+            if (result.fields().hasNext()) {
+                JsonNode pairData = result.fields().next().getValue();
+                // "o" = today's opening price - use as fallback entry estimate
+                double openPrice = pairData.path("o").asDouble();
+                if (openPrice > 0) {
+                    logger.warn("⚠️ {} using 24h open as entry estimate: ${} (no trade history)", 
+                        symbol, String.format("%.4f", openPrice));
+                    return openPrice;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Fallback price fetch failed for {}: {}", symbol, e.getMessage());
+        }
+        
+        // Last resort: use current price (old behavior)
+        logger.warn("⚠️ {} falling back to current price as entry (unreliable SL!)", symbol);
+        return fetchCurrentPrice(symbol);
+    }
+    
+    /**
      * Check TP/SL exits for all positions
+     * Uses TRAILING TAKE-PROFIT from GridTradingService for better exits
      */
     private void checkPositionExits() {
         for (var entry : krakenPositions.entrySet()) {
@@ -262,38 +372,50 @@ public class KrakenTradingLoop implements Runnable {
                 
                 // Calculate distances from entry
                 double pnlPercent = (currentPrice - pos.entryPrice()) / pos.entryPrice() * 100;
-                double tpDistance = ((pos.takeProfit() - currentPrice) / currentPrice) * 100;
-                double slDistance = ((currentPrice - pos.stopLoss()) / currentPrice) * 100;
                 
-                // ALWAYS log position status (visible monitoring)
-                logger.info("🔍 {} | Price: ${} | Entry: ${} | PnL: {}% | SL: ${} | TP: ${}",
-                    symbol, String.format("%.4f", currentPrice), String.format("%.4f", pos.entryPrice()), 
-                    String.format("%+.2f", pnlPercent), String.format("%.4f", pos.stopLoss()), 
-                    String.format("%.4f", pos.takeProfit()));
+                // Get RSI from grid service
+                double rsi = gridTradingService.getRsi(symbol);
+                boolean isOverbought = gridTradingService.isOverbought(symbol);
                 
-                // SL/TP thresholds (stopLossPercent=0.005 -> 0.5%, takeProfitPercent=0.0075 -> 0.75%)
-                double slThreshold = stopLossPercent * 100;   // 0.5
-                double tpThreshold = takeProfitPercent * 100; // 0.75
+                // ALWAYS log position status with RSI
+                logger.info("🔍 {} | ${} | Entry: ${} | PnL: {}% | RSI: {:.1f} | SL: ${}",
+                    symbol, String.format("%.2f", currentPrice), String.format("%.2f", pos.entryPrice()), 
+                    String.format("%+.2f", pnlPercent), rsi, String.format("%.2f", pos.stopLoss()));
+                
+                // SL threshold (stopLossPercent=0.005 -> 0.5%)
+                double slThreshold = stopLossPercent * 100;
                 
                 // ===== AGGRESSIVE STOP LOSS CHECK (0.5%) =====
                 if (pnlPercent <= -slThreshold) {
-                    logger.warn("🛑 STOP LOSS TRIGGERED: {} @ ${} | Loss: {}% (threshold: -{}%) | Entry: ${}", 
+                    logger.warn("🛑 STOP LOSS TRIGGERED: {} @ ${} | Loss: {}% | Entry: ${}", 
                         symbol, String.format("%.4f", currentPrice), String.format("%.2f", pnlPercent),
-                        String.format("%.2f", slThreshold), String.format("%.4f", pos.entryPrice()));
+                        String.format("%.4f", pos.entryPrice()));
                     executeSell(symbol, pos, "STOP_LOSS", currentPrice);
+                    gridTradingService.clearTrailingTp(symbol);
                     continue;
                 }
                 
-                // ===== TAKE PROFIT CHECK (0.75%) =====
-                if (pnlPercent >= tpThreshold) {
-                    logger.info("🎯 TAKE PROFIT TRIGGERED: {} @ ${} | Profit: {}% (threshold: +{}%) | Entry: ${}", 
-                        symbol, String.format("%.4f", currentPrice), String.format("%.2f", pnlPercent),
-                        String.format("%.2f", tpThreshold), String.format("%.4f", pos.entryPrice()));
-                    executeSell(symbol, pos, "TAKE_PROFIT", currentPrice);
+                // ===== TRAILING TAKE-PROFIT (replaces fixed TP) =====
+                // Activates at +0.5%, trails by 0.3%, caps at +2%
+                boolean shouldExitTrailing = gridTradingService.updateTrailingTp(symbol, currentPrice, pos.entryPrice());
+                if (shouldExitTrailing) {
+                    logger.info("🎯 TRAILING TP EXIT: {} @ ${} | Profit: {}%", 
+                        symbol, String.format("%.4f", currentPrice), String.format("%.2f", pnlPercent));
+                    executeSell(symbol, pos, "TRAILING_TP", currentPrice);
                     continue;
                 }
                 
-                // Update trailing stop if in profit
+                // ===== RSI OVERBOUGHT EXIT (when in profit) =====
+                // If RSI > 70 and we're profitable, consider taking profits early
+                if (isOverbought && pnlPercent > 0.3) {
+                    logger.info("📊 RSI OVERBOUGHT EXIT: {} @ ${} | RSI: {:.1f} | Profit: {}%", 
+                        symbol, String.format("%.4f", currentPrice), rsi, String.format("%.2f", pnlPercent));
+                    executeSell(symbol, pos, "RSI_OVERBOUGHT", currentPrice);
+                    gridTradingService.clearTrailingTp(symbol);
+                    continue;
+                }
+                
+                // Update trailing stop if in profit (legacy behavior, kept for safety)
                 if (pnlPercent > 0 && trailingStopPercent > 0) {
                     double newStop = currentPrice * (1 - trailingStopPercent);
                     if (newStop > pos.stopLoss()) {
@@ -303,7 +425,7 @@ public class KrakenTradingLoop implements Runnable {
                         );
                         krakenPositions.put(symbol, updated);
                         portfolio.setPosition(symbol, Optional.of(updated));
-                        logger.info("🦑 Trailing stop updated: {} SL ${} -> ${}", symbol, 
+                        logger.debug("🦑 Trailing stop updated: {} SL ${} -> ${}", symbol, 
                             String.format("%.4f", pos.stopLoss()), String.format("%.4f", newStop));
                     }
                 }

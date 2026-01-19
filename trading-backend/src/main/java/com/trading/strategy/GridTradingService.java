@@ -20,9 +20,11 @@ import java.util.stream.Collectors;
  * 1. "Fishing": Place Buy Limit orders below current price for assets we don't own.
  * 2. "Harvesting": If we own an asset, place Sell Limit orders above cost basis.
  * 
- * PROFITABILITY OPTIMIZED:
- * - Smart order management: Cancel stale orders before placing new ones
- * - Limited concurrent orders to preserve buying power
+ * PROFITABILITY OPTIMIZED v2.0:
+ * - Multi-Level Grid: Place orders at -0.3%, -0.5%, -1.0% levels
+ * - RSI Momentum Filter: Skip overbought (RSI>70), double down oversold (RSI<30)
+ * - Trailing Take-Profit: Let winners run with dynamic exit
+ * - Cross-Asset Arbitrage: Trade BTC/ETH correlation breakdowns
  * - Dynamic grid spacing based on volatility
  * - Routes crypto orders to Kraken, stocks to Alpaca.
  */
@@ -33,9 +35,16 @@ public class GridTradingService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final boolean krakenEnabled;
 
-    // Configuration - PROFITABILITY OPTIMIZED
-    private static final double GRID_BUY_OFFSET = 0.9950;  // Buy @ -0.5% (tighter for quick fills)
-    private static final double GRID_SELL_TARGET = 1.0075; // Sell @ +0.75%
+    // ===== CONFIGURATION v2.0 - PROFITABILITY OPTIMIZED =====
+    
+    // Multi-Level Grid offsets (buy at multiple levels)
+    private static final double[] GRID_BUY_LEVELS = {0.997, 0.995, 0.990};  // -0.3%, -0.5%, -1.0%
+    private static final double[] GRID_LEVEL_WEIGHTS = {0.3, 0.4, 0.3};     // Distribution per level
+    
+    // Trailing Take-Profit (dynamic exit)
+    private static final double TRAILING_TP_ACTIVATION = 0.005;  // Activate at +0.5%
+    private static final double TRAILING_TP_DISTANCE = 0.003;    // Trail by 0.3%
+    private static final double MAX_TAKE_PROFIT = 0.02;          // Cap at +2%
     
     // Dynamic grid sizing - scales with available balance
     private static final double MIN_GRID_SIZE = 11.0;   // BTC minimum (~$10)
@@ -43,11 +52,123 @@ public class GridTradingService {
     private static final double GRID_BALANCE_RATIO = 0.80;  // Use 80% of available balance
     private double configGridSize = 35.0;  // Base config value (used as fallback)
     
-    // Order management
-    private static final int MAX_CONCURRENT_GRID_ORDERS = 1;  // Limit orders to preserve capital
-    private static final long STALE_ORDER_AGE_MS = 5 * 60 * 1000;  // 5 minutes = stale
+    // Order management - INCREASED for more opportunities
+    private static final int MAX_CONCURRENT_GRID_ORDERS = 3;  // 3x more orders
+    private static final long STALE_ORDER_AGE_MS = 15 * 60 * 1000;  // 15 minutes = stale (was 5)
     private final ConcurrentHashMap<String, Long> pendingOrders = new ConcurrentHashMap<>();
     private long lastOrderCleanup = 0;
+    
+    // ===== RSI MOMENTUM FILTER =====
+    private static final int RSI_PERIOD = 14;
+    private static final double RSI_OVERBOUGHT = 70.0;
+    private static final double RSI_OVERSOLD = 30.0;
+    private final ConcurrentHashMap<String, RsiTracker> rsiTrackers = new ConcurrentHashMap<>();
+    
+    // ===== CROSS-ASSET ARBITRAGE =====
+    private static final double CORRELATION_THRESHOLD = 0.85;  // BTC/ETH normally >0.85
+    private static final double DIVERGENCE_THRESHOLD = 0.02;   // 2% divergence = opportunity
+    private final ConcurrentHashMap<String, Double> lastPriceChanges = new ConcurrentHashMap<>();
+    
+    // ===== TRAILING TP STATE =====
+    private final ConcurrentHashMap<String, TrailingTpState> trailingTpStates = new ConcurrentHashMap<>();
+    
+    /**
+     * RSI Tracker - calculates RSI from price history
+     */
+    private static class RsiTracker {
+        private final java.util.Deque<Double> prices = new java.util.ArrayDeque<>();
+        private double avgGain = 0;
+        private double avgLoss = 0;
+        private double lastRsi = 50;
+        private long lastUpdate = 0;
+        
+        synchronized void addPrice(double price) {
+            if (prices.isEmpty()) {
+                prices.addLast(price);
+                return;
+            }
+            
+            double lastPrice = prices.peekLast();
+            double change = price - lastPrice;
+            
+            prices.addLast(price);
+            if (prices.size() > RSI_PERIOD + 1) {
+                prices.removeFirst();
+            }
+            
+            // Calculate RSI using Wilder's smoothing
+            if (prices.size() >= 2) {
+                double gain = Math.max(0, change);
+                double loss = Math.abs(Math.min(0, change));
+                
+                if (prices.size() < RSI_PERIOD + 1) {
+                    avgGain = (avgGain * (prices.size() - 2) + gain) / (prices.size() - 1);
+                    avgLoss = (avgLoss * (prices.size() - 2) + loss) / (prices.size() - 1);
+                } else {
+                    avgGain = (avgGain * (RSI_PERIOD - 1) + gain) / RSI_PERIOD;
+                    avgLoss = (avgLoss * (RSI_PERIOD - 1) + loss) / RSI_PERIOD;
+                }
+                
+                if (avgLoss == 0) {
+                    lastRsi = 100;
+                } else {
+                    double rs = avgGain / avgLoss;
+                    lastRsi = 100 - (100 / (1 + rs));
+                }
+            }
+            lastUpdate = System.currentTimeMillis();
+        }
+        
+        double getRsi() { return lastRsi; }
+        boolean isOverbought() { return lastRsi > RSI_OVERBOUGHT; }
+        boolean isOversold() { return lastRsi < RSI_OVERSOLD; }
+        boolean hasEnoughData() { return prices.size() >= RSI_PERIOD; }
+    }
+    
+    /**
+     * Trailing Take-Profit State
+     */
+    private static class TrailingTpState {
+        double highWaterMark;
+        double activationPrice;
+        boolean isActive;
+        long activatedAt;
+        
+        TrailingTpState(double entryPrice) {
+            this.highWaterMark = entryPrice;
+            this.activationPrice = entryPrice * (1 + TRAILING_TP_ACTIVATION);
+            this.isActive = false;
+            this.activatedAt = 0;
+        }
+        
+        void update(double currentPrice) {
+            if (currentPrice > highWaterMark) {
+                highWaterMark = currentPrice;
+            }
+            if (!isActive && currentPrice >= activationPrice) {
+                isActive = true;
+                activatedAt = System.currentTimeMillis();
+            }
+        }
+        
+        boolean shouldExit(double currentPrice, double entryPrice) {
+            if (!isActive) return false;
+            
+            // Exit if price drops 0.3% from high water mark
+            double trailingStop = highWaterMark * (1 - TRAILING_TP_DISTANCE);
+            if (currentPrice <= trailingStop) {
+                return true;
+            }
+            
+            // Also exit if we hit max TP (2%)
+            double maxTpPrice = entryPrice * (1 + MAX_TAKE_PROFIT);
+            return currentPrice >= maxTpPrice;
+        }
+        
+        double getTrailingStopPrice() {
+            return highWaterMark * (1 - TRAILING_TP_DISTANCE);
+        }
+    }
     
     // ===== PHASE 2: Performance Tracking =====
     // Track wins, losses, and P&L per symbol to prefer profitable ones
@@ -297,6 +418,20 @@ public class GridTradingService {
                         double lowPrice24h = pairData.get("l").get(1).asDouble();
                         double highPrice24h = pairData.get("h").get(1).asDouble();
                         
+                        // ===== RSI MOMENTUM FILTER =====
+                        RsiTracker rsi = rsiTrackers.computeIfAbsent(symbol, k -> new RsiTracker());
+                        rsi.addPrice(currentPrice);
+                        
+                        // Track price changes for cross-asset arbitrage
+                        double priceChange = (currentPrice - openPrice) / openPrice;
+                        lastPriceChanges.put(symbol, priceChange);
+                        
+                        // Skip if overbought (RSI > 70)
+                        if (rsi.hasEnoughData() && rsi.isOverbought()) {
+                            logger.debug("⛏️ Skipping {} - RSI {:.1f} OVERBOUGHT", symbol, rsi.getRsi());
+                            continue;
+                        }
+                        
                         // ===== PHASE 3: Update volatility tracking =====
                         updateVolatility(symbol, highPrice24h, lowPrice24h, currentPrice);
                         
@@ -310,9 +445,16 @@ public class GridTradingService {
                         // Score calculation:
                         // - Lower in range = higher score (up to 50 points)
                         // - Small dip today = bonus (up to 20 points)
+                        // - RSI oversold = extra bonus
                         double score = (1 - rangePosition) * 50;
                         if (dayChange < 0 && dayChange > -0.03) {
                             score += Math.abs(dayChange) * 500; // Small dips are buying opportunities
+                        }
+                        
+                        // ===== RSI OVERSOLD BONUS =====
+                        if (rsi.hasEnoughData() && rsi.isOversold()) {
+                            score *= 1.5;  // 50% bonus for oversold conditions
+                            logger.info("📊 {} RSI {:.1f} OVERSOLD - boosting score!", symbol, rsi.getRsi());
                         }
                         
                         // ===== PHASE 2: Performance Weighting =====
@@ -355,48 +497,76 @@ public class GridTradingService {
     }
     
     /**
-     * Place a single grid fishing order with dynamic grid size
+     * Place MULTI-LEVEL grid fishing orders at -0.3%, -0.5%, -1.0% levels
      */
     private void placeGridOrder(String symbol, double currentPrice, double gridSize) {
         try {
             String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
             
-            double buyPrice = currentPrice * GRID_BUY_OFFSET;
-            double qty = gridSize / buyPrice;
+            // Check RSI for oversold bonus (double down on oversold)
+            RsiTracker rsi = rsiTrackers.get(symbol);
+            boolean isOversold = rsi != null && rsi.hasEnoughData() && rsi.isOversold();
             
-            // Round price based on asset (Kraken requirements)
-            String formattedPrice;
-            if (symbol.contains("BTC")) {
-                formattedPrice = String.format("%.1f", buyPrice);
-            } else {
-                formattedPrice = String.format("%.2f", buyPrice);
+            int ordersPlaced = 0;
+            int currentOpenOrders = getKrakenOpenOrderCount();
+            int availableSlots = MAX_CONCURRENT_GRID_ORDERS - currentOpenOrders;
+            
+            for (int level = 0; level < GRID_BUY_LEVELS.length && ordersPlaced < availableSlots; level++) {
+                double levelOffset = GRID_BUY_LEVELS[level];
+                double levelWeight = GRID_LEVEL_WEIGHTS[level];
+                
+                // If oversold, put more weight on deeper levels (better entries)
+                if (isOversold && level == 2) {
+                    levelWeight *= 1.5;  // 50% more on -1% level when oversold
+                }
+                
+                double levelSize = gridSize * levelWeight;
+                if (levelSize < MIN_GRID_SIZE) continue;  // Skip if too small
+                
+                double buyPrice = currentPrice * levelOffset;
+                double qty = levelSize / buyPrice;
+                
+                // Round price based on asset (Kraken requirements)
+                String formattedPrice;
+                if (symbol.contains("BTC")) {
+                    formattedPrice = String.format("%.1f", buyPrice);
+                } else {
+                    formattedPrice = String.format("%.2f", buyPrice);
+                }
+                
+                // Format volume to 8 decimals to avoid scientific notation
+                String formattedVolume = String.format("%.8f", qty);
+                
+                double offsetPercent = (1 - levelOffset) * 100;
+                logger.info("🦑 Fishing L{} {}: ${} @ -{:.1f}% = ${} (qty: {})", 
+                    level + 1, symbol, String.format("%.2f", currentPrice), 
+                    offsetPercent, formattedPrice, formattedVolume);
+                
+                // PRE-FLIGHT VALIDATION
+                boolean canPlace = krakenClient.canPlaceOrder(krakenSymbol, qty, buyPrice).join();
+                if (!canPlace) {
+                    logger.warn("⚠️ Skipping {} L{} order - validation failed", symbol, level + 1);
+                    continue;
+                }
+                
+                // Place order
+                String result = krakenClient.placeLimitOrderAsync(krakenSymbol, "buy", formattedVolume, formattedPrice).join();
+                
+                if (result.contains("ERROR")) {
+                    logger.warn("🦑 Order failed for {} L{}: {}", symbol, level + 1, result);
+                } else {
+                    logger.info("🦑 Order placed for {} L{}: {}", symbol, level + 1, result);
+                    pendingOrders.put(symbol + "_L" + level, System.currentTimeMillis());
+                    ordersPlaced++;
+                }
             }
             
-            // Format volume to 8 decimals to avoid scientific notation
-            String formattedVolume = String.format("%.8f", qty);
-            
-            logger.info("🦑 Fishing {}: Current ${}, Buy Limit @ ${} (qty: {})", 
-                symbol, String.format("%.2f", currentPrice), formattedPrice, formattedVolume);
-            
-            // PRE-FLIGHT VALIDATION
-            boolean canPlace = krakenClient.canPlaceOrder(krakenSymbol, qty, buyPrice).join();
-            if (!canPlace) {
-                logger.warn("⚠️ Skipping {} order - validation failed", symbol);
-                return;
-            }
-            
-            // Place order
-            String result = krakenClient.placeLimitOrderAsync(krakenSymbol, "buy", formattedVolume, formattedPrice).join();
-            
-            if (result.contains("ERROR")) {
-                logger.warn("🦑 Order failed for {}: {}", symbol, result);
-            } else {
-                logger.info("🦑 Order placed for {}: {}", symbol, result);
-                pendingOrders.put(symbol, System.currentTimeMillis());
+            if (ordersPlaced > 0) {
+                logger.info("🦑 Placed {} multi-level orders for {}", ordersPlaced, symbol);
             }
             
         } catch (Exception e) {
-            logger.error("🦑 Failed to place order for {}: {}", symbol, e.getMessage());
+            logger.error("🦑 Failed to place orders for {}: {}", symbol, e.getMessage());
         }
     }
     
@@ -783,6 +953,159 @@ public class GridTradingService {
         });
         status.put("volatilityStats", volStats);
         
+        // ===== NEW: RSI Stats =====
+        Map<String, Map<String, Object>> rsiStats = new java.util.HashMap<>();
+        rsiTrackers.forEach((symbol, rsi) -> {
+            Map<String, Object> symbolRsi = new java.util.HashMap<>();
+            symbolRsi.put("rsi", rsi.getRsi());
+            symbolRsi.put("isOverbought", rsi.isOverbought());
+            symbolRsi.put("isOversold", rsi.isOversold());
+            symbolRsi.put("hasEnoughData", rsi.hasEnoughData());
+            rsiStats.put(symbol, symbolRsi);
+        });
+        status.put("rsiStats", rsiStats);
+        
+        // ===== NEW: Multi-Level Grid Config =====
+        Map<String, Object> gridConfig = new java.util.HashMap<>();
+        gridConfig.put("levels", new double[]{-0.3, -0.5, -1.0});
+        gridConfig.put("weights", GRID_LEVEL_WEIGHTS);
+        gridConfig.put("trailingTpActivation", TRAILING_TP_ACTIVATION * 100);
+        gridConfig.put("trailingTpDistance", TRAILING_TP_DISTANCE * 100);
+        gridConfig.put("maxTakeProfit", MAX_TAKE_PROFIT * 100);
+        gridConfig.put("rsiOverbought", RSI_OVERBOUGHT);
+        gridConfig.put("rsiOversold", RSI_OVERSOLD);
+        status.put("gridConfig", gridConfig);
+        
+        // ===== NEW: Cross-Asset Arbitrage Status =====
+        Map<String, Object> arbitrageStatus = new java.util.HashMap<>();
+        Double btcChange = lastPriceChanges.get("BTC/USD");
+        Double ethChange = lastPriceChanges.get("ETH/USD");
+        if (btcChange != null && ethChange != null) {
+            double divergence = Math.abs(btcChange - ethChange);
+            arbitrageStatus.put("btcChange24h", btcChange * 100);
+            arbitrageStatus.put("ethChange24h", ethChange * 100);
+            arbitrageStatus.put("divergence", divergence * 100);
+            arbitrageStatus.put("hasOpportunity", divergence > DIVERGENCE_THRESHOLD);
+            arbitrageStatus.put("divergenceThreshold", DIVERGENCE_THRESHOLD * 100);
+        }
+        status.put("arbitrageStatus", arbitrageStatus);
+        
+        // ===== NEW: Trailing TP States =====
+        Map<String, Map<String, Object>> trailingStates = new java.util.HashMap<>();
+        trailingTpStates.forEach((symbol, state) -> {
+            Map<String, Object> tpState = new java.util.HashMap<>();
+            tpState.put("isActive", state.isActive);
+            tpState.put("highWaterMark", state.highWaterMark);
+            tpState.put("trailingStop", state.getTrailingStopPrice());
+            tpState.put("activationPrice", state.activationPrice);
+            trailingStates.put(symbol, tpState);
+        });
+        status.put("trailingTpStates", trailingStates);
+        
         return status;
+    }
+    
+    // ===== CROSS-ASSET ARBITRAGE METHODS =====
+    
+    /**
+     * Check for BTC/ETH arbitrage opportunity.
+     * When normally correlated assets diverge, trade the reversion.
+     * @return Symbol to buy if opportunity exists, null otherwise
+     */
+    public String checkArbitrageOpportunity() {
+        Double btcChange = lastPriceChanges.get("BTC/USD");
+        Double ethChange = lastPriceChanges.get("ETH/USD");
+        
+        if (btcChange == null || ethChange == null) {
+            return null;
+        }
+        
+        double divergence = btcChange - ethChange;
+        
+        // If BTC up more than ETH, ETH is undervalued -> buy ETH
+        // If ETH up more than BTC, BTC is undervalued -> buy BTC
+        if (Math.abs(divergence) > DIVERGENCE_THRESHOLD) {
+            if (divergence > 0) {
+                logger.info("📈 Arbitrage: BTC +{:.2f}% vs ETH +{:.2f}% | ETH undervalued", 
+                    btcChange * 100, ethChange * 100);
+                return "ETH/USD";
+            } else {
+                logger.info("📈 Arbitrage: BTC +{:.2f}% vs ETH +{:.2f}% | BTC undervalued", 
+                    btcChange * 100, ethChange * 100);
+                return "BTC/USD";
+            }
+        }
+        
+        return null;
+    }
+    
+    // ===== TRAILING TAKE-PROFIT METHODS =====
+    
+    /**
+     * Initialize trailing TP state for a new position
+     */
+    public void initTrailingTp(String symbol, double entryPrice) {
+        trailingTpStates.put(symbol, new TrailingTpState(entryPrice));
+        logger.info("📊 Trailing TP initialized for {} @ ${}", symbol, entryPrice);
+    }
+    
+    /**
+     * Update trailing TP state with current price
+     * @return true if should exit position
+     */
+    public boolean updateTrailingTp(String symbol, double currentPrice, double entryPrice) {
+        TrailingTpState state = trailingTpStates.get(symbol);
+        if (state == null) {
+            initTrailingTp(symbol, entryPrice);
+            state = trailingTpStates.get(symbol);
+        }
+        
+        state.update(currentPrice);
+        
+        if (state.shouldExit(currentPrice, entryPrice)) {
+            double pnl = (currentPrice - entryPrice) / entryPrice * 100;
+            logger.info("📊 Trailing TP EXIT: {} @ ${} | PnL: +{:.2f}% | HWM: ${}", 
+                symbol, currentPrice, pnl, state.highWaterMark);
+            trailingTpStates.remove(symbol);
+            return true;
+        }
+        
+        if (state.isActive) {
+            logger.debug("📊 Trailing TP active: {} | HWM: ${} | Trail Stop: ${}", 
+                symbol, state.highWaterMark, state.getTrailingStopPrice());
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Remove trailing TP state when position closed
+     */
+    public void clearTrailingTp(String symbol) {
+        trailingTpStates.remove(symbol);
+    }
+    
+    /**
+     * Get RSI for a symbol
+     */
+    public double getRsi(String symbol) {
+        RsiTracker rsi = rsiTrackers.get(symbol);
+        return rsi != null ? rsi.getRsi() : 50.0;
+    }
+    
+    /**
+     * Check if symbol is overbought
+     */
+    public boolean isOverbought(String symbol) {
+        RsiTracker rsi = rsiTrackers.get(symbol);
+        return rsi != null && rsi.hasEnoughData() && rsi.isOverbought();
+    }
+    
+    /**
+     * Check if symbol is oversold
+     */
+    public boolean isOversold(String symbol) {
+        RsiTracker rsi = rsiTrackers.get(symbol);
+        return rsi != null && rsi.hasEnoughData() && rsi.isOversold();
     }
 }

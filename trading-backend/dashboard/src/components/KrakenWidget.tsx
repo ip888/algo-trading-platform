@@ -35,6 +35,27 @@ interface KrakenPosition {
 
 interface GridStatus {
     performanceStats: Record<string, { wins: number; losses: number; winRate: number }>;
+    rsiStats?: Record<string, { rsi: number; isOverbought: boolean; isOversold: boolean; hasEnoughData: boolean }>;
+    gridConfig?: {
+        levels: number[];
+        weights: number[];
+        trailingTpActivation: number;
+        trailingTpDistance: number;
+        maxTakeProfit: number;
+        rsiOverbought: number;
+        rsiOversold: number;
+    };
+    arbitrageStatus?: {
+        btcChange24h?: number;
+        ethChange24h?: number;
+        divergence?: number;
+        hasOpportunity?: boolean;
+        divergenceThreshold?: number;
+    };
+    trailingTpStates?: Record<string, { isActive: boolean; highWaterMark: number; trailingStop: number }>;
+    maxConcurrentOrders?: number;
+    openOrders?: number;
+    currentGridSize?: number;
 }
 
 interface LiquidateResult {
@@ -50,11 +71,12 @@ const KrakenWidget: React.FC = () => {
     const [balance, setBalance] = useState<KrakenBalance | null>(null);
     const [holdings, setHoldings] = useState<KrakenHolding[]>([]);
     const [positions, setPositions] = useState<KrakenPosition[]>([]);
-    const [_gridStatus, setGridStatus] = useState<GridStatus | null>(null);
+    const [gridStatus, setGridStatus] = useState<GridStatus | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState<boolean>(true);
     const [liquidating, setLiquidating] = useState<boolean>(false);
     const [liquidateResult, setLiquidateResult] = useState<LiquidateResult | null>(null);
+    const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
 
     const fetchBalance = async () => {
         try {
@@ -258,6 +280,8 @@ const KrakenWidget: React.FC = () => {
                             {holdings.map((holding) => {
                                 const isUp = holding.direction === 'up';
                                 const changePercent = holding.changePercent || 0;
+                                const rsiData = gridStatus?.rsiStats?.[holding.symbol];
+                                const trailingTp = gridStatus?.trailingTpStates?.[holding.symbol];
                                 
                                 return (
                                     <div key={holding.symbol} className="bg-gray-700/50 p-2 rounded">
@@ -272,6 +296,16 @@ const KrakenWidget: React.FC = () => {
                                                         </span>
                                                     </div>
                                                 )}
+                                                {/* RSI Badge */}
+                                                {rsiData && rsiData.hasEnoughData && (
+                                                    <span className={`text-xs px-1 rounded ${
+                                                        rsiData.isOverbought ? 'bg-red-600/50 text-red-300' :
+                                                        rsiData.isOversold ? 'bg-green-600/50 text-green-300' :
+                                                        'bg-gray-600/50 text-gray-300'
+                                                    }`}>
+                                                        RSI {rsiData.rsi.toFixed(0)}
+                                                    </span>
+                                                )}
                                             </div>
                                             <span className="text-gray-300 font-mono text-sm">
                                                 {holding.amount.toFixed(holding.amount < 1 ? 4 : 2)}
@@ -281,6 +315,13 @@ const KrakenWidget: React.FC = () => {
                                             <div className="flex justify-between text-xs text-gray-400 mt-1">
                                                 <span>@${holding.price.toFixed(holding.price < 1 ? 4 : 2)}</span>
                                                 <span className="text-white">≈ ${holding.value.toFixed(2)}</span>
+                                            </div>
+                                        )}
+                                        {/* Trailing TP Status */}
+                                        {trailingTp?.isActive && (
+                                            <div className="flex justify-between text-xs text-yellow-400 mt-1">
+                                                <span>🎯 Trailing TP Active</span>
+                                                <span>Stop: ${trailingTp.trailingStop.toFixed(2)}</span>
                                             </div>
                                         )}
                                         {holding.high24h && holding.low24h && (
@@ -298,6 +339,97 @@ const KrakenWidget: React.FC = () => {
                             No crypto holdings
                         </div>
                     )}
+                    
+                    {/* Advanced Strategies Panel */}
+                    <div className="border-t border-gray-700 pt-2">
+                        <button 
+                            onClick={() => setShowAdvanced(!showAdvanced)}
+                            className="w-full text-xs text-gray-400 hover:text-gray-200 flex items-center justify-between py-1"
+                        >
+                            <span className="font-semibold">⚡ Advanced Strategies v2.0</span>
+                            <span>{showAdvanced ? '▼' : '▶'}</span>
+                        </button>
+                        
+                        {showAdvanced && gridStatus && (
+                            <div className="mt-2 space-y-2 text-xs">
+                                {/* Grid Config */}
+                                {gridStatus.gridConfig && (
+                                    <div className="bg-gray-700/30 p-2 rounded">
+                                        <div className="font-semibold text-gray-300 mb-1">Multi-Level Grid</div>
+                                        <div className="grid grid-cols-3 gap-1 text-gray-400">
+                                            <span>L1: -0.3%</span>
+                                            <span>L2: -0.5%</span>
+                                            <span>L3: -1.0%</span>
+                                        </div>
+                                        <div className="text-gray-500 mt-1">
+                                            Orders: {gridStatus.openOrders || 0}/{gridStatus.maxConcurrentOrders || 3} | 
+                                            Grid: ${gridStatus.currentGridSize?.toFixed(0) || 0}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* RSI Momentum */}
+                                {gridStatus.rsiStats && Object.keys(gridStatus.rsiStats).length > 0 && (
+                                    <div className="bg-gray-700/30 p-2 rounded">
+                                        <div className="font-semibold text-gray-300 mb-1">📊 RSI Momentum</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {Object.entries(gridStatus.rsiStats).map(([symbol, rsi]) => (
+                                                <span 
+                                                    key={symbol}
+                                                    className={`px-1 py-0.5 rounded ${
+                                                        rsi.isOverbought ? 'bg-red-600/30 text-red-300' :
+                                                        rsi.isOversold ? 'bg-green-600/30 text-green-300' :
+                                                        'bg-gray-600/30 text-gray-400'
+                                                    }`}
+                                                >
+                                                    {symbol.split('/')[0]}: {rsi.rsi.toFixed(0)}
+                                                    {rsi.isOverbought && ' 🔴'}
+                                                    {rsi.isOversold && ' 🟢'}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* Trailing TP */}
+                                {gridStatus.gridConfig && (
+                                    <div className="bg-gray-700/30 p-2 rounded">
+                                        <div className="font-semibold text-gray-300 mb-1">🎯 Trailing Take-Profit</div>
+                                        <div className="text-gray-400">
+                                            Activation: +{gridStatus.gridConfig.trailingTpActivation}% | 
+                                            Trail: {gridStatus.gridConfig.trailingTpDistance}% | 
+                                            Max: +{gridStatus.gridConfig.maxTakeProfit}%
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* Cross-Asset Arbitrage */}
+                                {gridStatus.arbitrageStatus && gridStatus.arbitrageStatus.btcChange24h !== undefined && (
+                                    <div className={`bg-gray-700/30 p-2 rounded ${
+                                        gridStatus.arbitrageStatus.hasOpportunity ? 'border border-yellow-600/50' : ''
+                                    }`}>
+                                        <div className="font-semibold text-gray-300 mb-1">
+                                            ⚖️ BTC/ETH Arbitrage
+                                            {gridStatus.arbitrageStatus.hasOpportunity && (
+                                                <span className="ml-2 text-yellow-400">OPPORTUNITY!</span>
+                                            )}
+                                        </div>
+                                        <div className="flex gap-4 text-gray-400">
+                                            <span className={gridStatus.arbitrageStatus.btcChange24h >= 0 ? 'text-green-400' : 'text-red-400'}>
+                                                BTC: {gridStatus.arbitrageStatus.btcChange24h >= 0 ? '+' : ''}{gridStatus.arbitrageStatus.btcChange24h?.toFixed(2)}%
+                                            </span>
+                                            <span className={(gridStatus.arbitrageStatus.ethChange24h ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
+                                                ETH: {(gridStatus.arbitrageStatus.ethChange24h ?? 0) >= 0 ? '+' : ''}{gridStatus.arbitrageStatus.ethChange24h?.toFixed(2)}%
+                                            </span>
+                                            <span className="text-gray-500">
+                                                Δ {gridStatus.arbitrageStatus.divergence?.toFixed(2)}%
+                                            </span>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
                     
                     {/* Margin Positions (if any) */}
                     {positions.length > 0 && (

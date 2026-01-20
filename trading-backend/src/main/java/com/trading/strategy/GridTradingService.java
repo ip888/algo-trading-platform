@@ -64,6 +64,22 @@ public class GridTradingService {
     private static final double RSI_OVERSOLD = 30.0;
     private final ConcurrentHashMap<String, RsiTracker> rsiTrackers = new ConcurrentHashMap<>();
     
+    // ===== EMA TREND CONFIRMATION =====
+    private static final int EMA_FAST_PERIOD = 9;
+    private static final int EMA_SLOW_PERIOD = 21;
+    private final ConcurrentHashMap<String, EmaTracker> emaTrackers = new ConcurrentHashMap<>();
+    
+    // ===== VOLUME SPIKE FILTER =====
+    private static final int VOLUME_PERIOD = 20;
+    private static final double VOLUME_SPIKE_THRESHOLD = 1.5;  // 1.5x average volume
+    private final ConcurrentHashMap<String, VolumeTracker> volumeTrackers = new ConcurrentHashMap<>();
+    
+    // ===== DAILY P&L TRACKING =====
+    private volatile double dailyPnL = 0.0;
+    private volatile long dailyPnLResetTime = 0;
+    private static final double MAX_DAILY_LOSS_PERCENT = 2.0;  // Stop trading if down 2%
+    private volatile double accountEquity = 200.0;  // Will be updated from actual balance
+    
     // ===== CROSS-ASSET ARBITRAGE =====
     private static final double CORRELATION_THRESHOLD = 0.85;  // BTC/ETH normally >0.85
     private static final double DIVERGENCE_THRESHOLD = 0.02;   // 2% divergence = opportunity
@@ -123,6 +139,73 @@ public class GridTradingService {
         boolean isOverbought() { return lastRsi > RSI_OVERBOUGHT; }
         boolean isOversold() { return lastRsi < RSI_OVERSOLD; }
         boolean hasEnoughData() { return prices.size() >= RSI_PERIOD; }
+    }
+    
+    /**
+     * EMA Tracker - calculates EMA9 and EMA21 for trend confirmation
+     */
+    private static class EmaTracker {
+        private double ema9 = 0;
+        private double ema21 = 0;
+        private int priceCount = 0;
+        private double sumForEma9 = 0;
+        private double sumForEma21 = 0;
+        private static final double EMA9_MULTIPLIER = 2.0 / (EMA_FAST_PERIOD + 1);
+        private static final double EMA21_MULTIPLIER = 2.0 / (EMA_SLOW_PERIOD + 1);
+        
+        synchronized void addPrice(double price) {
+            priceCount++;
+            
+            if (priceCount <= EMA_FAST_PERIOD) {
+                sumForEma9 += price;
+                if (priceCount == EMA_FAST_PERIOD) {
+                    ema9 = sumForEma9 / EMA_FAST_PERIOD;
+                }
+            } else {
+                ema9 = (price - ema9) * EMA9_MULTIPLIER + ema9;
+            }
+            
+            if (priceCount <= EMA_SLOW_PERIOD) {
+                sumForEma21 += price;
+                if (priceCount == EMA_SLOW_PERIOD) {
+                    ema21 = sumForEma21 / EMA_SLOW_PERIOD;
+                }
+            } else {
+                ema21 = (price - ema21) * EMA21_MULTIPLIER + ema21;
+            }
+        }
+        
+        double getEma9() { return ema9; }
+        double getEma21() { return ema21; }
+        boolean hasEnoughData() { return priceCount >= EMA_SLOW_PERIOD; }
+        boolean isBullish() { return hasEnoughData() && ema9 > ema21; }
+        boolean isBearish() { return hasEnoughData() && ema9 < ema21; }
+    }
+    
+    /**
+     * Volume Tracker - tracks volume for spike detection
+     */
+    private static class VolumeTracker {
+        private final java.util.Deque<Double> volumes = new java.util.ArrayDeque<>();
+        private double avgVolume = 0;
+        
+        synchronized void addVolume(double volume) {
+            volumes.addLast(volume);
+            if (volumes.size() > VOLUME_PERIOD) {
+                volumes.removeFirst();
+            }
+            
+            // Calculate average volume
+            if (!volumes.isEmpty()) {
+                avgVolume = volumes.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+            }
+        }
+        
+        double getAvgVolume() { return avgVolume; }
+        boolean hasEnoughData() { return volumes.size() >= VOLUME_PERIOD / 2; }
+        boolean isVolumeSpike(double currentVolume) {
+            return hasEnoughData() && avgVolume > 0 && currentVolume > avgVolume * VOLUME_SPIKE_THRESHOLD;
+        }
     }
     
     /**
@@ -1107,5 +1190,120 @@ public class GridTradingService {
     public boolean isOversold(String symbol) {
         RsiTracker rsi = rsiTrackers.get(symbol);
         return rsi != null && rsi.hasEnoughData() && rsi.isOversold();
+    }
+    
+    // ===== NEW PROFITABILITY IMPROVEMENTS =====
+    
+    /**
+     * Update EMA for a symbol
+     */
+    public void updateEma(String symbol, double price) {
+        emaTrackers.computeIfAbsent(symbol, k -> new EmaTracker()).addPrice(price);
+    }
+    
+    /**
+     * Check if EMA trend is bullish (EMA9 > EMA21)
+     */
+    public boolean isEmaBullish(String symbol) {
+        EmaTracker ema = emaTrackers.get(symbol);
+        return ema != null && ema.isBullish();
+    }
+    
+    /**
+     * Check if EMA trend is bearish (EMA9 < EMA21)
+     */
+    public boolean isEmaBearish(String symbol) {
+        EmaTracker ema = emaTrackers.get(symbol);
+        return ema != null && ema.isBearish();
+    }
+    
+    /**
+     * Check if EMA has enough data
+     */
+    public boolean hasEmaData(String symbol) {
+        EmaTracker ema = emaTrackers.get(symbol);
+        return ema != null && ema.hasEnoughData();
+    }
+    
+    /**
+     * Update volume for a symbol
+     */
+    public void updateVolume(String symbol, double volume) {
+        volumeTrackers.computeIfAbsent(symbol, k -> new VolumeTracker()).addVolume(volume);
+    }
+    
+    /**
+     * Check if current volume is a spike (> 1.5x average)
+     */
+    public boolean isVolumeSpike(String symbol, double currentVolume) {
+        VolumeTracker vol = volumeTrackers.get(symbol);
+        return vol != null && vol.isVolumeSpike(currentVolume);
+    }
+    
+    /**
+     * Record P&L from a trade and update daily total
+     */
+    public void recordTradePnL(double pnl) {
+        // Reset daily P&L at midnight UTC
+        long now = System.currentTimeMillis();
+        long dayStart = now - (now % (24 * 60 * 60 * 1000));
+        if (dayStart > dailyPnLResetTime) {
+            dailyPnL = 0;
+            dailyPnLResetTime = dayStart;
+            logger.info("📊 Daily P&L reset at midnight");
+        }
+        dailyPnL += pnl;
+        logger.info("📊 Trade P&L: ${} | Daily P&L: ${}", 
+            String.format("%.2f", pnl), String.format("%.2f", dailyPnL));
+    }
+    
+    /**
+     * Update account equity for daily loss calculation
+     */
+    public void updateAccountEquity(double equity) {
+        this.accountEquity = equity;
+    }
+    
+    /**
+     * Check if daily loss limit exceeded (stop trading if down > 2%)
+     */
+    public boolean isDailyLossLimitExceeded() {
+        if (accountEquity <= 0) return false;
+        double lossPercent = (dailyPnL / accountEquity) * 100;
+        return dailyPnL < 0 && Math.abs(lossPercent) >= MAX_DAILY_LOSS_PERCENT;
+    }
+    
+    /**
+     * Get daily P&L
+     */
+    public double getDailyPnL() {
+        return dailyPnL;
+    }
+    
+    /**
+     * Check if two symbols are correlated (BTC/ETH)
+     * Returns true if they should not be held together
+     */
+    public boolean isCorrelated(String symbol1, String symbol2) {
+        // BTC and ETH are highly correlated (~0.9)
+        boolean isBtc1 = symbol1.contains("BTC");
+        boolean isEth1 = symbol1.contains("ETH");
+        boolean isBtc2 = symbol2.contains("BTC");
+        boolean isEth2 = symbol2.contains("ETH");
+        
+        return (isBtc1 && isEth2) || (isEth1 && isBtc2);
+    }
+    
+    /**
+     * Check if holding a new symbol would violate correlation rules
+     */
+    public boolean wouldViolateCorrelation(String newSymbol, java.util.Set<String> currentHoldings) {
+        for (String held : currentHoldings) {
+            if (isCorrelated(newSymbol, held)) {
+                logger.info("📊 Correlation filter: {} blocked (already holding {})", newSymbol, held);
+                return true;
+            }
+        }
+        return false;
     }
 }

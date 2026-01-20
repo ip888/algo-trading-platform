@@ -59,6 +59,11 @@ public class KrakenTradingLoop implements Runnable {
     // Re-entry cooldown to prevent churn (symbol -> timestamp when cooldown expires)
     private final ConcurrentHashMap<String, Long> sellCooldowns = new ConcurrentHashMap<>();
     
+    // Partial exit tracking (symbol -> true if partial exit done)
+    private final ConcurrentHashMap<String, Boolean> partialExitDone = new ConcurrentHashMap<>();
+    private static final double PARTIAL_EXIT_THRESHOLD = 0.8;  // Sell 50% at +0.8%
+    private static final double PARTIAL_EXIT_FRACTION = 0.5;   // Sell 50% of position
+    
     // State
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean paused = new AtomicBoolean(false);
@@ -413,6 +418,20 @@ public class KrakenTradingLoop implements Runnable {
                 // SL threshold (stopLossPercent=0.005 -> 0.5%)
                 double slThreshold = stopLossPercent * 100;
                 
+                // ===== BREAK-EVEN STOP: Move SL to entry when profit > 0.5% =====
+                if (pnlPercent > 0.5 && pos.stopLoss() < pos.entryPrice()) {
+                    double breakEvenStop = pos.entryPrice() * 1.001;  // Slight above entry to cover fees
+                    var updated = new TradePosition(
+                        symbol, pos.entryPrice(), pos.quantity(),
+                        breakEvenStop, pos.takeProfit(), pos.entryTime()
+                    );
+                    krakenPositions.put(symbol, updated);
+                    portfolio.setPosition(symbol, Optional.of(updated));
+                    logger.info("🛡️ BREAK-EVEN STOP: {} SL moved to ${} (was ${})", 
+                        symbol, String.format("%.2f", breakEvenStop), String.format("%.2f", pos.stopLoss()));
+                    pos = updated;  // Use updated position for further checks
+                }
+                
                 // ===== AGGRESSIVE STOP LOSS CHECK (0.5%) =====
                 if (pnlPercent <= -slThreshold) {
                     logger.warn("🛑 STOP LOSS TRIGGERED: {} @ ${} | Loss: {}% | Entry: ${}", 
@@ -420,7 +439,16 @@ public class KrakenTradingLoop implements Runnable {
                         String.format("%.4f", pos.entryPrice()));
                     executeSell(symbol, pos, "STOP_LOSS", currentPrice);
                     gridTradingService.clearTrailingTp(symbol);
+                    partialExitDone.remove(symbol);
                     continue;
+                }
+                
+                // ===== PARTIAL EXIT: Sell 50% at +0.8% to lock in profits =====
+                if (pnlPercent >= PARTIAL_EXIT_THRESHOLD && !partialExitDone.getOrDefault(symbol, false)) {
+                    double partialQty = pos.quantity() * PARTIAL_EXIT_FRACTION;
+                    executePartialSell(symbol, pos, partialQty, currentPrice);
+                    partialExitDone.put(symbol, true);
+                    // Continue to let remaining position run
                 }
                 
                 // ===== TRAILING TAKE-PROFIT (replaces fixed TP) =====
@@ -503,6 +531,11 @@ public class KrakenTradingLoop implements Runnable {
                 double lowPrice24h = pairData.get("l").get(1).asDouble();
                 double highPrice24h = pairData.get("h").get(1).asDouble();
                 double vwap24h = pairData.get("p").get(1).asDouble();
+                double volume24h = pairData.get("v").get(1).asDouble();
+                
+                // Update EMA and Volume trackers
+                gridTradingService.updateEma(symbol, currentPrice);
+                gridTradingService.updateVolume(symbol, volume24h);
                 
                 // Calculate indicators
                 double dayChange = ((currentPrice - openPrice) / openPrice) * 100;
@@ -515,7 +548,7 @@ public class KrakenTradingLoop implements Runnable {
                 double rsi = gridTradingService.getRsi(symbol);
                 boolean isOversold = gridTradingService.isOversold(symbol);
                 
-                // === IMPROVED ENTRY CRITERIA (v2.0 - configurable) ===
+                // === IMPROVED ENTRY CRITERIA (v3.0 - with EMA, Volume, Correlation) ===
                 // 1. Must be in lower part of range
                 boolean inBuyZone = rangePosition < entryRangeMax;
                 
@@ -526,23 +559,46 @@ public class KrakenTradingLoop implements Runnable {
                 boolean trendOK = dayChange > entryDayChangeMin;
                 
                 // 4. Must have volume
-                boolean hasVolume = pairData.get("v").get(1).asDouble() > 0;
+                boolean hasVolume = volume24h > 0;
                 
                 // 5. RSI momentum confirmation
                 boolean rsiConfirm = rsi < entryRsiMax;
                 
+                // 6. EMA trend confirmation (EMA9 > EMA21 = bullish)
+                boolean emaConfirm = !gridTradingService.hasEmaData(symbol) || gridTradingService.isEmaBullish(symbol);
+                
+                // 7. Volume spike filter (prefer entries on high volume)
+                boolean volumeOK = !gridTradingService.isVolumeSpike(symbol, volume24h) || isOversold;
+                // Note: Skip volume spikes UNLESS oversold (spike + oversold = potential reversal)
+                
+                // 8. Correlation filter - don't hold BTC+ETH together
+                boolean correlationOK = !gridTradingService.wouldViolateCorrelation(symbol, krakenPositions.keySet());
+                
+                // 9. Daily loss limit check
+                boolean dailyLossOK = !gridTradingService.isDailyLossLimitExceeded();
+                
                 // Log current market conditions
-                logger.debug("🦑 {} Market: Range={}% VWAP={}% Day={}% RSI={}",
+                String emaStatus = gridTradingService.hasEmaData(symbol) 
+                    ? (gridTradingService.isEmaBullish(symbol) ? "BULL" : "BEAR") : "N/A";
+                logger.debug("🦑 {} Market: Range={}% VWAP={}% Day={}% RSI={} EMA={}",
                     symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP),
-                    String.format("%.2f", dayChange), String.format("%.1f", rsi));
+                    String.format("%.2f", dayChange), String.format("%.1f", rsi), emaStatus);
                 
                 // Entry requires ALL conditions (stricter)
-                if (inBuyZone && belowVWAP && trendOK && hasVolume && rsiConfirm) {
-                    logger.info("🦑 BUY SIGNAL: {} | Range: {}% | VWAP: {}% | Day: {}% | RSI: {}",
+                if (inBuyZone && belowVWAP && trendOK && hasVolume && rsiConfirm && 
+                    emaConfirm && correlationOK && dailyLossOK) {
+                    logger.info("🦑 BUY SIGNAL: {} | Range: {}% | VWAP: {}% | Day: {}% | RSI: {} | EMA: {}",
                         symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP), 
-                        String.format("%.2f", dayChange), String.format("%.1f", rsi));
+                        String.format("%.2f", dayChange), String.format("%.1f", rsi), emaStatus);
                     
                     executeBuy(symbol, currentPrice);
+                } else if (!dailyLossOK) {
+                    logger.warn("🛑 TRADING HALTED: Daily loss limit exceeded ({})", 
+                        String.format("$%.2f", gridTradingService.getDailyPnL()));
+                } else if (!correlationOK) {
+                    // Already logged by wouldViolateCorrelation
+                } else if (!emaConfirm) {
+                    logger.debug("🦑 SKIP: {} | EMA bearish (EMA9 < EMA21)", symbol);
                 } else if (inBuyZone && belowVWAP && !trendOK) {
                     // Log why we skipped (trend filter)
                     logger.info("🦑 SKIP: {} | Day change {}% too negative (need > {}%)",
@@ -556,7 +612,8 @@ public class KrakenTradingLoop implements Runnable {
     }
     
     /**
-     * Execute BUY order
+     * Execute BUY order using LIMIT order for better fills (maker fees)
+     * Places limit order 0.05% below current price for better entry
      */
     private void executeBuy(String symbol, double price) {
         try {
@@ -564,15 +621,19 @@ public class KrakenTradingLoop implements Runnable {
             double volume = positionSizeUsd / price;
             volume = Math.round(volume * 100000000.0) / 100000000.0; // 8 decimals
             
+            // Use limit order 0.05% below market for better entry + maker fees (0.16% vs 0.26%)
+            double limitPrice = price * 0.9995;  // 0.05% below market
+            limitPrice = Math.round(limitPrice * 100) / 100.0;  // 2 decimal places for price
+            
             // Validate order
-            boolean canPlace = krakenClient.canPlaceOrder(krakenSymbol, volume, price).join();
+            boolean canPlace = krakenClient.canPlaceOrder(krakenSymbol, volume, limitPrice).join();
             if (!canPlace) {
                 logger.warn("🦑 Order validation failed for {}", symbol);
                 return;
             }
             
-            // Place market order
-            String result = krakenClient.placeMarketOrderAsync(krakenSymbol, "buy", volume).join();
+            // Place LIMIT order (maker fees are cheaper: 0.16% vs 0.26% taker)
+            String result = krakenClient.placeLimitOrderAsync(krakenSymbol, "buy", volume, limitPrice).join();
             
             if (result.contains("ERROR")) {
                 logger.error("🦑 BUY FAILED: {} - {}", symbol, result);
@@ -580,20 +641,21 @@ public class KrakenTradingLoop implements Runnable {
                 return;
             }
             
-            // Create position tracking
+            // Create position tracking with limit price as entry
             var pos = new TradePosition(
-                symbol, price, volume,
-                price * (1 - stopLossPercent),
-                price * (1 + takeProfitPercent),
+                symbol, limitPrice, volume,
+                limitPrice * (1 - stopLossPercent),
+                limitPrice * (1 + takeProfitPercent),
                 Instant.now()
             );
             krakenPositions.put(symbol, pos);
             portfolio.setPosition(symbol, Optional.of(pos));
             
-            logger.info("🦑 BUY EXECUTED: {} x{} @ ${}", symbol, volume, price);
+            logger.info("🦑 BUY LIMIT ORDER: {} x{} @ ${} (limit, market was ${})", 
+                symbol, volume, limitPrice, String.format("%.2f", price));
             TradingWebSocketHandler.broadcastActivity(
-                String.format("🦑 BUY: %s x%.6f @ $%.4f", symbol, volume, price), "SUCCESS");
-            TradingWebSocketHandler.broadcastTradeEvent(symbol, "BUY", price, volume, "Micro-profit entry");
+                String.format("🦑 BUY LIMIT: %s x%.6f @ $%.4f", symbol, volume, limitPrice), "SUCCESS");
+            TradingWebSocketHandler.broadcastTradeEvent(symbol, "BUY", limitPrice, volume, "Limit order entry");
             
         } catch (Exception e) {
             logger.error("🦑 Buy execution failed for {}: {}", symbol, e.getMessage());
@@ -619,9 +681,13 @@ public class KrakenTradingLoop implements Runnable {
             double pnl = (price - pos.entryPrice()) * pos.quantity();
             double pnlPercent = (price - pos.entryPrice()) / pos.entryPrice() * 100;
             
+            // Record P&L for daily tracking
+            gridTradingService.recordTradePnL(pnl);
+            
             // Remove from tracking
             krakenPositions.remove(symbol);
             portfolio.setPosition(symbol, Optional.empty());
+            partialExitDone.remove(symbol);  // Clean up partial exit tracking
             
             // Set re-entry cooldown to prevent immediate churn
             sellCooldowns.put(symbol, System.currentTimeMillis() + reentryCooldownMs);
@@ -640,6 +706,51 @@ public class KrakenTradingLoop implements Runnable {
             
         } catch (Exception e) {
             logger.error("🦑 Sell execution failed for {}: {}", symbol, e.getMessage());
+        }
+    }
+    
+    /**
+     * Execute PARTIAL SELL - sell a portion of position to lock in profits
+     */
+    private void executePartialSell(String symbol, TradePosition pos, double sellQty, double price) {
+        try {
+            String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
+            sellQty = Math.round(sellQty * 100000000.0) / 100000000.0;  // 8 decimals
+            
+            String result = krakenClient.placeMarketOrderAsync(krakenSymbol, "sell", sellQty).join();
+            
+            if (result.contains("ERROR")) {
+                logger.error("🦑 PARTIAL SELL FAILED: {} - {}", symbol, result);
+                return;
+            }
+            
+            // Calculate PnL for this partial sale
+            double pnl = (price - pos.entryPrice()) * sellQty;
+            double pnlPercent = (price - pos.entryPrice()) / pos.entryPrice() * 100;
+            
+            // Record P&L for daily tracking
+            gridTradingService.recordTradePnL(pnl);
+            
+            // Update position with remaining quantity
+            double remainingQty = pos.quantity() - sellQty;
+            var updated = new TradePosition(
+                symbol, pos.entryPrice(), remainingQty,
+                pos.stopLoss(), pos.takeProfit(), pos.entryTime()
+            );
+            krakenPositions.put(symbol, updated);
+            portfolio.setPosition(symbol, Optional.of(updated));
+            
+            logger.info("💰 PARTIAL SELL: {} | Sold {}x @ ${} | PnL: ${} ({}%) | Remaining: {}x",
+                symbol, String.format("%.6f", sellQty), String.format("%.2f", price),
+                String.format("%.2f", pnl), String.format("%.2f", pnlPercent),
+                String.format("%.6f", remainingQty));
+            
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("💰 PARTIAL: %s sold %.4f @ $%.2f | +$%.2f", symbol, sellQty, price, pnl), 
+                "SUCCESS");
+            
+        } catch (Exception e) {
+            logger.error("🦑 Partial sell failed for {}: {}", symbol, e.getMessage());
         }
     }
     

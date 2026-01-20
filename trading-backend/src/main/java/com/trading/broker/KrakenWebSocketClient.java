@@ -170,6 +170,7 @@ public class KrakenWebSocketClient implements WebSocket.Listener {
             case "XDOTUSD", "DOTUSD" -> "DOT/USD";
             case "XAVAXUSD", "AVAXUSD" -> "AVAX/USD";
             case "XMATICUSD", "MATICUSD" -> "MATIC/USD";
+            case "PAXGUSD" -> "PAXG/USD";  // Tokenized gold
             default -> {
                 // Generic conversion: remove leading X and Z, add /
                 String s = symbol;

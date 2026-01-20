@@ -74,9 +74,9 @@ public class KrakenTradingLoop implements Runnable {
     // WebSocket client for real-time prices (NO RATE LIMITS!)
     private final KrakenWebSocketClient wsClient;
     
-    // Crypto watchlist
+    // Crypto watchlist (includes PAXG = tokenized gold for 24/7 gold trading)
     private static final List<String> CRYPTO_SYMBOLS = List.of(
-        "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "XRP/USD"
+        "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "XRP/USD", "PAXG/USD"
     );
     
     public KrakenTradingLoop(KrakenClient krakenClient, PortfolioManager portfolio,
@@ -860,6 +860,7 @@ public class KrakenTradingLoop implements Runnable {
             case "ADA" -> "ADA/USD";
             case "DOT" -> "DOT/USD";
             case "AVAX" -> "AVAX/USD";
+            case "PAXG" -> "PAXG/USD";  // Tokenized gold (24/7 trading)
             default -> normalized + "/USD";
         };
     }

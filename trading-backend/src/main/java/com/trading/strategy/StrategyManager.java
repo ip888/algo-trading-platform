@@ -18,10 +18,18 @@ public final class StrategyManager {
     private static final Logger logger = LoggerFactory.getLogger(StrategyManager.class);
     private static final double VOLATILITY_THRESHOLD = 0.015; // 1.5%
     
+    // Momentum assets that perform well in uptrends (Gold, safe havens, tech leaders)
+    private static final java.util.Set<String> MOMENTUM_ASSETS = java.util.Set.of(
+        "GLD", "SLV", "TLT", "XLU",  // Safe havens
+        "NVDA", "TSLA", "META",       // Momentum tech
+        "XLE", "XLK"                  // Sector leaders
+    );
+    
     private final AlpacaClient client;
     private final RSIStrategy rsiStrategy;
     private final MACDStrategy macdStrategy;
     private final MeanReversionStrategy meanReversionStrategy;
+    private final MomentumStrategy momentumStrategy;
     private final MultiTimeframeAnalyzer multiTimeframeAnalyzer;
     private MarketRegime currentRegime = MarketRegime.RANGE_BOUND;
     private String activeStrategy = "None";
@@ -35,10 +43,11 @@ public final class StrategyManager {
         this.rsiStrategy = new RSIStrategy();
         this.macdStrategy = new MACDStrategy();
         this.meanReversionStrategy = new MeanReversionStrategy();
+        this.momentumStrategy = new MomentumStrategy();
         this.multiTimeframeAnalyzer = multiTimeframeAnalyzer;
         
         if (multiTimeframeAnalyzer != null) {
-            logger.info("StrategyManager initialized with multi-timeframe analysis");
+            logger.info("StrategyManager initialized with multi-timeframe analysis + Momentum Strategy");
         }
     }
 
@@ -94,15 +103,40 @@ public final class StrategyManager {
                                             List<Double> history, MarketRegime regime) {
         currentRegime = regime;
         
-        // Select strategy based on regime
+        // Check if this is a momentum asset (should use momentum strategy in uptrends)
+        boolean isMomentumAsset = MOMENTUM_ASSETS.contains(symbol);
+        
+        // Select strategy based on regime AND asset type
         TradingSignal signal = switch (regime) {
-            case STRONG_BULL, STRONG_BEAR -> {
-                // Strong trends → MACD Trend Following
+            case STRONG_BULL -> {
+                if (isMomentumAsset) {
+                    // Momentum assets in strong bull: Use Momentum Strategy (buy strength)
+                    activeStrategy = "Momentum (Strong Bull)";
+                    yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                } else {
+                    // Regular assets: MACD Trend Following
+                    activeStrategy = "MACD Trend";
+                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                }
+            }
+            case STRONG_BEAR -> {
+                // Strong bear → MACD for trend confirmation before shorts
                 activeStrategy = "MACD Trend";
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }
-            case WEAK_BULL, WEAK_BEAR -> {
-                // Weak trends → RSI with confirmation
+            case WEAK_BULL -> {
+                if (isMomentumAsset) {
+                    // Momentum assets in weak bull: Still use Momentum (they often lead)
+                    activeStrategy = "Momentum (Weak Bull)";
+                    yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                } else {
+                    // Regular assets: RSI with confirmation
+                    activeStrategy = "RSI Confirmation";
+                    yield rsiStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                }
+            }
+            case WEAK_BEAR -> {
+                // Weak bear → RSI with confirmation
                 activeStrategy = "RSI Confirmation";
                 yield rsiStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }

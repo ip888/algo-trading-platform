@@ -3,7 +3,7 @@ package com.trading.strategy;
 /**
  * Base interface for trading strategies.
  */
-public sealed interface TradingStrategy permits MeanReversionStrategy, TrendFollowingStrategy, RSIStrategy, MACDStrategy, BollingerBandsStrategy {
+public sealed interface TradingStrategy permits MeanReversionStrategy, TrendFollowingStrategy, RSIStrategy, MACDStrategy, BollingerBandsStrategy, MomentumStrategy {
     
     /**
      * Evaluates the trading signal based on current market conditions.

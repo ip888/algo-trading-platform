@@ -270,12 +270,25 @@ public class MultiTimeframeAnalyzer {
     
     /**
      * Generate signal for timeframe
+     * OPTIMIZED v2.0: More active in trends while maintaining safety
+     * - STRONG_UP: Buy with trend (momentum), no pullback needed
+     * - WEAK_UP: Buy if price within 3% of SMA20 (relaxed from 1% below)
+     * - NEUTRAL: Hold (unchanged)
      */
     private SignalType generateSignal(TrendDirection trend, double price, double sma20, double sma50) {
         return switch (trend) {
-            case STRONG_UP, WEAK_UP -> {
-                // Buy if price pulls back to SMA20
-                if (price < sma20 * 1.01) {
+            case STRONG_UP -> {
+                // Strong uptrend: Buy with momentum! Price above SMA20 is GOOD
+                // Only skip if severely overbought (>5% above SMA20)
+                if (price < sma20 * 1.05) {
+                    yield SignalType.BUY;
+                }
+                yield SignalType.HOLD;  // Too extended, wait for pullback
+            }
+            case WEAK_UP -> {
+                // Weak uptrend: Buy on slight pullbacks or near SMA20
+                // Relaxed from 1% below to 3% above (catches more opportunities)
+                if (price < sma20 * 1.03) {
                     yield SignalType.BUY;
                 }
                 yield SignalType.HOLD;
@@ -341,9 +354,49 @@ public class MultiTimeframeAnalyzer {
     
     /**
      * Generate trading recommendation
+     * OPTIMIZED v2.0: More active in uptrends
+     * - Allow BUY without alignment if majority bullish and high confidence
+     * - In STRONG_UP, bias toward BUY
      */
     private SignalType generateRecommendation(List<TimeframeSignal> signals, boolean aligned) {
-        // Use adaptive parameters if available
+        if (signals.isEmpty()) return SignalType.HOLD;
+        
+        // Count bullish/bearish timeframes
+        long bullish = signals.stream()
+            .filter(s -> s.trend() == TrendDirection.STRONG_UP || s.trend() == TrendDirection.WEAK_UP)
+            .count();
+        long bearish = signals.stream()
+            .filter(s -> s.trend() == TrendDirection.STRONG_DOWN || s.trend() == TrendDirection.WEAK_DOWN)
+            .count();
+        
+        // Average trend strength
+        double avgStrength = signals.stream()
+            .mapToDouble(TimeframeSignal::strength)
+            .average()
+            .orElse(0.5);
+        
+        // Primary trend from longest timeframe
+        TrendDirection primary = signals.get(signals.size() - 1).trend();
+        
+        // OPTIMIZED: More aggressive in strong uptrends
+        // If majority bullish (> 50%) and not in downtrend, allow BUY
+        double bullishPct = (double) bullish / signals.size();
+        
+        if (primary == TrendDirection.STRONG_UP && bullishPct >= 0.5) {
+            // Strong uptrend + majority bullish = BUY
+            logger.debug("STRONG_UP with {}% bullish timeframes - recommending BUY", 
+                String.format("%.0f", bullishPct * 100));
+            return SignalType.BUY;
+        }
+        
+        if (bullishPct >= 0.6 && avgStrength >= 0.4) {
+            // 60%+ bullish with decent strength = BUY
+            logger.debug("{}% bullish timeframes with {:.0f}% strength - recommending BUY", 
+                String.format("%.0f", bullishPct * 100), avgStrength * 100);
+            return SignalType.BUY;
+        }
+        
+        // Use adaptive parameters for alignment requirement
         boolean requireAlignment = adaptiveManager != null ? 
             adaptiveManager.isAdaptiveRequireAlignment() : 
             config.isMultiTimeframeRequireAlignment();

@@ -38,6 +38,11 @@ public final class TradingConfig {
     
     // Crypto-specific (Kraken)
     private final double krakenStopLossPercent;
+    private final double krakenEntryRangeMax;       // Max range position for entry (e.g., 30%)
+    private final double krakenEntryDayChangeMin;   // Min dayChange for entry (e.g., -1.5%)
+    private final double krakenEntryRsiMax;         // Max RSI for entry confirmation (e.g., 45)
+    private final double krakenRsiExitMinProfit;    // Min profit for RSI overbought exit (e.g., 0.8%)
+    private final long krakenReentryCooldownMs;     // Cooldown after sell (e.g., 15 min)
     private final double krakenTakeProfitPercent;
     private final double krakenTrailingStopPercent;
     
@@ -64,6 +69,13 @@ public final class TradingConfig {
         this.krakenTakeProfitPercent = parsePercent("KRAKEN_TAKE_PROFIT_PERCENT", takeProfitPercent);
         this.krakenTrailingStopPercent = parsePercent("KRAKEN_TRAILING_STOP_PERCENT", trailingStopPercent);
         
+        // Kraken entry criteria (configurable thresholds)
+        this.krakenEntryRangeMax = parsePercent("KRAKEN_ENTRY_RANGE_MAX", 30.0);
+        this.krakenEntryDayChangeMin = parsePercent("KRAKEN_ENTRY_DAY_CHANGE_MIN", -1.5);
+        this.krakenEntryRsiMax = parsePercent("KRAKEN_ENTRY_RSI_MAX", 45.0);
+        this.krakenRsiExitMinProfit = parsePercent("KRAKEN_RSI_EXIT_MIN_PROFIT", 0.8);
+        this.krakenReentryCooldownMs = parseLong("KRAKEN_REENTRY_COOLDOWN_MS", 15 * 60 * 1000);
+        
         logger.info("📊 Trading Configuration Loaded:");
         logger.info("   Stop-Loss: {}%", String.format("%.2f", stopLossPercent));
         logger.info("   Take-Profit: {}%", String.format("%.2f", takeProfitPercent));
@@ -86,6 +98,22 @@ public final class TradingConfig {
             // If value > 1, assume it's already a percentage (e.g., 0.5 means 0.5%)
             // Config uses values like 0.5 for 0.5%, so return as-is
             return parsed;
+        } catch (NumberFormatException e) {
+            logger.warn("Invalid {} value '{}', using default {}", key, value, defaultValue);
+            return defaultValue;
+        }
+    }
+    
+    /**
+     * Parse a long value from properties.
+     */
+    private long parseLong(String key, long defaultValue) {
+        String value = properties.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(value.trim());
         } catch (NumberFormatException e) {
             logger.warn("Invalid {} value '{}', using default {}", key, value, defaultValue);
             return defaultValue;
@@ -225,6 +253,31 @@ public final class TradingConfig {
     /** Kraken trailing stop percentage */
     public double getKrakenTrailingStopPercent() {
         return krakenTrailingStopPercent;
+    }
+    
+    /** Kraken entry: max range position (e.g., 30 = lower 30% of range) */
+    public double getKrakenEntryRangeMax() {
+        return krakenEntryRangeMax;
+    }
+    
+    /** Kraken entry: min day change (e.g., -1.5 = skip if down >1.5%) */
+    public double getKrakenEntryDayChangeMin() {
+        return krakenEntryDayChangeMin;
+    }
+    
+    /** Kraken entry: max RSI for momentum confirmation */
+    public double getKrakenEntryRsiMax() {
+        return krakenEntryRsiMax;
+    }
+    
+    /** Kraken RSI overbought exit: min profit % to trigger */
+    public double getKrakenRsiExitMinProfit() {
+        return krakenRsiExitMinProfit;
+    }
+    
+    /** Kraken re-entry cooldown in milliseconds */
+    public long getKrakenReentryCooldownMs() {
+        return krakenReentryCooldownMs;
     }
     
     /** Get raw property value */

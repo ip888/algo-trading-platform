@@ -74,6 +74,20 @@ public class GridTradingService {
     private static final double VOLUME_SPIKE_THRESHOLD = 1.5;  // 1.5x average volume
     private final ConcurrentHashMap<String, VolumeTracker> volumeTrackers = new ConcurrentHashMap<>();
     
+    // ===== MACD FILTER FOR TREND CONFIRMATION =====
+    private static final int MACD_FAST = 12;
+    private static final int MACD_SLOW = 26;
+    private static final int MACD_SIGNAL = 9;
+    private final ConcurrentHashMap<String, MacdTracker> macdTrackers = new ConcurrentHashMap<>();
+    
+    // ===== ATR FOR VOLATILITY-BASED TP/SL =====
+    private static final int ATR_PERIOD = 14;
+    private final ConcurrentHashMap<String, AtrTracker> atrTrackers = new ConcurrentHashMap<>();
+    
+    // ===== MOMENTUM TRACKER =====
+    private final ConcurrentHashMap<String, MomentumTracker> momentumTrackers = new ConcurrentHashMap<>();
+    private static final int MOMENTUM_PERIOD = 5;  // 5 price readings for short-term momentum
+    
     // ===== DAILY P&L TRACKING =====
     private volatile double dailyPnL = 0.0;
     private volatile long dailyPnLResetTime = 0;
@@ -206,6 +220,150 @@ public class GridTradingService {
         boolean isVolumeSpike(double currentVolume) {
             return hasEnoughData() && avgVolume > 0 && currentVolume > avgVolume * VOLUME_SPIKE_THRESHOLD;
         }
+    }
+    
+    /**
+     * MACD Tracker - calculates MACD for trend confirmation
+     * MACD = EMA12 - EMA26, Signal = EMA9 of MACD
+     */
+    private static class MacdTracker {
+        private double ema12 = 0;
+        private double ema26 = 0;
+        private double signalLine = 0;
+        private int priceCount = 0;
+        private double sum12 = 0;
+        private double sum26 = 0;
+        private final java.util.Deque<Double> macdHistory = new java.util.ArrayDeque<>();
+        private static final double EMA12_MULT = 2.0 / (MACD_FAST + 1);
+        private static final double EMA26_MULT = 2.0 / (MACD_SLOW + 1);
+        private static final double SIGNAL_MULT = 2.0 / (MACD_SIGNAL + 1);
+        
+        synchronized void addPrice(double price) {
+            priceCount++;
+            
+            // Build EMA12
+            if (priceCount <= MACD_FAST) {
+                sum12 += price;
+                if (priceCount == MACD_FAST) ema12 = sum12 / MACD_FAST;
+            } else {
+                ema12 = (price - ema12) * EMA12_MULT + ema12;
+            }
+            
+            // Build EMA26
+            if (priceCount <= MACD_SLOW) {
+                sum26 += price;
+                if (priceCount == MACD_SLOW) ema26 = sum26 / MACD_SLOW;
+            } else {
+                ema26 = (price - ema26) * EMA26_MULT + ema26;
+            }
+            
+            // Calculate MACD and signal line
+            if (priceCount >= MACD_SLOW) {
+                double macd = ema12 - ema26;
+                macdHistory.addLast(macd);
+                if (macdHistory.size() > MACD_SIGNAL) macdHistory.removeFirst();
+                
+                if (macdHistory.size() >= MACD_SIGNAL) {
+                    // Calculate signal as EMA of MACD
+                    if (signalLine == 0) {
+                        signalLine = macdHistory.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+                    } else {
+                        signalLine = (macd - signalLine) * SIGNAL_MULT + signalLine;
+                    }
+                }
+            }
+        }
+        
+        double getMacd() { return ema12 - ema26; }
+        double getSignalLine() { return signalLine; }
+        double getHistogram() { return getMacd() - signalLine; }
+        boolean hasEnoughData() { return priceCount >= MACD_SLOW + MACD_SIGNAL; }
+        boolean isBullish() { return hasEnoughData() && getMacd() > signalLine; }
+        boolean isBearish() { return hasEnoughData() && getMacd() < signalLine; }
+        boolean isBullishCrossover() { 
+            return hasEnoughData() && getHistogram() > 0 && getHistogram() < 0.001 * Math.abs(getMacd());
+        }
+    }
+    
+    /**
+     * ATR Tracker - Average True Range for volatility-based targets
+     */
+    private static class AtrTracker {
+        private final java.util.Deque<Double> trueRanges = new java.util.ArrayDeque<>();
+        private double atr = 0;
+        private double prevClose = 0;
+        
+        synchronized void addCandle(double high, double low, double close) {
+            double tr;
+            if (prevClose == 0) {
+                tr = high - low;
+            } else {
+                // True Range = max(H-L, |H-prevC|, |L-prevC|)
+                tr = Math.max(high - low, Math.max(Math.abs(high - prevClose), Math.abs(low - prevClose)));
+            }
+            prevClose = close;
+            
+            trueRanges.addLast(tr);
+            if (trueRanges.size() > ATR_PERIOD) trueRanges.removeFirst();
+            
+            // Calculate ATR as SMA of true ranges
+            if (!trueRanges.isEmpty()) {
+                atr = trueRanges.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+            }
+        }
+        
+        double getAtr() { return atr; }
+        boolean hasEnoughData() { return trueRanges.size() >= ATR_PERIOD / 2; }
+        
+        /** Get ATR as percentage of price */
+        double getAtrPercent(double currentPrice) {
+            return currentPrice > 0 ? (atr / currentPrice) * 100 : 2.0;
+        }
+        
+        /** Calculate recommended TP based on ATR (1.5x ATR) */
+        double getRecommendedTpPercent(double currentPrice) {
+            double atrPct = getAtrPercent(currentPrice);
+            // TP = 1.5x ATR, clamped between 0.8% and 3%
+            return Math.max(0.8, Math.min(atrPct * 1.5, 3.0));
+        }
+        
+        /** Calculate recommended SL based on ATR (1x ATR) */
+        double getRecommendedSlPercent(double currentPrice) {
+            double atrPct = getAtrPercent(currentPrice);
+            // SL = 1x ATR, clamped between 0.5% and 2%
+            return Math.max(0.5, Math.min(atrPct, 2.0));
+        }
+    }
+    
+    /**
+     * Momentum Tracker - short-term price momentum
+     */
+    private static class MomentumTracker {
+        private final java.util.Deque<Double> prices = new java.util.ArrayDeque<>();
+        
+        synchronized void addPrice(double price) {
+            prices.addLast(price);
+            if (prices.size() > MOMENTUM_PERIOD) prices.removeFirst();
+        }
+        
+        boolean hasEnoughData() { return prices.size() >= MOMENTUM_PERIOD; }
+        
+        /** Get short-term momentum (% change over momentum period) */
+        double getMomentum() {
+            if (prices.size() < 2) return 0;
+            double first = prices.peekFirst();
+            double last = prices.peekLast();
+            return first > 0 ? ((last - first) / first) * 100 : 0;
+        }
+        
+        /** Check if momentum is positive (price rising) */
+        boolean isPositive() { return getMomentum() > 0; }
+        
+        /** Check if momentum is strong positive (>0.1% in period) */
+        boolean isStrongPositive() { return getMomentum() > 0.1; }
+        
+        /** Check if momentum is negative (price falling) */
+        boolean isNegative() { return getMomentum() < -0.1; }
     }
     
     /**
@@ -1305,5 +1463,158 @@ public class GridTradingService {
             }
         }
         return false;
+    }
+    
+    // ===== MACD INDICATOR METHODS =====
+    
+    /**
+     * Update MACD for a symbol
+     */
+    public void updateMacd(String symbol, double price) {
+        macdTrackers.computeIfAbsent(symbol, k -> new MacdTracker()).addPrice(price);
+    }
+    
+    /**
+     * Check if MACD is bullish (MACD > Signal)
+     */
+    public boolean isMacdBullish(String symbol) {
+        MacdTracker macd = macdTrackers.get(symbol);
+        return macd != null && macd.isBullish();
+    }
+    
+    /**
+     * Check if MACD is bearish (MACD < Signal)
+     */
+    public boolean isMacdBearish(String symbol) {
+        MacdTracker macd = macdTrackers.get(symbol);
+        return macd != null && macd.isBearish();
+    }
+    
+    /**
+     * Check if MACD has enough data
+     */
+    public boolean hasMacdData(String symbol) {
+        MacdTracker macd = macdTrackers.get(symbol);
+        return macd != null && macd.hasEnoughData();
+    }
+    
+    /**
+     * Get MACD histogram value (positive = bullish momentum)
+     */
+    public double getMacdHistogram(String symbol) {
+        MacdTracker macd = macdTrackers.get(symbol);
+        return macd != null ? macd.getHistogram() : 0;
+    }
+    
+    // ===== ATR (VOLATILITY) METHODS =====
+    
+    /**
+     * Update ATR for a symbol with OHLC data
+     */
+    public void updateAtr(String symbol, double high, double low, double close) {
+        atrTrackers.computeIfAbsent(symbol, k -> new AtrTracker()).addCandle(high, low, close);
+    }
+    
+    /**
+     * Get ATR as percentage of current price
+     */
+    public double getAtrPercent(String symbol, double currentPrice) {
+        AtrTracker atr = atrTrackers.get(symbol);
+        return atr != null && atr.hasEnoughData() ? atr.getAtrPercent(currentPrice) : 2.0;
+    }
+    
+    /**
+     * Get recommended take-profit based on ATR (1.5x ATR)
+     */
+    public double getAtrBasedTpPercent(String symbol, double currentPrice) {
+        AtrTracker atr = atrTrackers.get(symbol);
+        return atr != null && atr.hasEnoughData() ? atr.getRecommendedTpPercent(currentPrice) : 1.2;
+    }
+    
+    /**
+     * Get recommended stop-loss based on ATR (1x ATR)
+     */
+    public double getAtrBasedSlPercent(String symbol, double currentPrice) {
+        AtrTracker atr = atrTrackers.get(symbol);
+        return atr != null && atr.hasEnoughData() ? atr.getRecommendedSlPercent(currentPrice) : 0.8;
+    }
+    
+    /**
+     * Check if ATR data is available
+     */
+    public boolean hasAtrData(String symbol) {
+        AtrTracker atr = atrTrackers.get(symbol);
+        return atr != null && atr.hasEnoughData();
+    }
+    
+    // ===== MOMENTUM METHODS =====
+    
+    /**
+     * Update momentum tracker for a symbol
+     */
+    public void updateMomentum(String symbol, double price) {
+        momentumTrackers.computeIfAbsent(symbol, k -> new MomentumTracker()).addPrice(price);
+    }
+    
+    /**
+     * Check if short-term momentum is positive (price rising)
+     */
+    public boolean isPositiveMomentum(String symbol) {
+        MomentumTracker mom = momentumTrackers.get(symbol);
+        return mom != null && mom.hasEnoughData() && mom.isPositive();
+    }
+    
+    /**
+     * Check if momentum is strongly positive (>0.1% gain in period)
+     */
+    public boolean isStrongPositiveMomentum(String symbol) {
+        MomentumTracker mom = momentumTrackers.get(symbol);
+        return mom != null && mom.hasEnoughData() && mom.isStrongPositive();
+    }
+    
+    /**
+     * Check if momentum is negative (price falling)
+     */
+    public boolean isNegativeMomentum(String symbol) {
+        MomentumTracker mom = momentumTrackers.get(symbol);
+        return mom != null && mom.hasEnoughData() && mom.isNegative();
+    }
+    
+    /**
+     * Get current momentum percentage
+     */
+    public double getMomentum(String symbol) {
+        MomentumTracker mom = momentumTrackers.get(symbol);
+        return mom != null ? mom.getMomentum() : 0;
+    }
+    
+    /**
+     * Check if momentum data is available
+     */
+    public boolean hasMomentumData(String symbol) {
+        MomentumTracker mom = momentumTrackers.get(symbol);
+        return mom != null && mom.hasEnoughData();
+    }
+    
+    // ===== TIME-OF-DAY FILTER =====
+    
+    /**
+     * Check if current time is in low-liquidity hours (2-6 AM UTC)
+     * Returns true if we should SKIP trading
+     */
+    public boolean isLowLiquidityHour() {
+        int utcHour = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).getHour();
+        // Low liquidity: 2-6 AM UTC (weekend-like quiet hours)
+        return utcHour >= 2 && utcHour < 6;
+    }
+    
+    /**
+     * Check if current time is in peak trading hours (13-21 UTC = US market hours)
+     * Returns true if we're in peak trading time
+     */
+    public boolean isPeakTradingHour() {
+        int utcHour = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).getHour();
+        // Peak: 13-21 UTC (9am-5pm Eastern US)
+        return utcHour >= 13 && utcHour <= 21;
     }
 }

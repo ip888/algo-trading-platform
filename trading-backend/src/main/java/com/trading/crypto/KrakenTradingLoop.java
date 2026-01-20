@@ -60,10 +60,11 @@ public class KrakenTradingLoop implements Runnable {
     // Re-entry cooldown to prevent churn (symbol -> timestamp when cooldown expires)
     private final ConcurrentHashMap<String, Long> sellCooldowns = new ConcurrentHashMap<>();
     
-    // Partial exit tracking (symbol -> true if partial exit done)
-    private final ConcurrentHashMap<String, Boolean> partialExitDone = new ConcurrentHashMap<>();
-    private static final double PARTIAL_EXIT_THRESHOLD = 0.8;  // Sell 50% at +0.8%
-    private static final double PARTIAL_EXIT_FRACTION = 0.5;   // Sell 50% of position
+    // Progressive partial exit tracking (symbol -> exit level completed: 0, 1, or 2)
+    private final ConcurrentHashMap<String, Integer> partialExitLevel = new ConcurrentHashMap<>();
+    // Progressive exit levels: sell 25% at +0.6%, another 25% at +1.0%, let remaining 50% run
+    private static final double[] PARTIAL_EXIT_THRESHOLDS = {0.6, 1.0};  // Profit % triggers
+    private static final double[] PARTIAL_EXIT_FRACTIONS = {0.25, 0.33}; // 25% of total, then 33% of remaining (=25% of original)
     
     // State
     private final AtomicBoolean running = new AtomicBoolean(true);
@@ -449,16 +450,23 @@ public class KrakenTradingLoop implements Runnable {
                         String.format("%.4f", pos.entryPrice()));
                     executeSell(symbol, pos, "STOP_LOSS", currentPrice);
                     gridTradingService.clearTrailingTp(symbol);
-                    partialExitDone.remove(symbol);
+                    partialExitLevel.remove(symbol);
                     continue;
                 }
                 
-                // ===== PARTIAL EXIT: Sell 50% at +0.8% to lock in profits =====
-                if (pnlPercent >= PARTIAL_EXIT_THRESHOLD && !partialExitDone.getOrDefault(symbol, false)) {
-                    double partialQty = pos.quantity() * PARTIAL_EXIT_FRACTION;
-                    executePartialSell(symbol, pos, partialQty, currentPrice);
-                    partialExitDone.put(symbol, true);
-                    // Continue to let remaining position run
+                // ===== PROGRESSIVE PARTIAL EXITS: 25% at +0.6%, 25% at +1.0%, let 50% run =====
+                int currentLevel = partialExitLevel.getOrDefault(symbol, 0);
+                if (currentLevel < PARTIAL_EXIT_THRESHOLDS.length) {
+                    double threshold = PARTIAL_EXIT_THRESHOLDS[currentLevel];
+                    if (pnlPercent >= threshold) {
+                        double fraction = PARTIAL_EXIT_FRACTIONS[currentLevel];
+                        double partialQty = pos.quantity() * fraction;
+                        executePartialSell(symbol, pos, partialQty, currentPrice, currentLevel + 1);
+                        partialExitLevel.put(symbol, currentLevel + 1);
+                        // Update position reference after partial sell
+                        pos = krakenPositions.get(symbol);
+                        if (pos == null) continue;  // Position fully sold
+                    }
                 }
                 
                 // ===== TRAILING TAKE-PROFIT (replaces fixed TP) =====
@@ -543,9 +551,17 @@ public class KrakenTradingLoop implements Runnable {
                 double vwap24h = pairData.get("p").get(1).asDouble();
                 double volume24h = pairData.get("v").get(1).asDouble();
                 
-                // Update EMA and Volume trackers
+                // Get bid/ask for spread calculation
+                double bidPrice = pairData.get("b").get(0).asDouble();
+                double askPrice = pairData.get("a").get(0).asDouble();
+                double spreadPercent = ((askPrice - bidPrice) / bidPrice) * 100;
+                
+                // Update all trackers
                 gridTradingService.updateEma(symbol, currentPrice);
                 gridTradingService.updateVolume(symbol, volume24h);
+                gridTradingService.updateMacd(symbol, currentPrice);
+                gridTradingService.updateMomentum(symbol, currentPrice);
+                gridTradingService.updateAtr(symbol, highPrice24h, lowPrice24h, currentPrice);
                 
                 // Calculate indicators
                 double dayChange = ((currentPrice - openPrice) / openPrice) * 100;
@@ -558,7 +574,7 @@ public class KrakenTradingLoop implements Runnable {
                 double rsi = gridTradingService.getRsi(symbol);
                 boolean isOversold = gridTradingService.isOversold(symbol);
                 
-                // === IMPROVED ENTRY CRITERIA (v3.0 - with EMA, Volume, Correlation) ===
+                // === IMPROVED ENTRY CRITERIA (v4.0 - with MACD, ATR, Momentum, Spread, Time) ===
                 // 1. Must be in lower part of range
                 boolean inBuyZone = rangePosition < entryRangeMax;
                 
@@ -587,26 +603,53 @@ public class KrakenTradingLoop implements Runnable {
                 // 9. Daily loss limit check
                 boolean dailyLossOK = !gridTradingService.isDailyLossLimitExceeded();
                 
-                // Log current market conditions
+                // 10. NEW: MACD confirmation (MACD > Signal = bullish momentum)
+                boolean macdConfirm = !gridTradingService.hasMacdData(symbol) || gridTradingService.isMacdBullish(symbol);
+                
+                // 11. NEW: Momentum confirmation (short-term price rising)
+                boolean momentumConfirm = !gridTradingService.hasMomentumData(symbol) || gridTradingService.isPositiveMomentum(symbol);
+                
+                // 12. NEW: Spread check (skip if spread > 0.3% to avoid slippage)
+                boolean spreadOK = spreadPercent < 0.3;
+                
+                // 13. NEW: Time-of-day filter (skip low-liquidity hours 2-6 AM UTC)
+                boolean timeOK = !gridTradingService.isLowLiquidityHour();
+                
+                // Log current market conditions with all indicators
                 String emaStatus = gridTradingService.hasEmaData(symbol) 
                     ? (gridTradingService.isEmaBullish(symbol) ? "BULL" : "BEAR") : "N/A";
-                logger.debug("🦑 {} Market: Range={}% VWAP={}% Day={}% RSI={} EMA={}",
-                    symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP),
-                    String.format("%.2f", dayChange), String.format("%.1f", rsi), emaStatus);
+                String macdStatus = gridTradingService.hasMacdData(symbol)
+                    ? (gridTradingService.isMacdBullish(symbol) ? "BULL" : "BEAR") : "N/A";
+                double momentum = gridTradingService.getMomentum(symbol);
                 
-                // Entry requires ALL conditions (stricter)
+                logger.debug("🦑 {} Market: Range={}% VWAP={}% Day={}% RSI={} EMA={} MACD={} Mom={}% Spread={}%",
+                    symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP),
+                    String.format("%.2f", dayChange), String.format("%.1f", rsi), emaStatus, macdStatus,
+                    String.format("%.2f", momentum), String.format("%.3f", spreadPercent));
+                
+                // Entry requires ALL conditions (stricter for better win rate)
                 if (inBuyZone && belowVWAP && trendOK && hasVolume && rsiConfirm && 
-                    emaConfirm && correlationOK && dailyLossOK) {
-                    logger.info("🦑 BUY SIGNAL: {} | Range: {}% | VWAP: {}% | Day: {}% | RSI: {} | EMA: {}",
+                    emaConfirm && correlationOK && dailyLossOK && macdConfirm && 
+                    momentumConfirm && spreadOK && timeOK) {
+                    logger.info("🦑 BUY SIGNAL: {} | Range: {}% | VWAP: {}% | Day: {}% | RSI: {} | EMA: {} | MACD: {}",
                         symbol, String.format("%.1f", rangePosition), String.format("%.2f", distanceFromVWAP), 
-                        String.format("%.2f", dayChange), String.format("%.1f", rsi), emaStatus);
+                        String.format("%.2f", dayChange), String.format("%.1f", rsi), emaStatus, macdStatus);
                     
                     executeBuy(symbol, currentPrice);
                 } else if (!dailyLossOK) {
                     logger.warn("🛑 TRADING HALTED: Daily loss limit exceeded ({})", 
                         String.format("$%.2f", gridTradingService.getDailyPnL()));
+                } else if (!timeOK) {
+                    logger.debug("🦑 SKIP ALL: Low liquidity hours (2-6 AM UTC)");
+                    break;  // Skip all symbols during low liquidity
                 } else if (!correlationOK) {
                     // Already logged by wouldViolateCorrelation
+                } else if (!spreadOK) {
+                    logger.debug("🦑 SKIP: {} | Spread {}% too wide (max 0.3%)", symbol, String.format("%.3f", spreadPercent));
+                } else if (!macdConfirm) {
+                    logger.debug("🦑 SKIP: {} | MACD bearish", symbol);
+                } else if (!momentumConfirm) {
+                    logger.debug("🦑 SKIP: {} | Negative short-term momentum ({}%)", symbol, String.format("%.2f", momentum));
                 } else if (!emaConfirm) {
                     logger.debug("🦑 SKIP: {} | EMA bearish (EMA9 < EMA21)", symbol);
                 } else if (inBuyZone && belowVWAP && !trendOK) {
@@ -697,7 +740,7 @@ public class KrakenTradingLoop implements Runnable {
             // Remove from tracking
             krakenPositions.remove(symbol);
             portfolio.setPosition(symbol, Optional.empty());
-            partialExitDone.remove(symbol);  // Clean up partial exit tracking
+            partialExitLevel.remove(symbol);  // Clean up partial exit tracking
             
             // Set re-entry cooldown to prevent immediate churn
             sellCooldowns.put(symbol, System.currentTimeMillis() + reentryCooldownMs);
@@ -721,8 +764,9 @@ public class KrakenTradingLoop implements Runnable {
     
     /**
      * Execute PARTIAL SELL - sell a portion of position to lock in profits
+     * Uses progressive profit-taking: Level 1 = +0.6%, Level 2 = +1.0%
      */
-    private void executePartialSell(String symbol, TradePosition pos, double sellQty, double price) {
+    private void executePartialSell(String symbol, TradePosition pos, double sellQty, double price, int level) {
         try {
             String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
             sellQty = Math.round(sellQty * 100000000.0) / 100000000.0;  // 8 decimals
@@ -750,13 +794,14 @@ public class KrakenTradingLoop implements Runnable {
             krakenPositions.put(symbol, updated);
             portfolio.setPosition(symbol, Optional.of(updated));
             
-            logger.info("💰 PARTIAL SELL: {} | Sold {}x @ ${} | PnL: ${} ({}%) | Remaining: {}x",
-                symbol, String.format("%.6f", sellQty), String.format("%.2f", price),
+            String levelLabel = level == 1 ? "L1 (+0.6%)" : "L2 (+1.0%)";
+            logger.info("💰 PARTIAL SELL {}: {} | Sold {}x @ ${} | PnL: ${} ({}%) | Remaining: {}x",
+                levelLabel, symbol, String.format("%.6f", sellQty), String.format("%.2f", price),
                 String.format("%.2f", pnl), String.format("%.2f", pnlPercent),
                 String.format("%.6f", remainingQty));
             
             TradingWebSocketHandler.broadcastActivity(
-                String.format("💰 PARTIAL: %s sold %.4f @ $%.2f | +$%.2f", symbol, sellQty, price, pnl), 
+                String.format("💰 PARTIAL %s: %s sold %.4f @ $%.2f | +$%.2f", levelLabel, symbol, sellQty, price, pnl), 
                 "SUCCESS");
             
         } catch (Exception e) {

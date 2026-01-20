@@ -1,0 +1,40 @@
+# Build outputs
+target/
+*.class
+*.jar
+*.war
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Secrets - NEVER COMMIT
+config.properties
+*.secret
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node modules (dashboard)
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Docker local overrides
+docker-compose.override.yml

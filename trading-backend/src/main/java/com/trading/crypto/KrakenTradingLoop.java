@@ -3,6 +3,7 @@ package com.trading.crypto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.trading.broker.KrakenClient;
+import com.trading.broker.KrakenWebSocketClient;
 import com.trading.config.TradingConfig;
 import com.trading.risk.TradePosition;
 import com.trading.portfolio.PortfolioManager;
@@ -69,6 +70,9 @@ public class KrakenTradingLoop implements Runnable {
     private final AtomicBoolean paused = new AtomicBoolean(false);
     private final ConcurrentHashMap<String, TradePosition> krakenPositions = new ConcurrentHashMap<>();
     
+    // WebSocket client for real-time prices (NO RATE LIMITS!)
+    private final KrakenWebSocketClient wsClient;
+    
     // Crypto watchlist
     private static final List<String> CRYPTO_SYMBOLS = List.of(
         "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "XRP/USD"
@@ -90,6 +94,11 @@ public class KrakenTradingLoop implements Runnable {
         this.positionSizeUsd = positionSizeUsd;
         this.cycleIntervalMs = cycleIntervalMs;
         
+        // Initialize WebSocket client for real-time prices (NO RATE LIMITS!)
+        this.wsClient = new KrakenWebSocketClient(CRYPTO_SYMBOLS);
+        this.wsClient.connect().join();  // Connect synchronously on startup
+        logger.info("📡 Kraken WebSocket connected for real-time prices!");
+        
         // Load entry criteria from config (with sensible defaults)
         TradingConfig config = TradingConfig.getInstance();
         this.entryRangeMax = config.getKrakenEntryRangeMax();
@@ -105,6 +114,7 @@ public class KrakenTradingLoop implements Runnable {
         logger.info("   RSI Exit Min Profit: {}%, Cooldown: {}min", rsiExitMinProfit, reentryCooldownMs / 60000);
         logger.info("   Config Max Positions: {}, Position Size: ${}", maxPositions, positionSizeUsd);
         logger.info("   Dynamic sizing ENABLED (auto-adjusts based on balance)");
+        logger.info("   WebSocket: ENABLED (real-time prices, no rate limits)");
         logger.info("   Cycle Interval: {}ms", cycleIntervalMs);
     }
     
@@ -756,8 +766,19 @@ public class KrakenTradingLoop implements Runnable {
     
     /**
      * Fetch current price for a symbol
+     * PRIORITY: WebSocket (real-time, no rate limits) -> REST API (fallback)
      */
     private double fetchCurrentPrice(String symbol) {
+        // FIRST: Try WebSocket (instant, no rate limits!)
+        if (wsClient != null && wsClient.isConnected()) {
+            Double wsPrice = wsClient.getLastPrice(symbol);
+            if (wsPrice != null && wsPrice > 0) {
+                logger.debug("📡 {} price from WebSocket: ${}", symbol, wsPrice);
+                return wsPrice;
+            }
+        }
+        
+        // FALLBACK: REST API (rate limited)
         try {
             String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
             String tickerJson = krakenClient.getTickerAsync(krakenSymbol).join();
@@ -770,7 +791,9 @@ public class KrakenTradingLoop implements Runnable {
             JsonNode result = root.get("result");
             if (result != null && result.fields().hasNext()) {
                 JsonNode pairData = result.fields().next().getValue();
-                return pairData.get("c").get(0).asDouble();
+                double price = pairData.get("c").get(0).asDouble();
+                logger.debug("🔄 {} price from REST API: ${}", symbol, price);
+                return price;
             }
         } catch (Exception e) {
             logger.debug("Price fetch failed for {}: {}", symbol, e.getMessage());
@@ -823,9 +846,22 @@ public class KrakenTradingLoop implements Runnable {
     }
     
     // Control methods
-    public void stop() { running.set(false); }
+    public void stop() { 
+        running.set(false); 
+        // Cleanup WebSocket connection
+        if (wsClient != null) {
+            wsClient.disconnect();
+        }
+    }
     public void pause() { paused.set(true); logger.info("🦑 Kraken loop PAUSED"); }
     public void resume() { paused.set(false); logger.info("🦑 Kraken loop RESUMED"); }
     public boolean isRunning() { return running.get() && !paused.get(); }
     public Map<String, TradePosition> getPositions() { return Map.copyOf(krakenPositions); }
+    
+    /**
+     * Check if WebSocket is connected (for monitoring)
+     */
+    public boolean isWebSocketConnected() {
+        return wsClient != null && wsClient.isConnected();
+    }
 }

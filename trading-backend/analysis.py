@@ -7,10 +7,10 @@ trades = {
         # Batch 1: bought at 141.84, sold at 141.79 → small loss
         {"buy": 202.26, "sell": 201.82, "fee": 1.31},  # -$1.75
         # Batch 2-3: multiple small trades, mostly flat
-        {"buy": 150.0, "sell": 150.03, "fee": 0.90},   # -$0.87 (fees eat profit)
-        {"buy": 75.0, "sell": 149.52, "fee": 0.90},    # -$0.38 (incomplete)
+        {"buy": 150.0, "sell": 150.03, "fee": 0.90},  # -$0.87 (fees eat profit)
+        {"buy": 75.0, "sell": 149.52, "fee": 0.90},  # -$0.38 (incomplete)
         # Batch 4: winner
-        {"buy": 75.0, "sell": 75.28, "fee": 0.60},     # +$0.28 (profit!)
+        {"buy": 75.0, "sell": 75.28, "fee": 0.60},  # +$0.28 (profit!)
     ],
     "DOGE/USD": [
         # Batch 1: bought at 0.137, sold at 0.136 → loss
@@ -22,23 +22,23 @@ trades = {
         # Batch 1: bought at 3185, sold at 3205 → WIN
         {"buy": 299.88, "sell": 301.72, "fee": 1.11},  # +$0.73
         # Batch 2: quick scalp, nearly flat
-        {"buy": 75.0, "sell": 75.01, "fee": 0.60},     # -$0.59
+        {"buy": 75.0, "sell": 75.01, "fee": 0.60},  # -$0.59
         # Batch 3: bought at 3209, sold at 3188 → LOSS
-        {"buy": 75.0, "sell": 74.52, "fee": 0.60},     # -$1.08
+        {"buy": 75.0, "sell": 74.52, "fee": 0.60},  # -$1.08
     ],
     "BTC/USD": [
         # Batch 1: bought at 94977, sold at 92548 → BIG LOSS (-2.6%)
-        {"buy": 75.0, "sell": 73.08, "fee": 0.59},     # -$2.51
+        {"buy": 75.0, "sell": 73.08, "fee": 0.59},  # -$2.51
         # Batch 2: flat
-        {"buy": 75.0, "sell": 75.0, "fee": 0.60},      # -$0.60
+        {"buy": 75.0, "sell": 75.0, "fee": 0.60},  # -$0.60
         # Batch 3: WIN
-        {"buy": 75.0, "sell": 75.35, "fee": 0.60},     # +$0.75
+        {"buy": 75.0, "sell": 75.35, "fee": 0.60},  # +$0.75
     ],
     "XRP/USD": [
         # Batch 1: small loss
-        {"buy": 50.01, "sell": 49.75, "fee": 0.40},    # -$0.66
+        {"buy": 50.01, "sell": 49.75, "fee": 0.40},  # -$0.66
         # Batch 2: BIG LOSS (-4.9%)
-        {"buy": 37.70, "sell": 35.87, "fee": 0.24},    # -$2.07
+        {"buy": 37.70, "sell": 35.87, "fee": 0.24},  # -$2.07
     ],
 }
 
@@ -52,7 +52,7 @@ for pair, pair_trades in trades.items():
     for t in pair_trades:
         pnl = t.get("sell", 0) - t.get("buy", 0) - t.get("fee", 0)
         pair_pnl += pnl
-    
+
     emoji = "✅" if pair_pnl > 0 else "🔴"
     print(f"\n{emoji} {pair}: ${pair_pnl:+.2f}")
     total_pnl += pair_pnl

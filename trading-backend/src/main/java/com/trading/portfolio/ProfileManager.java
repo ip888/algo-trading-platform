@@ -91,6 +91,11 @@ public class ProfileManager implements Runnable {
     private double todayPnL = 0.0;
     private java.time.LocalDate lastResetDate = java.time.LocalDate.now();
     
+    // Re-entry cooldown after stop loss (prevent immediate re-buy after SL)
+    // Key = symbol, Value = timestamp when cooldown expires
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long STOP_LOSS_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes after stop loss
+    
     private volatile boolean running = true;
     
     public ProfileManager(
@@ -617,6 +622,21 @@ public class ProfileManager implements Runnable {
     
     private void handleBuy(String symbol, double currentPrice, double equity, 
                           double buyingPower, double currentVix, String profilePrefix) throws Exception {
+        
+        // ========== STOP LOSS COOLDOWN CHECK ==========
+        // Prevent immediate re-entry after stop loss (this was causing repeated losses)
+        Long cooldownExpiry = stopLossCooldowns.get(symbol);
+        if (cooldownExpiry != null && System.currentTimeMillis() < cooldownExpiry) {
+            long remainingMin = (cooldownExpiry - System.currentTimeMillis()) / 60000;
+            logger.info("{} {} on STOP LOSS COOLDOWN - {} more minutes before re-entry allowed", 
+                profilePrefix, symbol, remainingMin);
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] ⏳ %s cooldown: %d min remaining after stop loss", 
+                    profile.name(), symbol, remainingMin),
+                "INFO"
+            );
+            return;
+        }
         
         // ========== POSITION LIMIT CHECK ==========
         // Check position limit BEFORE calculating position size or running AI
@@ -1637,6 +1657,13 @@ public class ProfileManager implements Runnable {
                                 profile.name(), symbol, currentPrice, pnlPercent, pnlDollars),
                             "WARN"
                         );
+                        
+                        // ========== SET RE-ENTRY COOLDOWN ==========
+                        // Prevent immediate re-buy after stop loss (was causing repeated losses)
+                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + STOP_LOSS_COOLDOWN_MS);
+                        logger.warn("{} {} placed on 30-minute COOLDOWN after stop loss - no re-entry until {}", 
+                            profilePrefix, symbol, 
+                            java.time.Instant.ofEpochMilli(System.currentTimeMillis() + STOP_LOSS_COOLDOWN_MS));
                         
                         logger.info("{} ✅ Stop loss exit order placed for {}", profilePrefix, symbol);
                     } catch (Exception e) {

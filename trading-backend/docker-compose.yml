@@ -1,10 +1,10 @@
-version: '3.8'
+version: "3.8"
 
 services:
   trading-bot:
     build: .
     container_name: trading-bot
-    restart: always  # Auto-restart on crash or reboot
+    restart: always # Auto-restart on crash or reboot
     ports:
       - "8080:8080"
     volumes:
@@ -43,6 +43,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=86400  # Check daily
+      - WATCHTOWER_POLL_INTERVAL=86400 # Check daily
       - WATCHTOWER_INCLUDE_STOPPED=true
     command: trading-bot

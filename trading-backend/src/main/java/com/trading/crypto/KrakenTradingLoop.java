@@ -727,6 +727,15 @@ public class KrakenTradingLoop implements Runnable {
             if (result.contains("ERROR")) {
                 logger.error("🦑 SELL FAILED: {} - {}", symbol, result);
                 TradingWebSocketHandler.broadcastActivity("🦑 SELL FAILED: " + symbol + " - " + result, "ERROR");
+                
+                // If "Insufficient funds" - position no longer exists, clean up tracking
+                if (result.contains("Insufficient funds")) {
+                    logger.warn("🦑 {} no longer exists on Kraken - removing from tracking", symbol);
+                    krakenPositions.remove(symbol);
+                    portfolio.setPosition(symbol, Optional.empty());
+                    partialExitLevel.remove(symbol);
+                    gridTradingService.clearTrailingTp(symbol);
+                }
                 return;
             }
             
@@ -775,6 +784,15 @@ public class KrakenTradingLoop implements Runnable {
             
             if (result.contains("ERROR")) {
                 logger.error("🦑 PARTIAL SELL FAILED: {} - {}", symbol, result);
+                
+                // If "Insufficient funds" - position may be smaller than tracked, sync with Kraken
+                if (result.contains("Insufficient funds")) {
+                    logger.warn("🦑 {} position out of sync - will resync next cycle", symbol);
+                    // Force resync by removing tracked position (syncKrakenPositions will reload)
+                    krakenPositions.remove(symbol);
+                    portfolio.setPosition(symbol, Optional.empty());
+                    partialExitLevel.remove(symbol);
+                }
                 return;
             }
             

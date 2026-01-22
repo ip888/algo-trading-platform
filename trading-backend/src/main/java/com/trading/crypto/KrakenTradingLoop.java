@@ -107,17 +107,26 @@ public class KrakenTradingLoop implements Runnable {
         logger.info("📡 Kraken WebSocket connected for real-time prices!");
         
         // Initialize Authenticated WebSocket for trading (NO RATE LIMITS on orders!)
+        // Connect asynchronously to not block startup - will retry in background
         this.authWsClient = new KrakenAuthWebSocketClient(krakenClient);
-        try {
-            authWsClient.connect().join();
-            authWsClient.subscribeToBalances();
-            authWsClient.subscribeToExecutions();
-            authWsConnected = true;
-            logger.info("🔐 Kraken Auth WebSocket connected for rate-limit-free trading!");
-        } catch (Exception e) {
-            logger.warn("⚠️ Auth WebSocket failed, falling back to REST API: {}", e.getMessage());
-            authWsConnected = false;
-        }
+        logger.info("🔐 Attempting to connect Auth WebSocket for rate-limit-free trading...");
+        authWsClient.connect()
+            .thenRun(() -> {
+                try {
+                    authWsClient.subscribeToBalances();
+                    authWsClient.subscribeToExecutions();
+                    authWsConnected = true;
+                    logger.info("🔐 Auth WebSocket CONNECTED - rate-limit-free trading enabled!");
+                } catch (Exception e) {
+                    logger.warn("⚠️ Auth WebSocket subscriptions failed: {}", e.getMessage());
+                    authWsConnected = false;
+                }
+            })
+            .exceptionally(e -> {
+                logger.warn("⚠️ Auth WebSocket failed, will use REST API (with rate limits): {}", e.getMessage());
+                authWsConnected = false;
+                return null;
+            });
         
         // Load entry criteria from config (with sensible defaults)
         TradingConfig config = TradingConfig.getInstance();

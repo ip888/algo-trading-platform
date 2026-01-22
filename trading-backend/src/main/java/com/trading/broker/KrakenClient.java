@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * KRAKEN API CLIENT
@@ -486,7 +487,10 @@ public class KrakenClient {
      */
     public String getWebSocketToken() {
         try {
-            String response = privateRequest("/private/GetWebSocketsToken", "").join();
+            // Use 10 second timeout for token request
+            String response = privateRequest("/private/GetWebSocketsToken", "")
+                .orTimeout(10, TimeUnit.SECONDS)
+                .join();
             JsonNode json = objectMapper.readTree(response);
             
             if (json.has("error") && json.get("error").size() > 0) {

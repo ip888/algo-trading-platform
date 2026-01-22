@@ -41,8 +41,13 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
     private static final Logger logger = LoggerFactory.getLogger(KrakenAuthWebSocketClient.class);
     
     private static final String WS_AUTH_URL = "wss://ws-auth.kraken.com/v2";
-    private static final Duration RECONNECT_DELAY = Duration.ofSeconds(5);
     private static final Duration TOKEN_REFRESH_INTERVAL = Duration.ofMinutes(10);
+    
+    // Exponential backoff for reconnects: 30s -> 60s -> 120s -> 300s (max 5 min)
+    private static final long INITIAL_RECONNECT_DELAY_SEC = 30;
+    private static final long MAX_RECONNECT_DELAY_SEC = 300;  // 5 minutes max
+    private volatile long currentReconnectDelaySec = INITIAL_RECONNECT_DELAY_SEC;
+    private volatile boolean rateLimitHit = false;
     
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AtomicReference<WebSocket> webSocket = new AtomicReference<>();
@@ -56,6 +61,10 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
     // Real-time balance cache - updated by WebSocket
     private final ConcurrentHashMap<String, Double> balanceCache = new ConcurrentHashMap<>();
     private volatile Instant lastBalanceUpdate = Instant.EPOCH;
+    
+    // Open orders cache - track pending orders without REST API
+    private final ConcurrentHashMap<String, OpenOrder> openOrdersCache = new ConcurrentHashMap<>();
+    private volatile Instant lastOrdersUpdate = Instant.EPOCH;
     
     // Order result callbacks - keyed by request ID
     private final ConcurrentHashMap<Integer, CompletableFuture<OrderResult>> pendingOrders = new ConcurrentHashMap<>();
@@ -96,6 +105,21 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
         double cost,
         double fee,
         String execType,
+        Instant timestamp
+    ) {}
+    
+    /**
+     * Open order from WebSocket
+     */
+    public record OpenOrder(
+        String orderId,
+        String symbol,
+        String side,
+        String orderType,
+        double qty,
+        double filledQty,
+        double limitPrice,
+        String status,
         Instant timestamp
     ) {}
     
@@ -204,6 +228,51 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
         } catch (Exception e) {
             logger.error("Failed to subscribe to executions: {}", e.getMessage());
         }
+    }
+    
+    /**
+     * Subscribe to open orders - track positions without REST API
+     */
+    public void subscribeToOpenOrders() {
+        String token = authToken.get();
+        if (token == null) {
+            logger.error("Cannot subscribe to openOrders: no auth token");
+            return;
+        }
+        
+        try {
+            String msg = objectMapper.writeValueAsString(Map.of(
+                "method", "subscribe",
+                "params", Map.of(
+                    "channel", "openOrders",
+                    "token", token,
+                    "snapshot", true
+                )
+            ));
+            
+            WebSocket ws = webSocket.get();
+            if (ws != null) {
+                ws.sendText(msg, true);
+                logger.info("📋 Subscribed to openOrders channel");
+            }
+        } catch (Exception e) {
+            logger.error("Failed to subscribe to openOrders: {}", e.getMessage());
+        }
+    }
+    
+    /**
+     * Check if rate limit was recently hit
+     */
+    public boolean isRateLimited() {
+        return rateLimitHit;
+    }
+    
+    /**
+     * Reset reconnect delay (call when conditions improve)
+     */
+    public void resetReconnectDelay() {
+        currentReconnectDelaySec = INITIAL_RECONNECT_DELAY_SEC;
+        rateLimitHit = false;
     }
     
     /**
@@ -431,6 +500,7 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
                 switch (channel) {
                     case "balances" -> handleBalanceUpdate(root);
                     case "executions" -> handleExecutionUpdate(root);
+                    case "openOrders" -> handleOpenOrdersUpdate(root);
                     case "heartbeat" -> logger.debug("💓 Auth heartbeat");
                     default -> logger.debug("Unknown channel: {}", channel);
                 }
@@ -518,21 +588,100 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
         }
     }
     
+    private void handleOpenOrdersUpdate(JsonNode root) {
+        try {
+            JsonNode data = root.path("data");
+            if (data.isArray()) {
+                for (JsonNode order : data) {
+                    String orderId = order.path("order_id").asText();
+                    String status = order.path("order_status").asText();
+                    
+                    // Remove filled/cancelled orders
+                    if (status.equals("filled") || status.equals("canceled") || status.equals("expired")) {
+                        openOrdersCache.remove(orderId);
+                        logger.debug("📋 Order removed: {} ({})", orderId, status);
+                        continue;
+                    }
+                    
+                    OpenOrder openOrder = new OpenOrder(
+                        orderId,
+                        order.path("symbol").asText(),
+                        order.path("side").asText(),
+                        order.path("order_type").asText(),
+                        order.path("order_qty").asDouble(0),
+                        order.path("filled_qty").asDouble(0),
+                        order.path("limit_price").asDouble(0),
+                        status,
+                        Instant.now()
+                    );
+                    
+                    openOrdersCache.put(orderId, openOrder);
+                    logger.debug("📋 Order update: {} {} {} x{} @ ${}", 
+                        openOrder.side(), openOrder.symbol(), openOrder.qty(), openOrder.limitPrice());
+                }
+                lastOrdersUpdate = Instant.now();
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to parse open orders update: {}", e.getMessage());
+        }
+    }
+    
+    /**
+     * Get all open orders (from WebSocket cache - no REST API needed!)
+     */
+    public Map<String, OpenOrder> getOpenOrders() {
+        return new ConcurrentHashMap<>(openOrdersCache);
+    }
+    
+    /**
+     * Check if open orders cache is fresh
+     */
+    public boolean isOrdersCacheFresh() {
+        return Duration.between(lastOrdersUpdate, Instant.now()).toSeconds() < 60;
+    }
+    
     // ==================== Connection Management ====================
     
     private void scheduleReconnect() {
         if (shouldReconnect.get()) {
-            logger.info("🔄 Scheduling reconnect in {} seconds", RECONNECT_DELAY.toSeconds());
+            // Use exponential backoff: double the delay each time, cap at max
+            long delay = currentReconnectDelaySec;
+            
+            // If rate limited, use longer delay
+            if (rateLimitHit) {
+                delay = Math.max(delay, 120);  // At least 2 minutes when rate limited
+                logger.warn("⏳ Rate limit detected - waiting {} seconds before reconnect", delay);
+            } else {
+                logger.info("🔄 Scheduling reconnect in {} seconds (exponential backoff)", delay);
+            }
+            
             scheduler.schedule(() -> {
                 try {
                     connect().join();
                     // Re-subscribe after reconnect
                     subscribeToBalances();
                     subscribeToExecutions();
+                    subscribeToOpenOrders();  // Track positions via WebSocket
+                    
+                    // Reset backoff on successful connect
+                    currentReconnectDelaySec = INITIAL_RECONNECT_DELAY_SEC;
+                    rateLimitHit = false;
+                    logger.info("✅ Auth WebSocket reconnected successfully!");
                 } catch (Exception e) {
-                    logger.error("Reconnect failed: {}", e.getMessage());
+                    // Increase backoff for next attempt
+                    currentReconnectDelaySec = Math.min(currentReconnectDelaySec * 2, MAX_RECONNECT_DELAY_SEC);
+                    
+                    // Check if rate limited
+                    if (e.getMessage() != null && e.getMessage().contains("Rate limit")) {
+                        rateLimitHit = true;
+                        currentReconnectDelaySec = MAX_RECONNECT_DELAY_SEC;  // Max delay on rate limit
+                    }
+                    
+                    logger.error("Reconnect failed: {} (next attempt in {}s)", 
+                        e.getMessage(), currentReconnectDelaySec);
+                    scheduleReconnect();  // Schedule next attempt with increased delay
                 }
-            }, RECONNECT_DELAY.toSeconds(), TimeUnit.SECONDS);
+            }, delay, TimeUnit.SECONDS);
         }
     }
     

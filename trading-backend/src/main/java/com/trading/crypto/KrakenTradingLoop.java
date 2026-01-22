@@ -107,23 +107,27 @@ public class KrakenTradingLoop implements Runnable {
         logger.info("📡 Kraken WebSocket connected for real-time prices!");
         
         // Initialize Authenticated WebSocket for trading (NO RATE LIMITS on orders!)
-        // Connect asynchronously to not block startup - will retry in background
+        // Connect asynchronously to not block startup - will retry in background with exponential backoff
         this.authWsClient = new KrakenAuthWebSocketClient(krakenClient);
         logger.info("🔐 Attempting to connect Auth WebSocket for rate-limit-free trading...");
         authWsClient.connect()
             .thenRun(() -> {
                 try {
-                    authWsClient.subscribeToBalances();
-                    authWsClient.subscribeToExecutions();
+                    authWsClient.subscribeToBalances();     // Real-time balance updates
+                    authWsClient.subscribeToExecutions();   // Trade confirmations
+                    authWsClient.subscribeToOpenOrders();   // Track orders without REST
                     authWsConnected = true;
-                    logger.info("🔐 Auth WebSocket CONNECTED - rate-limit-free trading enabled!");
+                    logger.info("🔐 Auth WebSocket CONNECTED - FULL RATE-LIMIT-FREE trading enabled!");
+                    logger.info("   ✅ Balances: WebSocket (no REST polling)");
+                    logger.info("   ✅ Orders: WebSocket (no rate limits)");
+                    logger.info("   ✅ Executions: Real-time push");
                 } catch (Exception e) {
                     logger.warn("⚠️ Auth WebSocket subscriptions failed: {}", e.getMessage());
                     authWsConnected = false;
                 }
             })
             .exceptionally(e -> {
-                logger.warn("⚠️ Auth WebSocket failed, will use REST API (with rate limits): {}", e.getMessage());
+                logger.warn("⚠️ Auth WebSocket failed (will retry with exponential backoff): {}", e.getMessage());
                 authWsConnected = false;
                 return null;
             });
@@ -164,21 +168,24 @@ public class KrakenTradingLoop implements Runnable {
                 
                 long cycleStart = System.currentTimeMillis();
                 
-                // ===== STEP 0: Update dynamic max positions based on balance =====
+                // ===== STEP 0: Check Auth WebSocket status =====
+                updateAuthWsStatus();
+                
+                // ===== STEP 1: Update dynamic max positions based on balance =====
                 updateDynamicMaxPositions();
                 
-                // ===== STEP 1: Sync positions from Kraken balance =====
+                // ===== STEP 2: Sync positions from Kraken balance =====
                 syncKrakenPositions();
                 
-                // ===== STEP 2: Check TP/SL for existing positions =====
+                // ===== STEP 3: Check TP/SL for existing positions =====
                 checkPositionExits();
                 
-                // ===== STEP 3: Evaluate new entries =====
+                // ===== STEP 4: Evaluate new entries =====
                 if (krakenPositions.size() < dynamicMaxPositions) {
                     evaluateNewEntries();
                 }
                 
-                // ===== STEP 4: Run Grid Trading (passive orders) =====
+                // ===== STEP 5: Run Grid Trading (passive orders) =====
                 try {
                     gridTradingService.runGridCycle(CRYPTO_SYMBOLS);
                 } catch (Exception e) {
@@ -216,17 +223,30 @@ public class KrakenTradingLoop implements Runnable {
      * This allows the bot to scale up automatically when you add funds.
      * Formula: maxPositions = floor(totalEquity / positionSizeUsd)
      * Capped at 10 positions to avoid over-diversification.
+     * 
+     * RATE-LIMIT FREE: Uses WebSocket balance when available!
      */
     private void updateDynamicMaxPositions() {
         try {
-            String tradeBalanceJson = krakenClient.getTradeBalanceAsync().join();
-            JsonNode tradeBalance = mapper.readTree(tradeBalanceJson);
-            JsonNode result = tradeBalance.path("result");
+            double totalEquity = 0;
             
-            if (!result.has("eb")) return;
+            // Use WebSocket balance if available (NO RATE LIMITS!)
+            if (authWsConnected && authWsClient != null && authWsClient.isBalanceFresh()) {
+                totalEquity = authWsClient.getUsdBalance();
+                logger.debug("📊 Using WebSocket balance: ${}", String.format("%.2f", totalEquity));
+            } else {
+                // Fallback to REST API (rate limited)
+                String tradeBalanceJson = krakenClient.getTradeBalanceAsync().join();
+                JsonNode tradeBalance = mapper.readTree(tradeBalanceJson);
+                JsonNode result = tradeBalance.path("result");
+                
+                if (!result.has("eb")) return;
+                
+                // "eb" = equivalent balance (total equity in USD)
+                totalEquity = result.get("eb").asDouble();
+            }
             
-            // "eb" = equivalent balance (total equity in USD)
-            double totalEquity = result.get("eb").asDouble();
+            if (totalEquity <= 0) return;
             
             // Calculate how many positions we can afford
             // Reserve 20% for grid fishing orders
@@ -250,22 +270,54 @@ public class KrakenTradingLoop implements Runnable {
     }
     
     /**
+     * Check and update Auth WebSocket connection status.
+     * Dynamically updates authWsConnected flag.
+     */
+    private void updateAuthWsStatus() {
+        if (authWsClient != null) {
+            boolean wasConnected = authWsConnected;
+            authWsConnected = authWsClient.isConnected() && authWsClient.isBalanceFresh();
+            
+            // Log status changes
+            if (authWsConnected && !wasConnected) {
+                logger.info("🔐 Auth WebSocket CONNECTED - switching to rate-limit-free mode!");
+            } else if (!authWsConnected && wasConnected) {
+                logger.warn("⚠️ Auth WebSocket disconnected - falling back to REST API");
+            }
+        }
+    }
+    
+    /**
      * Sync positions from Kraken balance (spot holdings)
      * FIXED: Fetches actual entry price from Kraken trade history instead of using current price
+     * RATE-LIMIT FREE: Uses WebSocket balance when available!
      */
     private void syncKrakenPositions() {
         try {
-            String balanceJson = krakenClient.getBalanceAsync().join();
-            JsonNode balanceNode = mapper.readTree(balanceJson);
-            JsonNode result = balanceNode.path("result");
+            Map<String, Double> balances = new java.util.HashMap<>();
             
-            if (!result.isObject()) return;
+            // Use WebSocket balance if available (NO RATE LIMITS!)
+            if (authWsConnected && authWsClient != null && authWsClient.isBalanceFresh()) {
+                balances = new java.util.HashMap<>(authWsClient.getAllBalances());
+                logger.debug("📊 Syncing positions from WebSocket balance cache ({} assets)", balances.size());
+            } else {
+                // Fallback to REST API (rate limited)
+                String balanceJson = krakenClient.getBalanceAsync().join();
+                JsonNode balanceNode = mapper.readTree(balanceJson);
+                JsonNode result = balanceNode.path("result");
+                
+                if (!result.isObject()) return;
+                
+                var fields = result.fields();
+                while (fields.hasNext()) {
+                    var entry = fields.next();
+                    balances.put(entry.getKey(), entry.getValue().asDouble());
+                }
+            }
             
-            var fields = result.fields();
-            while (fields.hasNext()) {
-                var entry = fields.next();
+            for (var entry : balances.entrySet()) {
                 String asset = entry.getKey();
-                double balance = entry.getValue().asDouble();
+                double balance = entry.getValue();
                 
                 // Skip fiat and tiny balances
                 if (asset.equals("ZUSD") || asset.equals("USD") || asset.equals("EUR") || 

@@ -46,7 +46,8 @@ echo -e "${GREEN}✅ gcloud CLI${NC}"
 # 2. Configuration
 echo -e "${BLUE}📋 Configuration${NC}"
 PROJECT_ID=${GOOGLE_CLOUD_PROJECT:-"crazy-java-bot-2026"}
-REGION=${REGION:-"us-central1"}
+# Use europe-west1 - us-central1 has egress network issues with Kraken/Alpaca
+REGION=${REGION:-"europe-west1"}
 REPO_NAME="algo-bot-repo"
 
 echo "Project: $PROJECT_ID"

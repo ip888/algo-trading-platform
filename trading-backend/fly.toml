@@ -1,0 +1,47 @@
+# Fly.io Configuration for Trading Backend
+# Deploy with: fly deploy
+# Region: Warsaw (waw) - close to Spain/Poland for EU move
+
+app = "trading-backend"
+primary_region = "waw"  # Warsaw, Poland - good for EU
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # JVM settings for container
+  JAVA_TOOL_OPTIONS = "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC"
+  # Timezone
+  TZ = "Europe/Warsaw"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # Keep running 24/7 for trading!
+  auto_start_machines = true
+  min_machines_running = 1     # Always keep 1 instance running
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[http_service.checks]]
+  grace_period = "30s"
+  interval = "30s"
+  method = "GET"
+  path = "/health"
+  timeout = "10s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"
+  # Cost: ~$6.39/month (shared-cpu-2x with 1GB)
+  # Can scale up to "shared-cpu-2x" with 2GB for ~$11/month if needed
+
+# Secrets to set (run these before first deploy):
+# fly secrets set ALPACA_API_KEY=your_key
+# fly secrets set ALPACA_API_SECRET=your_secret  
+# fly secrets set KRAKEN_API_KEY=your_key
+# fly secrets set KRAKEN_API_SECRET=your_secret

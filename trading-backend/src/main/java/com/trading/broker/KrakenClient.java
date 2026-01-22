@@ -49,22 +49,28 @@ public class KrakenClient {
     private final String apiKey;
     private final String apiSecret;
     
-    // Balance cache to avoid rate limiting issues (30 second TTL - increased for stability)
+    // Balance cache to avoid rate limiting issues (60 second TTL - very aggressive caching)
     private volatile double cachedBalance = 0.0;
     private volatile long balanceCacheTime = 0;
-    private static final long BALANCE_CACHE_TTL_MS = 30_000;  // 30 seconds (was 10)
+    private static final long BALANCE_CACHE_TTL_MS = 60_000;  // 60 seconds - much longer cache
+    
+    // Trade balance cache (separate from regular balance)
+    private volatile String cachedTradeBalance = null;
+    private volatile long tradeBalanceCacheTime = 0;
+    private static final long TRADE_BALANCE_CACHE_TTL_MS = 60_000;  // 60 seconds
     
     // Nonce tracking - CRITICAL for Kraken API (must be strictly increasing)
     // Using microseconds and tracking last nonce to prevent "Invalid nonce" errors
     private static volatile long lastNonce = 0;
     private static final Object NONCE_LOCK = new Object();
     
-    // Rate limiting - Kraken allows ~15 calls/minute for private endpoints
+    // Rate limiting - ULTRA CONSERVATIVE to avoid rate limit death spiral
+    // Kraken allows ~15 calls/minute, but we use much less for stability
     private static volatile long lastPrivateCallTime = 0;
-    private static final long MIN_CALL_INTERVAL_MS = 2000;  // Minimum 2 seconds between calls (more conservative)
+    private static final long MIN_CALL_INTERVAL_MS = 5000;  // Minimum 5 seconds between calls
     private static volatile int callCountThisMinute = 0;
     private static volatile long minuteStartTime = 0;
-    private static final int MAX_CALLS_PER_MINUTE = 8;  // Very conservative limit (Kraken allows 15)
+    private static final int MAX_CALLS_PER_MINUTE = 4;  // Ultra-conservative: only 4 calls/min (1 every 15s)
     
     // Backoff for rate limit errors - HARD PAUSE MODE
     // When rate limited, we completely stop ALL REST calls for 15 minutes
@@ -450,45 +456,164 @@ public class KrakenClient {
     
     /**
      * Get Trade Balance (includes Free Margin 'mf').
+     * CACHED for 60 seconds to reduce API calls.
      */
     public CompletableFuture<String> getTradeBalanceAsync() {
-        return privateRequest("/private/TradeBalance", "");
+        // Return cached trade balance if still valid
+        long now = System.currentTimeMillis();
+        if (cachedTradeBalance != null && (now - tradeBalanceCacheTime) < TRADE_BALANCE_CACHE_TTL_MS) {
+            logger.debug("Using cached trade balance (age: {}ms)", (now - tradeBalanceCacheTime));
+            return CompletableFuture.completedFuture(cachedTradeBalance);
+        }
+        
+        return privateRequest("/private/TradeBalance", "")
+            .thenApply(response -> {
+                try {
+                    var json = objectMapper.readTree(response);
+                    if (!json.has("error") || json.get("error").size() == 0) {
+                        cachedTradeBalance = response;
+                        tradeBalanceCacheTime = System.currentTimeMillis();
+                    }
+                } catch (Exception e) {
+                    // Ignore cache update errors
+                }
+                return response;
+            });
     }
 
     /**
      * Get account balance
+     * CACHED for 60 seconds to reduce API calls.
      */
+    private volatile String cachedBalanceRaw = null;
+    private volatile long balanceRawCacheTime = 0;
+    
     public CompletableFuture<String> getBalanceAsync() {
-        return privateRequest("/private/Balance", "");
+        // Return cached balance if still valid
+        long now = System.currentTimeMillis();
+        if (cachedBalanceRaw != null && (now - balanceRawCacheTime) < BALANCE_CACHE_TTL_MS) {
+            logger.debug("Using cached raw balance (age: {}ms)", (now - balanceRawCacheTime));
+            return CompletableFuture.completedFuture(cachedBalanceRaw);
+        }
+        
+        return privateRequest("/private/Balance", "")
+            .thenApply(response -> {
+                try {
+                    var json = objectMapper.readTree(response);
+                    if (!json.has("error") || json.get("error").size() == 0) {
+                        cachedBalanceRaw = response;
+                        balanceRawCacheTime = System.currentTimeMillis();
+                    }
+                } catch (Exception e) {
+                    // Ignore cache update errors
+                }
+                return response;
+            });
     }
     
     /**
-     * Get open positions
+     * Get open positions - CACHED
      */
+    private volatile String cachedOpenPositions = null;
+    private volatile long openPositionsCacheTime = 0;
+    private static final long POSITIONS_CACHE_TTL_MS = 60_000;
+    
     public CompletableFuture<String> getOpenPositionsAsync() {
-        return privateRequest("/private/OpenPositions", "docalcs=true");
+        long now = System.currentTimeMillis();
+        if (cachedOpenPositions != null && (now - openPositionsCacheTime) < POSITIONS_CACHE_TTL_MS) {
+            return CompletableFuture.completedFuture(cachedOpenPositions);
+        }
+        
+        return privateRequest("/private/OpenPositions", "docalcs=true")
+            .thenApply(response -> {
+                try {
+                    var json = objectMapper.readTree(response);
+                    if (!json.has("error") || json.get("error").size() == 0) {
+                        cachedOpenPositions = response;
+                        openPositionsCacheTime = System.currentTimeMillis();
+                    }
+                } catch (Exception e) {}
+                return response;
+            });
     }
 
     /**
-     * Get open orders
+     * Get open orders - CACHED
      */
+    private volatile String cachedOpenOrders = null;
+    private volatile long openOrdersCacheTime = 0;
+    private static final long ORDERS_CACHE_TTL_MS = 30_000;
+    
     public CompletableFuture<String> getOpenOrdersAsync() {
-        return privateRequest("/private/OpenOrders", "");
+        long now = System.currentTimeMillis();
+        if (cachedOpenOrders != null && (now - openOrdersCacheTime) < ORDERS_CACHE_TTL_MS) {
+            return CompletableFuture.completedFuture(cachedOpenOrders);
+        }
+        
+        return privateRequest("/private/OpenOrders", "")
+            .thenApply(response -> {
+                try {
+                    var json = objectMapper.readTree(response);
+                    if (!json.has("error") || json.get("error").size() == 0) {
+                        cachedOpenOrders = response;
+                        openOrdersCacheTime = System.currentTimeMillis();
+                    }
+                } catch (Exception e) {}
+                return response;
+            });
     }
     
     /**
-     * Get closed orders
+     * Get closed orders - CACHED (rarely needed)
      */
+    private volatile String cachedClosedOrders = null;
+    private volatile long closedOrdersCacheTime = 0;
+    private static final long CLOSED_ORDERS_CACHE_TTL_MS = 120_000;  // 2 minutes
+    
     public CompletableFuture<String> getClosedOrdersAsync() {
-        return privateRequest("/private/ClosedOrders", "");
+        long now = System.currentTimeMillis();
+        if (cachedClosedOrders != null && (now - closedOrdersCacheTime) < CLOSED_ORDERS_CACHE_TTL_MS) {
+            return CompletableFuture.completedFuture(cachedClosedOrders);
+        }
+        
+        return privateRequest("/private/ClosedOrders", "")
+            .thenApply(response -> {
+                try {
+                    var json = objectMapper.readTree(response);
+                    if (!json.has("error") || json.get("error").size() == 0) {
+                        cachedClosedOrders = response;
+                        closedOrdersCacheTime = System.currentTimeMillis();
+                    }
+                } catch (Exception e) {}
+                return response;
+            });
     }
     
     /**
      * Get trade history (for fetching actual entry prices)
-     * Returns up to 50 most recent trades
+     * CACHED for 2 minutes - entry prices don't change often
      */
+    private volatile String cachedTradesHistory = null;
+    private volatile long tradesHistoryCacheTime = 0;
+    private static final long TRADES_HISTORY_CACHE_TTL_MS = 120_000;  // 2 minutes
+    
     public CompletableFuture<String> getTradesHistoryAsync() {
-        return privateRequest("/private/TradesHistory", "");
+        long now = System.currentTimeMillis();
+        if (cachedTradesHistory != null && (now - tradesHistoryCacheTime) < TRADES_HISTORY_CACHE_TTL_MS) {
+            return CompletableFuture.completedFuture(cachedTradesHistory);
+        }
+        
+        return privateRequest("/private/TradesHistory", "")
+            .thenApply(response -> {
+                try {
+                    var json = objectMapper.readTree(response);
+                    if (!json.has("error") || json.get("error").size() == 0) {
+                        cachedTradesHistory = response;
+                        tradesHistoryCacheTime = System.currentTimeMillis();
+                    }
+                } catch (Exception e) {}
+                return response;
+            });
     }
     
     /**

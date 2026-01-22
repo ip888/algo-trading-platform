@@ -41,13 +41,17 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
     private static final Logger logger = LoggerFactory.getLogger(KrakenAuthWebSocketClient.class);
     
     private static final String WS_AUTH_URL = "wss://ws-auth.kraken.com/v2";
-    private static final Duration TOKEN_REFRESH_INTERVAL = Duration.ofMinutes(10);
+    private static final Duration TOKEN_REFRESH_INTERVAL = Duration.ofMinutes(30);  // 30 min - less aggressive
     
-    // Exponential backoff for reconnects: 30s -> 60s -> 120s -> 300s (max 5 min)
-    private static final long INITIAL_RECONNECT_DELAY_SEC = 30;
-    private static final long MAX_RECONNECT_DELAY_SEC = 300;  // 5 minutes max
+    // Exponential backoff for reconnects: 60s -> 120s -> 300s -> 600s (max 10 min)
+    private static final long INITIAL_RECONNECT_DELAY_SEC = 60;   // Start at 1 minute
+    private static final long MAX_RECONNECT_DELAY_SEC = 600;  // 10 minutes max
     private volatile long currentReconnectDelaySec = INITIAL_RECONNECT_DELAY_SEC;
     private volatile boolean rateLimitHit = false;
+    
+    // Token caching - don't request new token if we have a valid one
+    private volatile long tokenObtainedTime = 0;
+    private static final long TOKEN_VALID_DURATION_MS = 14 * 60 * 1000;  // 14 minutes (Kraken tokens last 15)
     
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AtomicReference<WebSocket> webSocket = new AtomicReference<>();
@@ -709,9 +713,18 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
                 return;
             }
             
+            // Don't refresh if token is still valid (14 minutes)
+            long now = System.currentTimeMillis();
+            if (tokenObtainedTime > 0 && (now - tokenObtainedTime) < TOKEN_VALID_DURATION_MS) {
+                logger.debug("⏸️ Skipping token refresh - token still valid ({}s remaining)", 
+                    (TOKEN_VALID_DURATION_MS - (now - tokenObtainedTime)) / 1000);
+                return;
+            }
+            
             String newToken = krakenClient.getWebSocketToken();
             if (newToken != null && !newToken.isEmpty()) {
                 authToken.set(newToken);
+                tokenObtainedTime = System.currentTimeMillis();
                 logger.info("🔄 Refreshed WebSocket auth token");
             }
         } catch (Exception e) {

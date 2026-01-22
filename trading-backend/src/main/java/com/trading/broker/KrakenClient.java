@@ -614,7 +614,23 @@ public class KrakenClient {
         
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
             .orTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-            .thenApply(HttpResponse::body)
+            .thenApply(response -> {
+                String body = response.body();
+                // Check for rate limit errors in public requests too
+                try {
+                    var json = objectMapper.readTree(body);
+                    if (json.has("error") && json.get("error").size() > 0) {
+                        String errorCode = json.get("error").get(0).asText();
+                        if (errorCode.contains("Rate limit")) {
+                            handleKrakenError(errorCode);
+                            logger.warn("⚠️ Kraken public API rate limit: {}", errorCode);
+                        }
+                    }
+                } catch (Exception e) {
+                    // Ignore parsing errors
+                }
+                return body;
+            })
             .exceptionally(ex -> {
                 logger.error("Kraken Public Request Failed: {}", ex.getMessage());
                 return "{\"error\":[\"" + ex.getMessage() + "\"]}";
@@ -673,14 +689,18 @@ public class KrakenClient {
                     recordApiCall();
                     String body = response.body();
                     
-                    // Check if response is successful (no errors)
-                    // Reset rate limit state on success
+                    // Check response for errors or success
                     try {
                         var json = objectMapper.readTree(body);
                         if (!json.has("error") || json.get("error").size() == 0) {
                             // Success! Reset rate limit tracking
                             recordSuccessfulCall();
                             logger.debug("✅ Kraken API call successful!");
+                        } else {
+                            // ERROR! Check if it's a rate limit and trigger hard pause logic
+                            String errorCode = json.get("error").get(0).asText();
+                            handleKrakenError(errorCode);  // This triggers hard pause after 3 rate limits
+                            logger.warn("⚠️ Kraken API error detected: {}", errorCode);
                         }
                     } catch (Exception e) {
                         // Ignore parsing errors here

@@ -2,6 +2,7 @@ package com.trading.crypto;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.trading.broker.KrakenAuthWebSocketClient;
 import com.trading.broker.KrakenClient;
 import com.trading.broker.KrakenWebSocketClient;
 import com.trading.config.TradingConfig;
@@ -28,6 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - Own position management
  * - Does NOT depend on market hours
  * - DYNAMIC position sizing based on available balance
+ * - Uses AUTHENTICATED WEBSOCKET for orders (NO RATE LIMITS!)
  */
 public class KrakenTradingLoop implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger(KrakenTradingLoop.class);
@@ -74,6 +76,10 @@ public class KrakenTradingLoop implements Runnable {
     // WebSocket client for real-time prices (NO RATE LIMITS!)
     private final KrakenWebSocketClient wsClient;
     
+    // Authenticated WebSocket for trading (NO RATE LIMITS on orders/balance!)
+    private final KrakenAuthWebSocketClient authWsClient;
+    private volatile boolean authWsConnected = false;
+    
     // Crypto watchlist (includes PAXG = tokenized gold for 24/7 gold trading)
     private static final List<String> CRYPTO_SYMBOLS = List.of(
         "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "XRP/USD", "PAXG/USD"
@@ -100,6 +106,19 @@ public class KrakenTradingLoop implements Runnable {
         this.wsClient.connect().join();  // Connect synchronously on startup
         logger.info("📡 Kraken WebSocket connected for real-time prices!");
         
+        // Initialize Authenticated WebSocket for trading (NO RATE LIMITS on orders!)
+        this.authWsClient = new KrakenAuthWebSocketClient(krakenClient);
+        try {
+            authWsClient.connect().join();
+            authWsClient.subscribeToBalances();
+            authWsClient.subscribeToExecutions();
+            authWsConnected = true;
+            logger.info("🔐 Kraken Auth WebSocket connected for rate-limit-free trading!");
+        } catch (Exception e) {
+            logger.warn("⚠️ Auth WebSocket failed, falling back to REST API: {}", e.getMessage());
+            authWsConnected = false;
+        }
+        
         // Load entry criteria from config (with sensible defaults)
         TradingConfig config = TradingConfig.getInstance();
         this.entryRangeMax = config.getKrakenEntryRangeMax();
@@ -115,7 +134,8 @@ public class KrakenTradingLoop implements Runnable {
         logger.info("   RSI Exit Min Profit: {}%, Cooldown: {}min", rsiExitMinProfit, reentryCooldownMs / 60000);
         logger.info("   Config Max Positions: {}, Position Size: ${}", maxPositions, positionSizeUsd);
         logger.info("   Dynamic sizing ENABLED (auto-adjusts based on balance)");
-        logger.info("   WebSocket: ENABLED (real-time prices, no rate limits)");
+        logger.info("   Public WebSocket: ENABLED (real-time prices)");
+        logger.info("   Auth WebSocket: {} (rate-limit-free orders/balance)", authWsConnected ? "ENABLED ✅" : "DISABLED ❌");
         logger.info("   Cycle Interval: {}ms", cycleIntervalMs);
     }
     
@@ -678,15 +698,29 @@ public class KrakenTradingLoop implements Runnable {
             double limitPrice = price * 0.9995;  // 0.05% below market
             limitPrice = Math.round(limitPrice * 100) / 100.0;  // 2 decimal places for price
             
-            // Validate order
-            boolean canPlace = krakenClient.canPlaceOrder(krakenSymbol, volume, limitPrice).join();
-            if (!canPlace) {
-                logger.warn("🦑 Order validation failed for {}", symbol);
-                return;
+            // Validate order (only needed for REST, WebSocket handles validation)
+            if (!authWsConnected) {
+                boolean canPlace = krakenClient.canPlaceOrder(krakenSymbol, volume, limitPrice).join();
+                if (!canPlace) {
+                    logger.warn("🦑 Order validation failed for {}", symbol);
+                    return;
+                }
             }
             
-            // Place LIMIT order (maker fees are cheaper: 0.16% vs 0.26% taker)
-            String result = krakenClient.placeLimitOrderAsync(krakenSymbol, "buy", volume, limitPrice).join();
+            String result;
+            
+            // Use WebSocket if connected (no rate limits), fallback to REST
+            if (authWsConnected && authWsClient != null) {
+                logger.debug("🦑 Using WebSocket for BUY LIMIT: {}", symbol);
+                var orderResult = authWsClient.placeLimitOrder(krakenSymbol, "buy", volume, limitPrice).join();
+                if (orderResult.success()) {
+                    result = "OK - Order ID: " + orderResult.orderId();
+                } else {
+                    result = "ERROR: " + orderResult.error();
+                }
+            } else {
+                result = krakenClient.placeLimitOrderAsync(krakenSymbol, "buy", volume, limitPrice).join();
+            }
             
             if (result.contains("ERROR")) {
                 logger.error("🦑 BUY FAILED: {} - {}", symbol, result);
@@ -722,7 +756,20 @@ public class KrakenTradingLoop implements Runnable {
         try {
             String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
             
-            String result = krakenClient.placeMarketOrderAsync(krakenSymbol, "sell", pos.quantity()).join();
+            String result;
+            
+            // Use WebSocket if connected (no rate limits), fallback to REST
+            if (authWsConnected && authWsClient != null) {
+                logger.debug("🦑 Using WebSocket for SELL: {}", symbol);
+                var orderResult = authWsClient.placeMarketOrder(krakenSymbol, "sell", pos.quantity()).join();
+                if (orderResult.success()) {
+                    result = "OK - Order ID: " + orderResult.orderId();
+                } else {
+                    result = "ERROR: " + orderResult.error();
+                }
+            } else {
+                result = krakenClient.placeMarketOrderAsync(krakenSymbol, "sell", pos.quantity()).join();
+            }
             
             if (result.contains("ERROR")) {
                 logger.error("🦑 SELL FAILED: {} - {}", symbol, result);
@@ -780,7 +827,20 @@ public class KrakenTradingLoop implements Runnable {
             String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
             sellQty = Math.round(sellQty * 100000000.0) / 100000000.0;  // 8 decimals
             
-            String result = krakenClient.placeMarketOrderAsync(krakenSymbol, "sell", sellQty).join();
+            String result;
+            
+            // Use WebSocket if connected (no rate limits), fallback to REST
+            if (authWsConnected && authWsClient != null) {
+                logger.debug("🦑 Using WebSocket for PARTIAL SELL: {}", symbol);
+                var orderResult = authWsClient.placeMarketOrder(krakenSymbol, "sell", sellQty).join();
+                if (orderResult.success()) {
+                    result = "OK - Order ID: " + orderResult.orderId();
+                } else {
+                    result = "ERROR: " + orderResult.error();
+                }
+            } else {
+                result = krakenClient.placeMarketOrderAsync(krakenSymbol, "sell", sellQty).join();
+            }
             
             if (result.contains("ERROR")) {
                 logger.error("🦑 PARTIAL SELL FAILED: {} - {}", symbol, result);

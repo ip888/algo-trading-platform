@@ -479,6 +479,34 @@ public class KrakenClient {
     }
     
     /**
+     * Get WebSocket authentication token
+     * Required for authenticated WebSocket connections (placing orders, getting balance via WS)
+     * Token is valid for 15 minutes but doesn't expire once a connection is established
+     * @return WebSocket auth token string, or null on error
+     */
+    public String getWebSocketToken() {
+        try {
+            String response = privateRequest("/private/GetWebSocketsToken", "").join();
+            JsonNode json = objectMapper.readTree(response);
+            
+            if (json.has("error") && json.get("error").size() > 0) {
+                logger.error("Failed to get WebSocket token: {}", json.get("error"));
+                return null;
+            }
+            
+            String token = json.path("result").path("token").asText(null);
+            if (token != null) {
+                logger.info("🔑 Got WebSocket auth token (expires in {} seconds)", 
+                    json.path("result").path("expires").asInt(900));
+            }
+            return token;
+        } catch (Exception e) {
+            logger.error("Failed to get WebSocket token: {}", e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
      * Place a market order
      * @param pair Trading pair (e.g., "XXBTZUSD")
      * @param type "buy" or "sell"

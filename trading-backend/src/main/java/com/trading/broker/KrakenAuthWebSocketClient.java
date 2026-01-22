@@ -644,6 +644,15 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
     
     private void scheduleReconnect() {
         if (shouldReconnect.get()) {
+            // Check if we're in hard pause mode - don't even try to reconnect
+            if (KrakenClient.isInHardPauseMode()) {
+                long pauseRemaining = KrakenClient.getRemainingPauseSeconds();
+                logger.info("⏸️ Hard pause active - delaying reconnect for {} seconds", pauseRemaining + 30);
+                // Schedule reconnect after hard pause expires (plus 30s buffer)
+                scheduler.schedule(this::scheduleReconnect, pauseRemaining + 30, TimeUnit.SECONDS);
+                return;
+            }
+            
             // Use exponential backoff: double the delay each time, cap at max
             long delay = currentReconnectDelaySec;
             
@@ -657,6 +666,13 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
             
             scheduler.schedule(() -> {
                 try {
+                    // Double-check hard pause before connecting
+                    if (KrakenClient.isInHardPauseMode()) {
+                        logger.info("⏸️ Hard pause still active, rescheduling...");
+                        scheduleReconnect();
+                        return;
+                    }
+                    
                     connect().join();
                     // Re-subscribe after reconnect
                     subscribeToBalances();
@@ -687,6 +703,12 @@ public class KrakenAuthWebSocketClient implements WebSocket.Listener {
     
     private void refreshToken() {
         try {
+            // Don't refresh if in hard pause mode
+            if (KrakenClient.isInHardPauseMode()) {
+                logger.debug("⏸️ Skipping token refresh - hard pause active");
+                return;
+            }
+            
             String newToken = krakenClient.getWebSocketToken();
             if (newToken != null && !newToken.isEmpty()) {
                 authToken.set(newToken);

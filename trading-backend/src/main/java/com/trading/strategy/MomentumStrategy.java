@@ -1,5 +1,6 @@
 package com.trading.strategy;
 
+import com.trading.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -8,11 +9,11 @@ import java.util.List;
 /**
  * Momentum Strategy for Strong Uptrend Assets (e.g., Gold, Tech leaders).
  * 
- * IMPROVED v2.0 - Much stricter entry criteria to reduce false signals:
- * - Requires CONSISTENT momentum (not just point-in-time)
- * - Requires RSI to be RISING (not just in range)
- * - Requires price to be consolidating or pulling back slightly before entry
- * - Added ATR-based volatility check
+ * IMPROVED v2.1 - CONFIGURABLE parameters via config.properties:
+ * - RSI ranges for buy/sell
+ * - Momentum thresholds
+ * - ATR volatility limits
+ * - SMA periods
  * 
  * This strategy is designed for assets showing strong bullish momentum:
  * - Buys when RSI is in "sweet spot" (45-60) with RISING RSI and positive momentum
@@ -24,24 +25,51 @@ import java.util.List;
 public final class MomentumStrategy implements TradingStrategy {
     private static final Logger logger = LoggerFactory.getLogger(MomentumStrategy.class);
     
-    // RSI parameters - TIGHTENED for higher quality entries
+    // Fixed periods (not typically adjusted)
     private static final int RSI_PERIOD = 14;
-    private static final double RSI_BUY_MIN = 45.0;    // Not too low (avoid catching falling knife)
-    private static final double RSI_BUY_MAX = 60.0;    // Lower max = earlier entry before overbought
-    private static final double RSI_SELL_THRESHOLD = 72.0;  // Exit earlier to lock in profits
-    
-    // Momentum parameters - STRICTER
-    private static final int MOMENTUM_PERIOD = 10;     // 10-bar momentum
-    private static final double MOMENTUM_MIN = 0.008;  // 0.8% minimum momentum (was 0.5%)
-    private static final int MOMENTUM_CONFIRMATION_BARS = 3; // Momentum must be positive for 3 bars
-    
-    // SMA trend filter
+    private static final int MOMENTUM_PERIOD = 10;
     private static final int SMA_PERIOD = 20;
-    private static final int SMA_PERIOD_FAST = 9;      // Fast SMA for trend confirmation
-    
-    // ATR volatility filter
+    private static final int SMA_PERIOD_FAST = 9;
     private static final int ATR_PERIOD = 14;
-    private static final double MAX_ATR_PERCENT = 3.0; // Skip if daily volatility > 3%
+    
+    // CONFIGURABLE parameters (read from config or use defaults)
+    private final double rsiBuyMin;
+    private final double rsiBuyMax;
+    private final double rsiSellThreshold;
+    private final double momentumMin;
+    private final int momentumConfirmationBars;
+    private final double maxAtrPercent;
+    private final double maxAboveSmaPercent;
+    
+    /**
+     * Default constructor - uses default values
+     */
+    public MomentumStrategy() {
+        this.rsiBuyMin = 45.0;
+        this.rsiBuyMax = 60.0;
+        this.rsiSellThreshold = 72.0;
+        this.momentumMin = 0.008;  // 0.8%
+        this.momentumConfirmationBars = 3;
+        this.maxAtrPercent = 3.0;
+        this.maxAboveSmaPercent = 2.0;
+    }
+    
+    /**
+     * Constructor with Config - reads all parameters from config.properties
+     */
+    public MomentumStrategy(Config config) {
+        this.rsiBuyMin = config.getMomentumRsiBuyMin();
+        this.rsiBuyMax = config.getMomentumRsiBuyMax();
+        this.rsiSellThreshold = config.getMomentumRsiSellThreshold();
+        this.momentumMin = config.getMomentumMinPercent() / 100.0;  // Config is in %, code uses decimal
+        this.momentumConfirmationBars = config.getMomentumConfirmationBars();
+        this.maxAtrPercent = config.getMomentumMaxAtrPercent();
+        this.maxAboveSmaPercent = config.getMomentumMaxAboveSmaPercent();
+        
+        logger.info("MomentumStrategy initialized with config: RSI({}-{}), Sell@{}, Mom>{}%, ConfirmBars={}, MaxATR={}%, MaxAboveSMA={}%",
+            rsiBuyMin, rsiBuyMax, rsiSellThreshold, momentumMin * 100, 
+            momentumConfirmationBars, maxAtrPercent, maxAboveSmaPercent);
+    }
 
     @Override
     public TradingSignal evaluate(String symbol, double currentPrice, double positionQty) {
@@ -58,7 +86,7 @@ public final class MomentumStrategy implements TradingStrategy {
         boolean rsiRising = rsi > rsiPrev;
         
         double momentum = calculateMomentum(history, MOMENTUM_PERIOD);
-        boolean momentumConsistent = isMomentumConsistent(history, MOMENTUM_CONFIRMATION_BARS);
+        boolean momentumConsistent = isMomentumConsistent(history, momentumConfirmationBars);
         
         double sma20 = calculateSMA(history, SMA_PERIOD);
         double sma9 = calculateSMA(history, SMA_PERIOD_FAST);
@@ -68,7 +96,7 @@ public final class MomentumStrategy implements TradingStrategy {
         
         // Calculate ATR for volatility check
         double atrPercent = calculateATRPercent(history, ATR_PERIOD, currentPrice);
-        boolean volatilityOK = atrPercent < MAX_ATR_PERCENT;
+        boolean volatilityOK = atrPercent < maxAtrPercent;
 
         logger.debug("{} Momentum: Price=${} RSI={:.1f}({}) Mom={:.2f}%({}) AboveSMA={:.2f}% ATR={:.2f}%", 
             symbol, 
@@ -79,8 +107,8 @@ public final class MomentumStrategy implements TradingStrategy {
             atrPercent);
 
         // EXIT: RSI overbought - take profit (exit earlier at 72 instead of 75)
-        if (positionQty > 0 && rsi >= RSI_SELL_THRESHOLD) {
-            String reason = String.format("Momentum Exit: RSI overbought (%.1f >= %.1f)", rsi, RSI_SELL_THRESHOLD);
+        if (positionQty > 0 && rsi >= rsiSellThreshold) {
+            String reason = String.format("Momentum Exit: RSI overbought (%.1f >= %.1f)", rsi, rsiSellThreshold);
             logger.info("{}: SELL signal - {}", symbol, reason);
             return new TradingSignal.Sell(reason);
         }
@@ -104,12 +132,12 @@ public final class MomentumStrategy implements TradingStrategy {
             // Skip high volatility periods
             if (!volatilityOK) {
                 logger.debug("{}: Skipping - ATR too high ({:.2f}% > {:.1f}%)", 
-                    symbol, atrPercent, MAX_ATR_PERCENT);
+                    symbol, atrPercent, maxAtrPercent);
                 return new TradingSignal.Hold(String.format("Volatility too high: ATR=%.2f%%", atrPercent));
             }
             
-            boolean rsiInSweetSpot = rsi >= RSI_BUY_MIN && rsi <= RSI_BUY_MAX;
-            boolean hasPositiveMomentum = momentum >= MOMENTUM_MIN;
+            boolean rsiInSweetSpot = rsi >= rsiBuyMin && rsi <= rsiBuyMax;
+            boolean hasPositiveMomentum = momentum >= momentumMin;
             
             // IMPROVED ENTRY: Require ALL conditions
             // 1. RSI in sweet spot AND rising
@@ -120,7 +148,7 @@ public final class MomentumStrategy implements TradingStrategy {
             if (rsiInSweetSpot && rsiRising && 
                 hasPositiveMomentum && momentumConsistent && 
                 priceAboveSMA && fastAboveSlow &&
-                percentAboveSMA < 2.0) { // Don't buy if already >2% above SMA
+                percentAboveSMA < maxAboveSmaPercent) { // Don't buy if already too far above SMA
                 
                 String reason = String.format("Momentum Buy: RSI=%.1f↑, Mom=+%.2f%% (consistent), %.1f%% above SMA", 
                     rsi, momentum * 100, percentAboveSMA);
@@ -136,7 +164,7 @@ public final class MomentumStrategy implements TradingStrategy {
                     logger.debug("{}: No entry - Momentum not consistent", symbol);
                 } else if (!fastAboveSlow) {
                     logger.debug("{}: No entry - SMA9 < SMA20 (bearish)", symbol);
-                } else if (percentAboveSMA >= 2.0) {
+                } else if (percentAboveSMA >= maxAboveSmaPercent) {
                     logger.debug("{}: No entry - Too far above SMA ({}%)", symbol, percentAboveSMA);
                 }
             }

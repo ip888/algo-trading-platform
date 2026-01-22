@@ -79,7 +79,7 @@ public final class TradingBot {
         var multiTimeframeAnalyzer = config.isMultiTimeframeEnabled() ?
             new com.trading.analysis.MultiTimeframeAnalyzer(client, config) : null;
         
-        var strategyManager = new StrategyManager(client, multiTimeframeAnalyzer);
+        var strategyManager = new StrategyManager(client, multiTimeframeAnalyzer, config);
         var marketHoursFilter = new MarketHoursFilter(config);
         var volatilityFilter = new VolatilityFilter(client);
         var database = new TradeDatabase();
@@ -302,7 +302,7 @@ public final class TradingBot {
         var multiTimeframeAnalyzer = config.isMultiTimeframeEnabled() ?
             new com.trading.analysis.MultiTimeframeAnalyzer(client, config) : null;
         
-        var strategyManager = new StrategyManager(client, multiTimeframeAnalyzer);
+        var strategyManager = new StrategyManager(client, multiTimeframeAnalyzer, config);
         var riskManager = new RiskManager(config.getInitialCapital());
         var marketHoursFilter = new MarketHoursFilter(config);
         var portfolio = new PortfolioManager(initialSymbols, config.getInitialCapital());

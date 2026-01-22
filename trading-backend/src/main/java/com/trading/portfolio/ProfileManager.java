@@ -94,7 +94,7 @@ public class ProfileManager implements Runnable {
     // Re-entry cooldown after stop loss (prevent immediate re-buy after SL)
     // Key = symbol, Value = timestamp when cooldown expires
     private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final long STOP_LOSS_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes after stop loss
+    // Cooldown period read from config.getStopLossCooldownMs() - default 30 minutes
     
     private volatile boolean running = true;
     
@@ -1660,10 +1660,11 @@ public class ProfileManager implements Runnable {
                         
                         // ========== SET RE-ENTRY COOLDOWN ==========
                         // Prevent immediate re-buy after stop loss (was causing repeated losses)
-                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + STOP_LOSS_COOLDOWN_MS);
-                        logger.warn("{} {} placed on 30-minute COOLDOWN after stop loss - no re-entry until {}", 
-                            profilePrefix, symbol, 
-                            java.time.Instant.ofEpochMilli(System.currentTimeMillis() + STOP_LOSS_COOLDOWN_MS));
+                        long cooldownMs = config.getStopLossCooldownMs();
+                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
+                        logger.warn("{} {} placed on {}-minute COOLDOWN after stop loss - no re-entry until {}", 
+                            profilePrefix, symbol, cooldownMs / 60000,
+                            java.time.Instant.ofEpochMilli(System.currentTimeMillis() + cooldownMs));
                         
                         logger.info("{} ✅ Stop loss exit order placed for {}", profilePrefix, symbol);
                     } catch (Exception e) {

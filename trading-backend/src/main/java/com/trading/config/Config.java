@@ -479,6 +479,19 @@ public final class Config {
         }
     }
     
+    private long getLongProperty(String key, long defaultValue) {
+        String value = getProperty(key);
+        if (value == null || value.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            logger.warn("Invalid long value for {}: {}", key, value);
+            return defaultValue;
+        }
+    }
+    
     // Rate Limiting Settings
     public long getApiRequestDelayMs() {
         return Long.parseLong(getProperty("API_REQUEST_DELAY_MS", "300"));
@@ -1003,6 +1016,43 @@ public final class Config {
     
     public double getBreakevenTriggerPercent() {
         return getDoubleProperty("BREAKEVEN_TRIGGER_PERCENT", 0.5);
+    }
+    
+    // ==================== Stop Loss Cooldown ====================
+    
+    /** Cooldown period (ms) after stop loss before re-entry is allowed */
+    public long getStopLossCooldownMs() {
+        return getLongProperty("STOP_LOSS_COOLDOWN_MS", 30 * 60 * 1000); // Default 30 min
+    }
+    
+    // ==================== Momentum Strategy Parameters ====================
+    
+    public double getMomentumRsiBuyMin() {
+        return getDoubleProperty("MOMENTUM_RSI_BUY_MIN", 45.0);
+    }
+    
+    public double getMomentumRsiBuyMax() {
+        return getDoubleProperty("MOMENTUM_RSI_BUY_MAX", 60.0);
+    }
+    
+    public double getMomentumRsiSellThreshold() {
+        return getDoubleProperty("MOMENTUM_RSI_SELL_THRESHOLD", 72.0);
+    }
+    
+    public double getMomentumMinPercent() {
+        return getDoubleProperty("MOMENTUM_MIN_PERCENT", 0.8); // 0.8%
+    }
+    
+    public int getMomentumConfirmationBars() {
+        return getIntProperty("MOMENTUM_CONFIRMATION_BARS", 3);
+    }
+    
+    public double getMomentumMaxAtrPercent() {
+        return getDoubleProperty("MOMENTUM_MAX_ATR_PERCENT", 3.0);
+    }
+    
+    public double getMomentumMaxAboveSmaPercent() {
+        return getDoubleProperty("MOMENTUM_MAX_ABOVE_SMA_PERCENT", 2.0);
     }
     
     // ==================== Smart Entry Timing ====================

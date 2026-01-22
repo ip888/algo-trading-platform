@@ -5,6 +5,7 @@ import com.trading.analysis.MultiTimeframeAnalyzer;
 import com.trading.analysis.MultiTimeframeAnalyzer.MultiTimeframeAnalysis;
 import com.trading.api.AlpacaClient;
 import com.trading.api.model.Bar;
+import com.trading.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,6 +27,7 @@ public final class StrategyManager {
     );
     
     private final AlpacaClient client;
+    private final Config config;
     private final RSIStrategy rsiStrategy;
     private final MACDStrategy macdStrategy;
     private final MeanReversionStrategy meanReversionStrategy;
@@ -35,15 +37,20 @@ public final class StrategyManager {
     private String activeStrategy = "None";
 
     public StrategyManager(AlpacaClient client) {
-        this(client, null);
+        this(client, null, null);
     }
     
     public StrategyManager(AlpacaClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer) {
+        this(client, multiTimeframeAnalyzer, null);
+    }
+    
+    public StrategyManager(AlpacaClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer, Config config) {
         this.client = client;
+        this.config = config;
         this.rsiStrategy = new RSIStrategy();
         this.macdStrategy = new MACDStrategy();
         this.meanReversionStrategy = new MeanReversionStrategy();
-        this.momentumStrategy = new MomentumStrategy();
+        this.momentumStrategy = config != null ? new MomentumStrategy(config) : new MomentumStrategy();
         this.multiTimeframeAnalyzer = multiTimeframeAnalyzer;
         
         if (multiTimeframeAnalyzer != null) {

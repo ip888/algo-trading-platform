@@ -60,6 +60,11 @@ public class KrakenDataCache {
      * Check if cache is fresh enough to serve, or if we're in rate limit backoff
      */
     public boolean isCacheValid() {
+        // CRITICAL: In hard pause mode, always return true to prevent any API calls
+        if (KrakenClient.isInHardPauseMode()) {
+            return true;  // Serve stale cache, no API calls
+        }
+        
         // If in rate limit backoff, consider cache "valid" (don't retry)
         if (System.currentTimeMillis() < rateLimitBackoffUntil) {
             logger.debug("In rate limit backoff, serving stale cache");
@@ -132,8 +137,16 @@ public class KrakenDataCache {
     
     /**
      * Refresh cache if needed (rate-limited to once per CACHE_TTL_MS)
+     * RESPECTS HARD PAUSE MODE - does not make API calls during pause
      */
     private synchronized void refreshIfNeeded() {
+        // CRITICAL: Respect global hard pause mode
+        if (KrakenClient.isInHardPauseMode()) {
+            logger.debug("🛑 Hard pause mode active - skipping cache refresh ({} min remaining)", 
+                KrakenClient.getRemainingPauseSeconds() / 60);
+            return;
+        }
+        
         if (isCacheValid() || refreshInProgress) {
             return;
         }

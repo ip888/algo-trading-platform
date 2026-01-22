@@ -166,6 +166,17 @@ public class KrakenTradingLoop implements Runnable {
                     continue;
                 }
                 
+                // ===== CHECK HARD PAUSE MODE =====
+                // When rate limited, completely skip the cycle to let rate limit recover
+                if (KrakenClient.isInHardPauseMode()) {
+                    long remaining = KrakenClient.getRemainingPauseSeconds();
+                    if (remaining > 0 && remaining % 60 == 0) {  // Log every minute
+                        logger.warn("🛑 HARD PAUSE MODE - {} minutes remaining. No REST API calls.", remaining / 60);
+                    }
+                    Thread.sleep(10000);  // Sleep 10 seconds, then check again
+                    continue;
+                }
+                
                 long cycleStart = System.currentTimeMillis();
                 
                 // ===== STEP 0: Check Auth WebSocket status =====

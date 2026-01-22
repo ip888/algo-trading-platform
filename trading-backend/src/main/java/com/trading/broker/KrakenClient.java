@@ -66,11 +66,15 @@ public class KrakenClient {
     private static volatile long minuteStartTime = 0;
     private static final int MAX_CALLS_PER_MINUTE = 8;  // Very conservative limit (Kraken allows 15)
     
-    // Backoff for rate limit errors - EXPONENTIAL BACKOFF
+    // Backoff for rate limit errors - HARD PAUSE MODE
+    // When rate limited, we completely stop ALL REST calls for 15 minutes
+    // This breaks the vicious cycle of rate limit -> retry -> rate limit
     private static volatile long rateLimitBackoffUntil = 0;
-    private static volatile long currentBackoffSeconds = 120;  // Start at 2 minutes
-    private static final long MAX_BACKOFF_SECONDS = 600;  // Max 10 minutes
+    private static volatile long currentBackoffSeconds = 900;  // Start at 15 MINUTES (was 2 min)
+    private static final long MAX_BACKOFF_SECONDS = 900;  // Max 15 minutes - hard pause
     private static volatile long lastSuccessfulCall = System.currentTimeMillis();
+    private static volatile boolean inHardPauseMode = false;
+    private static volatile int consecutiveRateLimitErrors = 0;
     
     public KrakenClient() {
         this.httpClient = HttpClient.newBuilder()
@@ -166,12 +170,25 @@ public class KrakenClient {
      * CRITICAL: Also triggers EXPONENTIAL rate limit backoff when appropriate
      */
     private String handleKrakenError(String errorCode) {
-        // Trigger EXPONENTIAL backoff for rate limit errors
+        // Trigger HARD PAUSE for rate limit errors
         if (errorCode.contains("Rate limit")) {
-            // Double the backoff each time, capped at MAX_BACKOFF_SECONDS
-            currentBackoffSeconds = Math.min(currentBackoffSeconds * 2, MAX_BACKOFF_SECONDS);
-            rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
-            logger.warn("🛑 Rate limit detected! Setting {}-second exponential backoff", currentBackoffSeconds);
+            consecutiveRateLimitErrors++;
+            
+            // After 3 consecutive rate limits, enter hard pause mode (15 min)
+            if (consecutiveRateLimitErrors >= 3 || inHardPauseMode) {
+                inHardPauseMode = true;
+                currentBackoffSeconds = MAX_BACKOFF_SECONDS;  // 15 minutes
+                rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
+                logger.error("🛑🛑🛑 HARD PAUSE MODE ACTIVATED! Stopping ALL Kraken REST calls for 15 minutes!");
+                logger.error("🛑 Consecutive rate limit errors: {}. Bot will resume at: {}", 
+                    consecutiveRateLimitErrors, 
+                    java.time.Instant.ofEpochMilli(rateLimitBackoffUntil));
+            } else {
+                // First few errors - shorter backoff
+                currentBackoffSeconds = 300;  // 5 minutes
+                rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
+                logger.warn("🛑 Rate limit #{} detected! Setting 5-minute backoff", consecutiveRateLimitErrors);
+            }
         }
         
         return switch (errorCode) {
@@ -657,16 +674,13 @@ public class KrakenClient {
                     String body = response.body();
                     
                     // Check if response is successful (no errors)
-                    // Reset exponential backoff on success
+                    // Reset rate limit state on success
                     try {
                         var json = objectMapper.readTree(body);
                         if (!json.has("error") || json.get("error").size() == 0) {
-                            // Success! Reset backoff
-                            if (currentBackoffSeconds > 120) {
-                                logger.info("✅ Kraken API call successful! Resetting backoff to 2 minutes");
-                                currentBackoffSeconds = 120;
-                            }
-                            lastSuccessfulCall = System.currentTimeMillis();
+                            // Success! Reset rate limit tracking
+                            recordSuccessfulCall();
+                            logger.debug("✅ Kraken API call successful!");
                         }
                     } catch (Exception e) {
                         // Ignore parsing errors here
@@ -762,6 +776,57 @@ public class KrakenClient {
     public void setRateLimitBackoff(long seconds) {
         rateLimitBackoffUntil = System.currentTimeMillis() + (seconds * 1000);
         logger.warn("⏳ Rate limit backoff set for {} seconds", seconds);
+    }
+    
+    /**
+     * Record successful API call - resets rate limit tracking
+     */
+    private void recordSuccessfulCall() {
+        lastSuccessfulCall = System.currentTimeMillis();
+        consecutiveRateLimitErrors = 0;
+        
+        // Exit hard pause mode on success
+        if (inHardPauseMode) {
+            inHardPauseMode = false;
+            currentBackoffSeconds = 300;  // Reset to 5 minutes
+            logger.info("✅ Rate limit recovered! Exiting hard pause mode.");
+        }
+    }
+    
+    /**
+     * Check if currently in hard pause mode
+     */
+    public static boolean isInHardPauseMode() {
+        if (!inHardPauseMode) return false;
+        
+        // Check if pause period has expired
+        if (System.currentTimeMillis() >= rateLimitBackoffUntil) {
+            inHardPauseMode = false;
+            consecutiveRateLimitErrors = 0;
+            logger.info("✅ Hard pause period expired. Ready to resume API calls.");
+            return false;
+        }
+        return true;
+    }
+    
+    /**
+     * Get remaining pause time in seconds
+     */
+    public static long getRemainingPauseSeconds() {
+        if (!inHardPauseMode) return 0;
+        long remaining = (rateLimitBackoffUntil - System.currentTimeMillis()) / 1000;
+        return Math.max(0, remaining);
+    }
+    
+    /**
+     * Force clear the hard pause mode (for admin override)
+     */
+    public static void clearHardPauseMode() {
+        inHardPauseMode = false;
+        consecutiveRateLimitErrors = 0;
+        rateLimitBackoffUntil = 0;
+        currentBackoffSeconds = 300;
+        logger.info("🔓 Hard pause mode manually cleared by admin.");
     }
     
     /**

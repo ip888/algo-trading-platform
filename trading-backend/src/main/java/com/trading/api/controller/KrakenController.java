@@ -31,6 +31,8 @@ public final class KrakenController {
         app.get("/api/kraken/trades", this::getTradesHistory);
         app.get("/api/kraken/capital", this::getCapitalDeployment);
         app.post("/api/kraken/liquidate-losers", this::liquidateLosers);
+        app.get("/api/kraken/rate-limit-status", this::getRateLimitStatus);
+        app.post("/api/kraken/clear-rate-limit", this::clearRateLimit);
     }
     
     /**
@@ -328,5 +330,36 @@ public final class KrakenController {
             logger.error("Failed to fetch capital deployment", e);
             ctx.status(500).json(Map.of("error", e.getMessage()));
         }
+    }
+    
+    /**
+     * Get rate limit status including hard pause mode.
+     */
+    private void getRateLimitStatus(Context ctx) {
+        boolean inPause = KrakenClient.isInHardPauseMode();
+        long remaining = KrakenClient.getRemainingPauseSeconds();
+        
+        ctx.json(Map.of(
+            "inHardPauseMode", inPause,
+            "remainingSeconds", remaining,
+            "remainingMinutes", remaining / 60,
+            "message", inPause 
+                ? "Rate limit recovery in progress. All REST API calls paused." 
+                : "Normal operation. Rate limit not active."
+        ));
+    }
+    
+    /**
+     * Manually clear rate limit hard pause mode (admin override).
+     */
+    private void clearRateLimit(Context ctx) {
+        logger.warn("🔓 Admin override: Clearing rate limit hard pause mode");
+        KrakenClient.clearHardPauseMode();
+        
+        ctx.json(Map.of(
+            "success", true,
+            "message", "Rate limit hard pause mode cleared. Bot will resume normal operation.",
+            "warning", "Use with caution - if rate limit persists, pause will reactivate."
+        ));
     }
 }

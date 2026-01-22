@@ -170,25 +170,20 @@ public class KrakenClient {
      * CRITICAL: Also triggers EXPONENTIAL rate limit backoff when appropriate
      */
     private String handleKrakenError(String errorCode) {
-        // Trigger HARD PAUSE for rate limit errors
+        // Trigger HARD PAUSE for rate limit errors - IMMEDIATELY on first occurrence
+        // Kraken rate limits can persist for hours, so we need aggressive backoff
         if (errorCode.contains("Rate limit")) {
             consecutiveRateLimitErrors++;
             
-            // After 3 consecutive rate limits, enter hard pause mode (15 min)
-            if (consecutiveRateLimitErrors >= 3 || inHardPauseMode) {
-                inHardPauseMode = true;
-                currentBackoffSeconds = MAX_BACKOFF_SECONDS;  // 15 minutes
-                rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
-                logger.error("🛑🛑🛑 HARD PAUSE MODE ACTIVATED! Stopping ALL Kraken REST calls for 15 minutes!");
-                logger.error("🛑 Consecutive rate limit errors: {}. Bot will resume at: {}", 
-                    consecutiveRateLimitErrors, 
-                    java.time.Instant.ofEpochMilli(rateLimitBackoffUntil));
-            } else {
-                // First few errors - shorter backoff
-                currentBackoffSeconds = 300;  // 5 minutes
-                rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
-                logger.warn("🛑 Rate limit #{} detected! Setting 5-minute backoff", consecutiveRateLimitErrors);
-            }
+            // IMMEDIATELY enter hard pause on ANY rate limit error
+            // This is the only way to break the rate limit death spiral
+            inHardPauseMode = true;
+            currentBackoffSeconds = MAX_BACKOFF_SECONDS;  // 15 minutes
+            rateLimitBackoffUntil = System.currentTimeMillis() + (currentBackoffSeconds * 1000);
+            logger.error("🛑🛑🛑 HARD PAUSE MODE ACTIVATED! Stopping ALL Kraken REST calls for 15 minutes!");
+            logger.error("🛑 Rate limit error #{} detected. Bot will resume at: {}", 
+                consecutiveRateLimitErrors, 
+                java.time.Instant.ofEpochMilli(rateLimitBackoffUntil));
         }
         
         return switch (errorCode) {

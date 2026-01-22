@@ -157,6 +157,28 @@ public final class Config {
         return getProperty("KRAKEN_WEBSOCKET_URL", "wss://ws.kraken.com");
     }
     
+    /**
+     * Check if Kraken trading is enabled (default false - using Alpaca Crypto instead)
+     */
+    public boolean isKrakenEnabled() {
+        return getBooleanProperty("KRAKEN_ENABLED", false);
+    }
+    
+    /**
+     * Check if Alpaca Crypto trading is enabled (default true)
+     */
+    public boolean isAlpacaCryptoEnabled() {
+        return getBooleanProperty("ALPACA_CRYPTO_ENABLED", true);
+    }
+    
+    /**
+     * Get Alpaca Crypto symbols (e.g., BTC/USD, ETH/USD, SOL/USD)
+     */
+    public String[] getAlpacaCryptoSymbols() {
+        String symbols = getProperty("ALPACA_CRYPTO_SYMBOLS", "BTC/USD,ETH/USD,SOL/USD");
+        return symbols.split(",");
+    }
+    
     // ==================== Kraken-Specific Trading Settings ====================
     
     /**
@@ -234,14 +256,6 @@ public final class Config {
      */
     public boolean isAlpacaEnabled() {
         return getBooleanProperty("ALPACA_ENABLED", true);
-    }
-    
-    /**
-     * Check if Kraken platform is enabled.
-     * Default: true
-     */
-    public boolean isKrakenEnabled() {
-        return getBooleanProperty("KRAKEN_ENABLED", true);
     }
     
     public String getTradingMode() {

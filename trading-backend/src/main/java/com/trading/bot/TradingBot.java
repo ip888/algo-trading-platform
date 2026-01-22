@@ -211,21 +211,30 @@ public final class TradingBot {
         logger.info("✅ Safety Autopilot initialized (Dead Man's Switch Active)");
         
         // ===== START INDEPENDENT KRAKEN TRADING LOOP =====
-        // Runs on separate virtual thread, 24/7, completely independent from Alpaca
-        var gridTradingService = new com.trading.strategy.GridTradingService(
-            client, krakenClient, config.getKrakenGridPositionSize());  // Configurable grid size
-        var krakenLoop = new com.trading.crypto.KrakenTradingLoop(
-            krakenClient, mainManager.getPortfolio(), gridTradingService,
-            config.getKrakenTakeProfitPercent(),   // Kraken-specific TP
-            config.getKrakenStopLossPercent(),     // Kraken-specific SL
-            config.getKrakenTrailingStopPercent(), // Kraken trailing stop
-            config.getKrakenMaxPositions(),        // Max positions
-            config.getKrakenPositionSizeUsd(),     // Configurable position size
-            config.getKrakenCycleIntervalMs()      // Configurable cycle interval
-        );
-        krakenTradingLoop = krakenLoop; // Store reference for API access
-        Thread krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoop);
-        logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
+        // Only start if Kraken is enabled (disabled by default - using Alpaca Crypto instead)
+        Thread krakenThread = null;
+        com.trading.crypto.KrakenTradingLoop krakenLoop = null;
+        if (config.isKrakenEnabled()) {
+            var gridTradingService = new com.trading.strategy.GridTradingService(
+                client, krakenClient, config.getKrakenGridPositionSize());
+            krakenLoop = new com.trading.crypto.KrakenTradingLoop(
+                krakenClient, mainManager.getPortfolio(), gridTradingService,
+                config.getKrakenTakeProfitPercent(),
+                config.getKrakenStopLossPercent(),
+                config.getKrakenTrailingStopPercent(),
+                config.getKrakenMaxPositions(),
+                config.getKrakenPositionSizeUsd(),
+                config.getKrakenCycleIntervalMs()
+            );
+            krakenTradingLoop = krakenLoop;
+            krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoop);
+            logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
+        } else {
+            logger.info("🦑 Kraken trading DISABLED - using Alpaca Crypto instead");
+        }
+        
+        // Create final reference for lambda
+        final com.trading.crypto.KrakenTradingLoop finalKrakenLoop = krakenLoop;
         
         logger.info("✅ Starting both profiles with virtual threads...");
         logger.info("   Main Profile: {} active positions", mainManager.getActivePositionCount());
@@ -234,7 +243,7 @@ public final class TradingBot {
         // Add shutdown hook for graceful termination
         Runtime.getRuntime().addShutdownHook(Thread.ofVirtual().unstarted(() -> {
             logger.info("Shutdown signal received, stopping profiles...");
-            krakenLoop.stop();  // Stop Kraken loop too
+            if (finalKrakenLoop != null) finalKrakenLoop.stop();  // Stop Kraken loop if running
             mainManager.stop();
             expManager.stop();
         }));
@@ -338,18 +347,24 @@ public final class TradingBot {
         }
         
         // ===== START INDEPENDENT KRAKEN TRADING LOOP =====
-        // Runs on separate thread, 24/7, completely independent from Alpaca
-        var krakenLoop = new com.trading.crypto.KrakenTradingLoop(
-            krakenClient, portfolio, gridTradingService,
-            config.getKrakenTakeProfitPercent(),   // Kraken-specific TP
-            config.getKrakenStopLossPercent(),     // Kraken-specific SL
-            config.getKrakenTrailingStopPercent(), // Kraken trailing stop
-            config.getKrakenMaxPositions(),        // Max positions
-            config.getKrakenPositionSizeUsd(),     // Configurable position size
-            config.getKrakenCycleIntervalMs()      // Configurable cycle interval
-        );
-        Thread krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoop);
-        logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
+        // Only start if Kraken is enabled (disabled by default - using Alpaca Crypto instead)
+        com.trading.crypto.KrakenTradingLoop krakenLoopSingle = null;
+        if (config.isKrakenEnabled()) {
+            krakenLoopSingle = new com.trading.crypto.KrakenTradingLoop(
+                krakenClient, portfolio, gridTradingService,
+                config.getKrakenTakeProfitPercent(),
+                config.getKrakenStopLossPercent(),
+                config.getKrakenTrailingStopPercent(),
+                config.getKrakenMaxPositions(),
+                config.getKrakenPositionSizeUsd(),
+                config.getKrakenCycleIntervalMs()
+            );
+            Thread krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoopSingle);
+            logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
+        } else {
+            logger.info("🦑 Kraken trading DISABLED - using Alpaca Crypto instead");
+        }
+        final com.trading.crypto.KrakenTradingLoop finalKrakenLoopSingle = krakenLoopSingle;
         
         // Start dashboard
         dashboard.start();
@@ -377,7 +392,7 @@ public final class TradingBot {
                     Thread.sleep(SLEEP_DURATION);
                 } catch (InterruptedException e) {
                     logger.info("Bot interrupted, shutting down");
-                    krakenLoop.stop(); // Stop Kraken loop too
+                    if (finalKrakenLoopSingle != null) finalKrakenLoopSingle.stop();
                     Thread.currentThread().interrupt();
                     break;
                 } catch (Exception e) {
@@ -393,7 +408,7 @@ public final class TradingBot {
             }
         } catch (Exception e) {
             logger.error("Fatal error", e);
-            krakenLoop.stop(); // Stop Kraken loop on fatal error
+            if (finalKrakenLoopSingle != null) finalKrakenLoopSingle.stop();
             System.exit(1);
         }
     }

@@ -302,14 +302,18 @@ public class ProfileManager implements Runnable {
         // This ensures positions from previous regimes are still monitored for exits
         checkAllPositionsForProfitTargets(profilePrefix);
         
-        // Check market hours
+        // Check market hours (crypto trades 24/7, so check if we have any non-crypto symbols)
         boolean isMarketOpen = marketHoursFilter.isMarketOpen();
         boolean bypassMarketHours = config.isMarketHoursBypassEnabled();
+        boolean hasCryptoSymbols = targetSymbols.stream().anyMatch(s -> s.contains("/"));
         
-        if (!isMarketOpen && !bypassMarketHours) {
-            logger.debug("{} Market is closed", profilePrefix);
+        if (!isMarketOpen && !bypassMarketHours && !hasCryptoSymbols) {
+            logger.debug("{} Market is closed (no crypto symbols to trade)", profilePrefix);
             return;
         }
+        
+        // If market closed but has crypto, we'll filter to crypto-only below
+        boolean cryptoOnlyMode = !isMarketOpen && !bypassMarketHours && hasCryptoSymbols;
         
         // Check entry timing (avoid first 15 minutes)
         if (!isGoodEntryTime()) {
@@ -331,6 +335,17 @@ public class ProfileManager implements Runnable {
             if (!targetSymbols.contains(activeSymbol)) {
                 symbolsToProcess.add(activeSymbol);
                 logger.debug("{} Including {} for exit management", profilePrefix, activeSymbol);
+            }
+        }
+        
+        // If in crypto-only mode (market closed), filter to only crypto symbols
+        if (cryptoOnlyMode) {
+            symbolsToProcess = symbolsToProcess.stream()
+                .filter(s -> s.contains("/"))  // Crypto pairs contain "/"
+                .collect(java.util.stream.Collectors.toSet());
+            if (!symbolsToProcess.isEmpty()) {
+                logger.info("{} 🌙 Market closed - trading {} crypto symbols 24/7", 
+                    profilePrefix, symbolsToProcess.size());
             }
         }
         

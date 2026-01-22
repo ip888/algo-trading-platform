@@ -139,12 +139,28 @@ public final class AlpacaClient {
 
     public Optional<Bar> getLatestBar(String symbol) {
         try {
-            // Use data API base URL
-            String url = "https://data.alpaca.markets/v2/stocks/" + symbol + "/bars/latest";
+            // Crypto uses different API endpoint (v1beta3/crypto/us)
+            // Crypto symbols contain "/" (e.g., BTC/USD, ETH/USD)
+            String url;
+            if (symbol.contains("/")) {
+                // Crypto endpoint - URL encode the symbol
+                String encodedSymbol = java.net.URLEncoder.encode(symbol, java.nio.charset.StandardCharsets.UTF_8);
+                url = "https://data.alpaca.markets/v1beta3/crypto/us/latest/bars?symbols=" + encodedSymbol;
+            } else {
+                // Stock endpoint
+                url = "https://data.alpaca.markets/v2/stocks/" + symbol + "/bars/latest";
+            }
+            
             String response = sendRequest(url, "GET");
             JsonNode root = objectMapper.readTree(response);
             
-            if (root != null && root.has("bar")) {
+            // Crypto returns bars in a different format: {"bars": {"BTC/USD": {...}}}
+            if (symbol.contains("/") && root.has("bars")) {
+                JsonNode bars = root.get("bars");
+                if (bars.has(symbol)) {
+                    return Optional.of(objectMapper.treeToValue(bars.get(symbol), Bar.class));
+                }
+            } else if (root != null && root.has("bar")) {
                 return Optional.of(objectMapper.treeToValue(root.get("bar"), Bar.class));
             }
         } catch (Exception e) {
@@ -421,18 +437,40 @@ public final class AlpacaClient {
         };
         
         var startStr = start.format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-        var url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s", 
-                symbol, timeframe, limit, java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8));
+        
+        // Crypto uses different API endpoint
+        String url;
+        if (symbol.contains("/")) {
+            String encodedSymbol = java.net.URLEncoder.encode(symbol, java.nio.charset.StandardCharsets.UTF_8);
+            url = String.format("https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=%s&timeframe=%s&limit=%d&start=%s", 
+                    encodedSymbol, timeframe, limit, java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8));
+        } else {
+            url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s", 
+                    symbol, timeframe, limit, java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8));
+        }
         
         var response = sendRequest(url, "GET");
         var root = objectMapper.readTree(response);
         
         var bars = new ArrayList<Bar>();
-        var barsArray = root.get("bars");
         
-        if (barsArray != null && barsArray.isArray()) {
-            for (var barNode : barsArray) {
-                bars.add(objectMapper.treeToValue(barNode, Bar.class));
+        // Crypto returns bars in different format: {"bars": {"BTC/USD": [...]}}
+        if (symbol.contains("/")) {
+            var barsContainer = root.get("bars");
+            if (barsContainer != null && barsContainer.has(symbol)) {
+                var barsArray = barsContainer.get(symbol);
+                if (barsArray != null && barsArray.isArray()) {
+                    for (var barNode : barsArray) {
+                        bars.add(objectMapper.treeToValue(barNode, Bar.class));
+                    }
+                }
+            }
+        } else {
+            var barsArray = root.get("bars");
+            if (barsArray != null && barsArray.isArray()) {
+                for (var barNode : barsArray) {
+                    bars.add(objectMapper.treeToValue(barNode, Bar.class));
+                }
             }
         }
         

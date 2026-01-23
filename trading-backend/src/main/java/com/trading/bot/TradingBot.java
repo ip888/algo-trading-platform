@@ -41,6 +41,9 @@ public final class TradingBot {
     // Kraken trading loop reference for API access
     private static com.trading.crypto.KrakenTradingLoop krakenTradingLoop;
     
+    // Coinbase trading loop reference for API access (US + EU)
+    private static com.trading.crypto.CoinbaseTradingLoop coinbaseTradingLoop;
+    
     // Symbol selector will be initialized in main() based on config
     private static SymbolSelector symbolSelector;
     
@@ -230,11 +233,40 @@ public final class TradingBot {
             krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoop);
             logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
         } else {
-            logger.info("🦑 Kraken trading DISABLED - using Alpaca Crypto instead");
+            logger.info("🦑 Kraken trading DISABLED - using Coinbase instead");
+        }
+        
+        // ===== START COINBASE TRADING LOOP (US + EU) =====
+        // Coinbase works in US AND all EU countries (Spain, Poland, etc.)
+        // 30 req/sec rate limit = NO rate limit issues like Kraken!
+        Thread coinbaseThread = null;
+        com.trading.crypto.CoinbaseTradingLoop coinbaseLoop = null;
+        var tradingConfig = com.trading.config.TradingConfig.getInstance();
+        if (tradingConfig.isCoinbaseEnabled()) {
+            var coinbaseClient = new com.trading.broker.CoinbaseClient(
+                tradingConfig.getCoinbaseApiKeyName(),
+                tradingConfig.getCoinbasePrivateKey()
+            );
+            coinbaseLoop = new com.trading.crypto.CoinbaseTradingLoop(
+                coinbaseClient, mainManager.getPortfolio(),
+                tradingConfig.getCoinbaseTakeProfitPercent() / 100.0,
+                tradingConfig.getCoinbaseStopLossPercent() / 100.0,
+                tradingConfig.getCoinbaseTrailingStopPercent() / 100.0,
+                tradingConfig.getCoinbaseMaxPositions(),
+                tradingConfig.getCoinbasePositionSizeUsd(),
+                tradingConfig.getCoinbaseCycleIntervalMs()
+            );
+            coinbaseTradingLoop = coinbaseLoop;
+            coinbaseThread = Thread.ofVirtual().name("coinbase-trading-loop").start(coinbaseLoop);
+            logger.info("💰 Coinbase Trading Loop started (US + EU supported!)");
+        } else {
+            logger.info("💰 Coinbase trading DISABLED - enable in config.properties");
+            logger.info("   To enable: set COINBASE_ENABLED=true and add API credentials");
         }
         
         // Create final reference for lambda
         final com.trading.crypto.KrakenTradingLoop finalKrakenLoop = krakenLoop;
+        final com.trading.crypto.CoinbaseTradingLoop finalCoinbaseLoop = coinbaseLoop;
         
         logger.info("✅ Starting both profiles with virtual threads...");
         logger.info("   Main Profile: {} active positions", mainManager.getActivePositionCount());
@@ -244,6 +276,7 @@ public final class TradingBot {
         Runtime.getRuntime().addShutdownHook(Thread.ofVirtual().unstarted(() -> {
             logger.info("Shutdown signal received, stopping profiles...");
             if (finalKrakenLoop != null) finalKrakenLoop.stop();  // Stop Kraken loop if running
+            if (finalCoinbaseLoop != null) finalCoinbaseLoop.stop();  // Stop Coinbase loop if running
             mainManager.stop();
             expManager.stop();
         }));
@@ -978,6 +1011,13 @@ public final class TradingBot {
      */
     public static com.trading.crypto.KrakenTradingLoop getKrakenTradingLoop() {
         return krakenTradingLoop;
+    }
+    
+    /**
+     * Get the Coinbase trading loop for API access (US + EU).
+     */
+    public static com.trading.crypto.CoinbaseTradingLoop getCoinbaseTradingLoop() {
+        return coinbaseTradingLoop;
     }
 
     public static void beat(String component) {

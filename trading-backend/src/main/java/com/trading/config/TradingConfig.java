@@ -46,6 +46,22 @@ public final class TradingConfig {
     private final double krakenTakeProfitPercent;
     private final double krakenTrailingStopPercent;
     
+    // Crypto-specific (Coinbase) - Works in US + EU!
+    private final boolean coinbaseEnabled;
+    private final String coinbaseApiKeyName;
+    private final String coinbasePrivateKey;
+    private final double coinbaseStopLossPercent;
+    private final double coinbaseTakeProfitPercent;
+    private final double coinbaseTrailingStopPercent;
+    private final double coinbaseEntryRangeMax;
+    private final double coinbaseEntryDayChangeMin;
+    private final double coinbaseEntryRsiMax;
+    private final double coinbaseRsiExitMinProfit;
+    private final long coinbaseReentryCooldownMs;
+    private final int coinbaseMaxPositions;
+    private final double coinbasePositionSizeUsd;
+    private final long coinbaseCycleIntervalMs;
+    
     private TradingConfig(Properties props) {
         this.properties = props;
         
@@ -75,6 +91,22 @@ public final class TradingConfig {
         this.krakenEntryRsiMax = parsePercent("KRAKEN_ENTRY_RSI_MAX", 45.0);
         this.krakenRsiExitMinProfit = parsePercent("KRAKEN_RSI_EXIT_MIN_PROFIT", 0.8);
         this.krakenReentryCooldownMs = parseLong("KRAKEN_REENTRY_COOLDOWN_MS", 15 * 60 * 1000);
+        
+        // Coinbase crypto settings - Works in US + EU (Spain, Poland, etc.)
+        this.coinbaseEnabled = parseBoolean("COINBASE_ENABLED", false);
+        this.coinbaseApiKeyName = properties.getProperty("COINBASE_API_KEY_NAME", "");
+        this.coinbasePrivateKey = properties.getProperty("COINBASE_PRIVATE_KEY", "");
+        this.coinbaseStopLossPercent = parsePercent("COINBASE_STOP_LOSS_PERCENT", 1.0);
+        this.coinbaseTakeProfitPercent = parsePercent("COINBASE_TAKE_PROFIT_PERCENT", 1.5);
+        this.coinbaseTrailingStopPercent = parsePercent("COINBASE_TRAILING_STOP_PERCENT", 0.5);
+        this.coinbaseEntryRangeMax = parsePercent("COINBASE_ENTRY_RANGE_MAX", 30.0);
+        this.coinbaseEntryDayChangeMin = parsePercent("COINBASE_ENTRY_DAY_CHANGE_MIN", -2.0);
+        this.coinbaseEntryRsiMax = parsePercent("COINBASE_ENTRY_RSI_MAX", 50.0);
+        this.coinbaseRsiExitMinProfit = parsePercent("COINBASE_RSI_EXIT_MIN_PROFIT", 0.8);
+        this.coinbaseReentryCooldownMs = parseLong("COINBASE_REENTRY_COOLDOWN_MS", 15 * 60 * 1000);
+        this.coinbaseMaxPositions = (int) parseLong("COINBASE_MAX_POSITIONS", 2);
+        this.coinbasePositionSizeUsd = parsePercent("COINBASE_POSITION_SIZE_USD", 100.0);
+        this.coinbaseCycleIntervalMs = parseLong("COINBASE_CYCLE_INTERVAL_MS", 15000);
         
         logger.info("📊 Trading Configuration Loaded:");
         logger.info("   Stop-Loss: {}%", String.format("%.2f", stopLossPercent));
@@ -118,6 +150,17 @@ public final class TradingConfig {
             logger.warn("Invalid {} value '{}', using default {}", key, value, defaultValue);
             return defaultValue;
         }
+    }
+    
+    /**
+     * Parse a boolean value from properties.
+     */
+    private boolean parseBoolean(String key, boolean defaultValue) {
+        String value = properties.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        return Boolean.parseBoolean(value.trim());
     }
     
     /**
@@ -278,6 +321,78 @@ public final class TradingConfig {
     /** Kraken re-entry cooldown in milliseconds */
     public long getKrakenReentryCooldownMs() {
         return krakenReentryCooldownMs;
+    }
+    
+    // ==================== Coinbase Getters (US + EU) ====================
+    
+    /** Is Coinbase trading enabled? */
+    public boolean isCoinbaseEnabled() {
+        return coinbaseEnabled;
+    }
+    
+    /** Coinbase API key name */
+    public String getCoinbaseApiKeyName() {
+        return coinbaseApiKeyName;
+    }
+    
+    /** Coinbase private key (PEM format) */
+    public String getCoinbasePrivateKey() {
+        return coinbasePrivateKey;
+    }
+    
+    /** Coinbase stop-loss percentage */
+    public double getCoinbaseStopLossPercent() {
+        return coinbaseStopLossPercent;
+    }
+    
+    /** Coinbase take-profit percentage */
+    public double getCoinbaseTakeProfitPercent() {
+        return coinbaseTakeProfitPercent;
+    }
+    
+    /** Coinbase trailing stop percentage */
+    public double getCoinbaseTrailingStopPercent() {
+        return coinbaseTrailingStopPercent;
+    }
+    
+    /** Coinbase entry: max range position (e.g., 30 = lower 30% of range) */
+    public double getCoinbaseEntryRangeMax() {
+        return coinbaseEntryRangeMax;
+    }
+    
+    /** Coinbase entry: min day change (e.g., -2.0 = skip if down >2%) */
+    public double getCoinbaseEntryDayChangeMin() {
+        return coinbaseEntryDayChangeMin;
+    }
+    
+    /** Coinbase entry: max RSI for momentum confirmation */
+    public double getCoinbaseEntryRsiMax() {
+        return coinbaseEntryRsiMax;
+    }
+    
+    /** Coinbase RSI overbought exit: min profit % to trigger */
+    public double getCoinbaseRsiExitMinProfit() {
+        return coinbaseRsiExitMinProfit;
+    }
+    
+    /** Coinbase re-entry cooldown in milliseconds */
+    public long getCoinbaseReentryCooldownMs() {
+        return coinbaseReentryCooldownMs;
+    }
+    
+    /** Coinbase max positions */
+    public int getCoinbaseMaxPositions() {
+        return coinbaseMaxPositions;
+    }
+    
+    /** Coinbase position size in USD */
+    public double getCoinbasePositionSizeUsd() {
+        return coinbasePositionSizeUsd;
+    }
+    
+    /** Coinbase cycle interval in milliseconds */
+    public long getCoinbaseCycleIntervalMs() {
+        return coinbaseCycleIntervalMs;
     }
     
     /** Get raw property value */

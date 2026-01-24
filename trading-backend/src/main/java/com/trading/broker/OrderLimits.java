@@ -1,7 +1,7 @@
 package com.trading.broker;
 
 /**
- * Order limits for Kraken trading pairs
+ * Order limits for trading pairs
  * @param minVolume Minimum order volume (in base currency)
  * @param minNotional Minimum order value in USD
  */

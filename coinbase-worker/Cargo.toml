@@ -1,0 +1,100 @@
+[package]
+name = "coinbase-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"  # Minimum supported Rust version (MSRV)
+authors = ["Igor Petroff <ihorpetroff@gmail.com>"]
+description = "24/7 Coinbase crypto trading bot for Cloudflare Workers"
+repository = "https://github.com/igorpetroff/coinbase-worker"
+license = "MIT"
+keywords = ["trading", "coinbase", "cloudflare", "workers", "crypto"]
+categories = ["finance", "web-programming"]
+
+[lib]
+crate-type = ["cdylib"]
+
+# Production lints - enterprise grade
+[lints.rust]
+# Safety and correctness
+unsafe_code = "forbid"
+# missing_docs = "warn"  # TODO: Enable after full documentation
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[lints.clippy]
+# Correctness
+correctness = { level = "deny", priority = -1 }
+# Suspicious patterns
+suspicious = { level = "warn", priority = -1 }
+# Code complexity
+complexity = { level = "warn", priority = -1 }
+# Performance
+perf = { level = "warn", priority = -1 }
+# Style consistency
+style = { level = "warn", priority = -1 }
+# Pedantic (strict)
+pedantic = { level = "warn", priority = -1 }
+# Specific overrides
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Allow struct field docs to be optional for now
+missing_docs_in_private_items = "allow"
+
+[dependencies]
+# Cloudflare Workers runtime
+worker = "0.7"
+
+# Async runtime
+futures = "0.3"
+
+# Serialization - optimized for WASM
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client for Coinbase API - reqwest 0.13 with rustls
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Cryptography for Coinbase JWT auth (ES256) - WASM compatible, pure Rust
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+# Time handling - wasmbind for WASM compatibility
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
+
+# UUID for request IDs - js feature for WASM RNG
+uuid = { version = "1.19", features = ["v4", "js"] }
+
+# Error handling - 2.x for better ergonomics
+thiserror = "2.0"
+
+# Panic hook for better error messages in Workers
+console_error_panic_hook = "0.1"
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# Fix getrandom 0.2.x for transitive dependencies (uuid uses 0.2)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[profile.release]
+# Production optimizations for Cloudflare Workers (1MB limit)
+opt-level = "s"           # Optimize for size
+lto = true                # Link-time optimization
+codegen-units = 1         # Single codegen unit for better optimization
+panic = "abort"           # Abort on panic (smaller binary, no unwinding)
+strip = true              # Strip symbols
+overflow-checks = true    # Keep overflow checks in production (safety)
+
+[profile.dev]
+# Fast dev builds
+opt-level = 0
+debug = true
+overflow-checks = true

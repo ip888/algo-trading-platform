@@ -4,7 +4,6 @@ import com.trading.analysis.MarketAnalyzer;
 import com.trading.api.ResilientAlpacaClient;
 import com.trading.api.controller.DashboardController;
 import com.trading.autonomous.TradeAnalytics;
-import com.trading.broker.KrakenClient;
 import com.trading.config.Config;
 import com.trading.filters.MarketHoursFilter;
 import com.trading.filters.VolatilityFilter;
@@ -31,13 +30,13 @@ public final class DashboardServer {
     public DashboardServer(TradeDatabase database, PortfolioManager portfolio,
                           MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                           VolatilityFilter volatilityFilter, Config config,
-                          ResilientAlpacaClient alpacaClient, KrakenClient krakenClient) {
+                          ResilientAlpacaClient alpacaClient) {
         
         // Create TradeAnalytics for performance tracking (Task 3)
         var tradeAnalytics = new TradeAnalytics();
         
         this.controller = new DashboardController(database, portfolio, marketAnalyzer,
-            marketHoursFilter, volatilityFilter, config, tradeAnalytics, krakenClient);
+            marketHoursFilter, volatilityFilter, config, tradeAnalytics);
         
         this.healthCheckService = new HealthCheckService(alpacaClient, database);
         
@@ -87,10 +86,6 @@ public final class DashboardServer {
         // Register Backtesting endpoint
         var backtestController = new com.trading.api.controller.BacktestController();
         backtestController.registerRoutes(app);
-        
-        // Register Kraken (crypto) endpoints
-        var krakenController = new com.trading.api.controller.KrakenController();
-        krakenController.registerRoutes(app);
         
         // Production endpoints
         app.get("/metrics", ctx -> {

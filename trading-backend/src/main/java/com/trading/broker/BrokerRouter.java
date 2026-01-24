@@ -10,17 +10,15 @@ import java.util.concurrent.CompletableFuture;
  * UNIFIED BROKER ROUTER
  * 
  * Routes orders to the appropriate broker based on:
- * - Asset type (stocks vs crypto)
+ * - Asset type (stocks)
  * - Market region (US vs EU)
  * - Symbol format
  * 
  * Current Configuration:
  * - US Stocks: Alpaca
- * - Crypto: Kraken (24/7)
  * - EU Stocks: Interactive Brokers OR Saxo Bank
  * 
  * Symbol Detection:
- * - Contains "/" or ends with "USD" -> Crypto (Kraken)
  * - IBEX/European suffix -> EU (IB/Saxo)
  * - Default -> US (Alpaca)
  */
@@ -28,7 +26,6 @@ public class BrokerRouter {
     private static final Logger logger = LoggerFactory.getLogger(BrokerRouter.class);
     
     private final com.trading.api.AlpacaClient alpacaClient;
-    private final KrakenClient krakenClient;
     private final InteractiveBrokersClient ibClient;
     private final SaxoClient saxoClient;
     
@@ -38,7 +35,6 @@ public class BrokerRouter {
     
     public BrokerRouter(com.trading.api.AlpacaClient alpacaClient) {
         this.alpacaClient = alpacaClient;
-        this.krakenClient = new KrakenClient();
         this.ibClient = new InteractiveBrokersClient();
         this.saxoClient = new SaxoClient();
         
@@ -59,12 +55,6 @@ public class BrokerRouter {
         logger.info("🔀 Routing BUY {} x{} @ ${} to {}", symbol, quantity, price, broker);
         
         return switch (broker) {
-            case KRAKEN -> {
-                String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
-                yield price > 0 ? 
-                    krakenClient.placeLimitOrderAsync(krakenSymbol, "buy", quantity, price) :
-                    krakenClient.placeMarketOrderAsync(krakenSymbol, "buy", quantity);
-            }
             case ALPACA -> {
                 yield CompletableFuture.supplyAsync(() -> {
                     try {
@@ -99,12 +89,6 @@ public class BrokerRouter {
         logger.info("🔀 Routing SELL {} x{} @ ${} to {}", symbol, quantity, price, broker);
         
         return switch (broker) {
-            case KRAKEN -> {
-                String krakenSymbol = KrakenClient.toKrakenSymbol(symbol);
-                yield price > 0 ? 
-                    krakenClient.placeLimitOrderAsync(krakenSymbol, "sell", quantity, price) :
-                    krakenClient.placeMarketOrderAsync(krakenSymbol, "sell", quantity);
-            }
             case ALPACA -> {
                 yield CompletableFuture.supplyAsync(() -> {
                     try {
@@ -137,9 +121,6 @@ public class BrokerRouter {
         var futures = java.util.List.of(
             CompletableFuture.supplyAsync(() -> { try { return alpacaClient.getAccount().toString(); } catch (Exception e) { return "{\"error\":\"" + e.getMessage() + "\"}"; } })
                 .thenAccept(r -> results.put("alpaca", r)),
-            krakenClient.isConfigured() ? 
-                krakenClient.getBalanceAsync().thenAccept(r -> results.put("kraken", r)) :
-                CompletableFuture.completedFuture(null),
             ibClient.isConfigured() ? 
                 ibClient.getAccountSummaryAsync().thenAccept(r -> results.put("ib", r)) :
                 CompletableFuture.completedFuture(null),
@@ -167,17 +148,6 @@ public class BrokerRouter {
             return "EU".equals(region) ? getEuBroker() : BrokerType.ALPACA;
         }
         
-        String upper = symbol.toUpperCase();
-        
-        // Crypto detection
-        if (upper.contains("/") || 
-            upper.endsWith("USD") && isCryptoSymbol(upper) ||
-            upper.startsWith("BTC") || upper.startsWith("ETH") || 
-            upper.startsWith("SOL") || upper.startsWith("DOGE") ||
-            upper.startsWith("XRP") || upper.startsWith("ADA")) {
-            return BrokerType.KRAKEN;
-        }
-        
         // EU detection (when in EU region)
         if ("EU".equals(region)) {
             return getEuBroker();
@@ -185,13 +155,6 @@ public class BrokerRouter {
         
         // Default to Alpaca (US stocks)
         return BrokerType.ALPACA;
-    }
-    
-    private boolean isCryptoSymbol(String symbol) {
-        return java.util.Set.of(
-            "BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "XRPUSD", 
-            "ADAUSD", "DOTUSD", "AVAXUSD", "MATICUSD", "LINKUSD"
-        ).contains(symbol);
     }
     
     private BrokerType getEuBroker() {
@@ -202,7 +165,6 @@ public class BrokerRouter {
     private void logBrokerStatus() {
         logger.info("📊 Broker Status:");
         logger.info("   Alpaca (US Stocks): ✅ Active");
-        logger.info("   Kraken (Crypto):    {}", krakenClient.isConfigured() ? "✅ Configured" : "⚠️ Not Configured");
         logger.info("   IB (EU Stocks):     {}", ibClient.isConfigured() ? "✅ Configured" : "⚠️ Not Configured");
         logger.info("   Saxo (EU Stocks):   {}", saxoClient.isConfigured() ? "✅ Configured" : "⚠️ Not Configured");
     }
@@ -213,7 +175,6 @@ public class BrokerRouter {
     public java.util.Map<String, Boolean> getBrokerStatus() {
         return java.util.Map.of(
             "alpaca", true,
-            "kraken", krakenClient.isConfigured(),
             "ib", ibClient.isConfigured(),
             "saxo", saxoClient.isConfigured()
         );
@@ -221,7 +182,6 @@ public class BrokerRouter {
     
     public enum BrokerType {
         ALPACA,
-        KRAKEN,
         INTERACTIVE_BROKERS,
         SAXO
     }

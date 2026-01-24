@@ -1,0 +1,29 @@
+# Build artifacts
+/target/
+/build/
+
+# Wrangler
+.wrangler/
+.dev.vars
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+Cargo.lock
+
+# Logs
+*.log
+
+# Secrets (never commit!)
+.env
+.env.local
+.env.production

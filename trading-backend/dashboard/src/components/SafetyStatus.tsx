@@ -12,7 +12,6 @@ interface PanicResult {
     status: string;
     success?: boolean;
     alpacaPositions?: Array<{ symbol: string; quantity: number; status: string }>;
-    krakenPositions?: Array<{ symbol: string; quantity: number; status: string }>;
     reason?: string;
 }
 
@@ -153,18 +152,7 @@ export const SafetyStatus = () => {
                             </div>
                         )}
                         
-                        {panicResult.krakenPositions && panicResult.krakenPositions.length > 0 && (
-                            <div className="positions-closed">
-                                <h4>Kraken Positions:</h4>
-                                {panicResult.krakenPositions.map((pos, i) => (
-                                    <div key={i} className={`position-item ${pos.status === 'close_ordered' ? 'success' : 'failed'}`}>
-                                        {pos.symbol}: {pos.quantity} - {pos.status}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                        
-                        {(!panicResult.alpacaPositions?.length && !panicResult.krakenPositions?.length) && (
+                        {(!panicResult.alpacaPositions?.length) && (
                             <p>No open positions to close.</p>
                         )}
                         

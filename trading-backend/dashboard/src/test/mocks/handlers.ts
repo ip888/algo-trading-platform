@@ -116,13 +116,11 @@ export const mockSystemHealth = {
   lastHeartbeat: Date.now(),
   services: {
     alpacaApi: 'connected',
-    krakenApi: 'connected',
     database: 'healthy',
     websocket: 'active',
   },
   circuitBreakers: {
     alpaca: 'closed',
-    kraken: 'closed',
   },
 };
 

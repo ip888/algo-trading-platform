@@ -266,7 +266,6 @@ describe('tradingStore', () => {
         timestamp: new Date().toISOString(),
         components: [
           { component: 'alpaca', status: 'connected', message: 'OK' },
-          { component: 'kraken', status: 'connected', message: 'OK' },
         ],
       };
       

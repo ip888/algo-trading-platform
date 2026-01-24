@@ -38,12 +38,6 @@ public final class TradingBot {
     private static com.trading.protection.HeartbeatMonitor heartbeatMonitor;
     private static com.trading.protection.EmergencyProtocol emergencyProtocol;
     
-    // Kraken trading loop reference for API access
-    private static com.trading.crypto.KrakenTradingLoop krakenTradingLoop;
-    
-    // Coinbase trading loop reference for API access (US + EU)
-    private static com.trading.crypto.CoinbaseTradingLoop coinbaseTradingLoop;
-    
     // Symbol selector will be initialized in main() based on config
     private static SymbolSelector symbolSelector;
     
@@ -167,12 +161,9 @@ public final class TradingBot {
         var rebalancer = new com.trading.portfolio.ProfileRebalancer(config);
         logger.info("🤖 Autonomous systems initialized");
         
-        // Create Kraken client for dashboard
-        var krakenClient = new com.trading.broker.KrakenClient();
-        
         // Start dashboard (using main profile's portfolio for now)
         var dashboard = new DashboardServer(database, mainManager.getPortfolio(), 
-            marketAnalyzer, marketHoursFilter, volatilityFilter, config, resilientClient, krakenClient);
+            marketAnalyzer, marketHoursFilter, volatilityFilter, config, resilientClient);
         dashboard.start();
         logger.info("Dashboard available at: http://localhost:8080");
         
@@ -187,10 +178,6 @@ public final class TradingBot {
         }
         // Initialize Safety Autopilot
         emergencyProtocol = new com.trading.protection.EmergencyProtocol(resilientClient);
-        emergencyProtocol.setKrakenClient(krakenClient); // Enable crypto liquidation
-        // CRITICAL: Keep Kraken auto-liquidation DISABLED to prevent unwanted sales
-        // on Cloud Run restarts. Kraken trading loop manages its own SL/TP.
-        emergencyProtocol.setKrakenAutoLiquidationEnabled(false);
         heartbeatMonitor = new com.trading.protection.HeartbeatMonitor(emergencyProtocol);
         
         // Cloud Run compatible timeouts - 5 min to handle cold starts gracefully
@@ -213,61 +200,6 @@ public final class TradingBot {
         
         logger.info("✅ Safety Autopilot initialized (Dead Man's Switch Active)");
         
-        // ===== START INDEPENDENT KRAKEN TRADING LOOP =====
-        // Only start if Kraken is enabled (disabled by default - using Alpaca Crypto instead)
-        Thread krakenThread = null;
-        com.trading.crypto.KrakenTradingLoop krakenLoop = null;
-        if (config.isKrakenEnabled()) {
-            var gridTradingService = new com.trading.strategy.GridTradingService(
-                client, krakenClient, config.getKrakenGridPositionSize());
-            krakenLoop = new com.trading.crypto.KrakenTradingLoop(
-                krakenClient, mainManager.getPortfolio(), gridTradingService,
-                config.getKrakenTakeProfitPercent(),
-                config.getKrakenStopLossPercent(),
-                config.getKrakenTrailingStopPercent(),
-                config.getKrakenMaxPositions(),
-                config.getKrakenPositionSizeUsd(),
-                config.getKrakenCycleIntervalMs()
-            );
-            krakenTradingLoop = krakenLoop;
-            krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoop);
-            logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
-        } else {
-            logger.info("🦑 Kraken trading DISABLED - using Coinbase instead");
-        }
-        
-        // ===== START COINBASE TRADING LOOP (US + EU) =====
-        // Coinbase works in US AND all EU countries (Spain, Poland, etc.)
-        // 30 req/sec rate limit = NO rate limit issues like Kraken!
-        Thread coinbaseThread = null;
-        com.trading.crypto.CoinbaseTradingLoop coinbaseLoop = null;
-        var tradingConfig = com.trading.config.TradingConfig.getInstance();
-        if (tradingConfig.isCoinbaseEnabled()) {
-            var coinbaseClient = new com.trading.broker.CoinbaseClient(
-                tradingConfig.getCoinbaseApiKeyName(),
-                tradingConfig.getCoinbasePrivateKey()
-            );
-            coinbaseLoop = new com.trading.crypto.CoinbaseTradingLoop(
-                coinbaseClient, mainManager.getPortfolio(),
-                tradingConfig.getCoinbaseTakeProfitPercent() / 100.0,
-                tradingConfig.getCoinbaseStopLossPercent() / 100.0,
-                tradingConfig.getCoinbaseTrailingStopPercent() / 100.0,
-                tradingConfig.getCoinbaseMaxPositions(),
-                tradingConfig.getCoinbasePositionSizeUsd(),
-                tradingConfig.getCoinbaseCycleIntervalMs()
-            );
-            coinbaseTradingLoop = coinbaseLoop;
-            coinbaseThread = Thread.ofVirtual().name("coinbase-trading-loop").start(coinbaseLoop);
-            logger.info("💰 Coinbase Trading Loop started (US + EU supported!)");
-        } else {
-            logger.info("💰 Coinbase trading DISABLED - enable in config.properties");
-            logger.info("   To enable: set COINBASE_ENABLED=true and add API credentials");
-        }
-        
-        // Create final reference for lambda
-        final com.trading.crypto.KrakenTradingLoop finalKrakenLoop = krakenLoop;
-        final com.trading.crypto.CoinbaseTradingLoop finalCoinbaseLoop = coinbaseLoop;
-        
         logger.info("✅ Starting both profiles with virtual threads...");
         logger.info("   Main Profile: {} active positions", mainManager.getActivePositionCount());
         logger.info("   Experimental: {} active positions", expManager.getActivePositionCount());
@@ -275,8 +207,6 @@ public final class TradingBot {
         // Add shutdown hook for graceful termination
         Runtime.getRuntime().addShutdownHook(Thread.ofVirtual().unstarted(() -> {
             logger.info("Shutdown signal received, stopping profiles...");
-            if (finalKrakenLoop != null) finalKrakenLoop.stop();  // Stop Kraken loop if running
-            if (finalCoinbaseLoop != null) finalCoinbaseLoop.stop();  // Stop Coinbase loop if running
             mainManager.stop();
             expManager.stop();
         }));
@@ -358,15 +288,8 @@ public final class TradingBot {
         var resilientClient = new ResilientAlpacaClient(client, 
             com.trading.metrics.MetricsService.getInstance().getRegistry());
         
-        // Create Kraken client for dashboard
-        var krakenClient = new com.trading.broker.KrakenClient();
-        
-        // Initialize Grid Trading Service for passive crypto fishing/harvesting
-        var gridTradingService = new com.trading.strategy.GridTradingService(
-            client, krakenClient, config.getKrakenGridPositionSize());  // Configurable grid size
-        
         var dashboard = new DashboardServer(database, portfolio, marketAnalyzer,
-            marketHoursFilter, volatilityFilter, config, resilientClient, krakenClient);
+            marketHoursFilter, volatilityFilter, config, resilientClient);
         
         // Initialize PDT protection
         var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled());
@@ -378,26 +301,6 @@ public final class TradingBot {
             logger.warn("⚠️  TEST MODE ENABLED - Simulated trades will be generated for demonstration");
             logger.warn("⚠️  No real orders will be placed in test mode");
         }
-        
-        // ===== START INDEPENDENT KRAKEN TRADING LOOP =====
-        // Only start if Kraken is enabled (disabled by default - using Alpaca Crypto instead)
-        com.trading.crypto.KrakenTradingLoop krakenLoopSingle = null;
-        if (config.isKrakenEnabled()) {
-            krakenLoopSingle = new com.trading.crypto.KrakenTradingLoop(
-                krakenClient, portfolio, gridTradingService,
-                config.getKrakenTakeProfitPercent(),
-                config.getKrakenStopLossPercent(),
-                config.getKrakenTrailingStopPercent(),
-                config.getKrakenMaxPositions(),
-                config.getKrakenPositionSizeUsd(),
-                config.getKrakenCycleIntervalMs()
-            );
-            Thread krakenThread = Thread.ofVirtual().name("kraken-trading-loop").start(krakenLoopSingle);
-            logger.info("🦑 Independent Kraken Trading Loop started on virtual thread");
-        } else {
-            logger.info("🦑 Kraken trading DISABLED - using Alpaca Crypto instead");
-        }
-        final com.trading.crypto.KrakenTradingLoop finalKrakenLoopSingle = krakenLoopSingle;
         
         // Start dashboard
         dashboard.start();
@@ -412,20 +315,16 @@ public final class TradingBot {
             // Initialize Broker Router
             var brokerRouter = new com.trading.broker.BrokerRouter(client);
 
-            // Main trading loop (ALPACA ONLY now - Kraken has independent loop)
+            // Main trading loop (ALPACA ONLY - stocks only)
             while (true) {
                 try {
-                    // 🚨 PANIC SELL MODE: Alpaca positions only
-                    // Kraken panic handled by EmergencyProtocol.flattenAll()
-                    
                     // Run Alpaca trading cycle (stocks only, respects market hours)
                     runTradingCycle(client, strategyManager, riskManager, 
-                        marketHoursFilter, volatilityFilter, portfolio, marketAnalyzer, database, config, pdtProtection, testSimulator, brokerRouter, krakenClient);
+                        marketHoursFilter, volatilityFilter, portfolio, marketAnalyzer, database, config, pdtProtection, testSimulator, brokerRouter);
                     
                     Thread.sleep(SLEEP_DURATION);
                 } catch (InterruptedException e) {
                     logger.info("Bot interrupted, shutting down");
-                    if (finalKrakenLoopSingle != null) finalKrakenLoopSingle.stop();
                     Thread.currentThread().interrupt();
                     break;
                 } catch (Exception e) {
@@ -441,7 +340,6 @@ public final class TradingBot {
             }
         } catch (Exception e) {
             logger.error("Fatal error", e);
-            if (finalKrakenLoopSingle != null) finalKrakenLoopSingle.stop();
             System.exit(1);
         }
     }
@@ -458,8 +356,7 @@ public final class TradingBot {
             Config config,
             PDTProtection pdtProtection,
             TestModeSimulator testSimulator,
-            com.trading.broker.BrokerRouter router,
-            com.trading.broker.KrakenClient krakenClient) throws Exception {
+            com.trading.broker.BrokerRouter router) throws Exception {
         
         // Run market analysis (updates dashboard)
         var analysis = marketAnalyzer.analyze(portfolio.getSymbols());
@@ -598,15 +495,6 @@ public final class TradingBot {
                 );
 
                 // Execute trades - ALPACA ONLY (stocks)
-                // Crypto now handled by independent KrakenTradingLoop
-                boolean isCrypto = symbol.contains("/") || (symbol.endsWith("USD") && symbol.length() > 6);
-                
-                if (isCrypto) {
-                    // Skip crypto in Alpaca loop - handled by KrakenTradingLoop
-                    TradingWebSocketHandler.broadcastProcessingStatus(symbol, symbolIndex, totalSymbols, "SKIPPED", "Crypto handled by Kraken loop");
-                    continue;
-                }
-                
                 boolean canTrade = isMarketOpen || bypassMarketHours;
                 
                 if (canTrade) {
@@ -618,15 +506,15 @@ public final class TradingBot {
                         continue;
                     }
 
-                    String tradeContext = isCrypto ? "Crypto 24/7" : (isMarketOpen ? "Market open" : "Bypass mode");
+                    String tradeContext = isMarketOpen ? "Market open" : "Bypass mode";
                     TradingWebSocketHandler.broadcastProcessingStatus(symbol, symbolIndex, totalSymbols, "EXECUTION", "Checking execution rules... (" + tradeContext + ")");
                     
                     // Pass VIX and VolatilityState to tradeSymbol for dynamic sizing and strategy selection
                     var updatedPosition = tradeSymbol(client, strategyManager, riskManager, 
-                        portfolio, symbol, database, pdtProtection, equity, testSimulator, currentVix, volState, router, krakenClient);
+                        portfolio, symbol, database, pdtProtection, equity, testSimulator, currentVix, volState, router);
                     portfolio.setPosition(symbol, updatedPosition);
                 } else {
-                    TradingWebSocketHandler.broadcastProcessingStatus(symbol, symbolIndex, totalSymbols, "SKIPPED", "Stock market closed (use Crypto for 24/7)");
+                    TradingWebSocketHandler.broadcastProcessingStatus(symbol, symbolIndex, totalSymbols, "SKIPPED", "Stock market closed");
                 }
             } catch (Exception e) {
                 logger.error("Error processing {}: {}", symbol, e.getMessage());
@@ -659,32 +547,14 @@ public final class TradingBot {
                                PDTProtection pdtProtection, double accountEquity,
                                TestModeSimulator testSimulator, double currentVix,
                                VolatilityFilter.VolatilityState volState,
-                               com.trading.broker.BrokerRouter router,
-                               com.trading.broker.KrakenClient krakenClient) throws Exception {
+                               com.trading.broker.BrokerRouter router) throws Exception {
         
         var currentPosition = portfolio.getPosition(symbol);
-        boolean isCrypto = symbol.contains("/") || symbol.endsWith("USD") && symbol.length() > 6;
         
         // Get current price
-        double currentPrice = 0.0;
-        if (isCrypto) {
-            try {
-                // Fetch crypto price from Kraken
-                 var tickerFuture = krakenClient.getTickerAsync(symbol);
-                 var tickerJson = tickerFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                 
-                 // Simplified parsing for speed - robust impl would parse JSON
-                 // Fallback to async if needed
-                 currentPrice = parseKrakenPrice(tickerJson); 
-            } catch (Exception e) {
-                logger.warn("Failed to get Kraken price for {}: {}", symbol, e.getMessage());
-                return Optional.empty();
-            }
-        } else {
-            var bar = client.getLatestBar(symbol);
-            if (bar.isEmpty()) return Optional.empty();
-            currentPrice = bar.get().close();
-        }
+        var bar = client.getLatestBar(symbol);
+        if (bar.isEmpty()) return Optional.empty();
+        double currentPrice = bar.get().close();
 
         // Get current quantity (from PortfolioManager as it is now synced)
         var qty = currentPosition.map(p -> p.quantity()).orElse(0.0);
@@ -706,44 +576,21 @@ public final class TradingBot {
                 logger.warn("{}: STOP-LOSS HIT! Entry=${}, Current=${}, Loss=${}", 
                     symbol, pos.entryPrice(), currentPrice, pos.calculatePnL(currentPrice));
                 if (testSimulator == null) {
-                    // Use BrokerRouter for exit
-                    if (isCrypto) {
-                         router.routeSellOrderAsync(symbol, qty, 0.0); // Market sell
-                         TradingWebSocketHandler.broadcastActivity("🦑 KRAKEN SL TRIGGERED: " + symbol + " @ $" + currentPrice, "WARN");
-                    } else {
-                        double limitPrice = currentPrice * 0.999;
-                        client.placeOrder(symbol, qty, "sell", "limit", "day", limitPrice);
-                    }
+                    double limitPrice = currentPrice * 0.999;
+                    client.placeOrder(symbol, qty, "sell", "limit", "day", limitPrice);
                     logger.info("{}: Stop-loss exit order placed", symbol);
                 } else {
                     logger.info("{}: [TEST MODE] Stop-loss triggered (no real order)", symbol);
                 }
                 return Optional.empty();
             }
-            
-            // Log Kraken Risk Status periodically (every ~5% change or when close)
-            if (isCrypto) {
-                double distToTp = (pos.takeProfit() - currentPrice) / currentPrice * 100;
-                if (distToTp < 0.5 || Math.abs(distToTp) < 0.1) {
-                    TradingWebSocketHandler.broadcastActivity(
-                        String.format("🦑 %s Check: $%.4f | TP: $%.4f (%.1f%% away)", symbol, currentPrice, pos.takeProfit(), distToTp), 
-                        "INFO"
-                    );
-                }
-            }
 
             if (pos.isTakeProfitHit(currentPrice)) {
                 logger.info("{}: TAKE-PROFIT HIT! Entry=${}, Current=${}, Profit=${}", 
                     symbol, pos.entryPrice(), currentPrice, pos.calculatePnL(currentPrice));
                 if (testSimulator == null) {
-                    // Use BrokerRouter for exit
-                    if (isCrypto) {
-                         router.routeSellOrderAsync(symbol, qty, 0.0); // Market sell
-                         TradingWebSocketHandler.broadcastActivity("🦑 KRAKEN TP TRIGGERED: " + symbol + " @ $" + currentPrice, "SUCCESS");
-                    } else {
-                        double limitPrice = currentPrice * 0.999;
-                        client.placeOrder(symbol, qty, "sell", "limit", "day", limitPrice);
-                    }
+                    double limitPrice = currentPrice * 0.999;
+                    client.placeOrder(symbol, qty, "sell", "limit", "day", limitPrice);
                     logger.info("{}: Take-profit exit order placed", symbol);
                 } else {
                     logger.info("{}: [TEST MODE] Take-profit triggered (no real order)", symbol);
@@ -752,10 +599,8 @@ public final class TradingBot {
             }
         }
         
-        // For crypto: Evaluate using momentum-based strategy (price change analysis)
-        // For stocks: Use regular strategy manager
-        var signal = isCrypto ? evaluateCryptoSignal(symbol, currentPrice, qty, krakenClient, portfolio)
-                              : strategyManager.evaluate(symbol, currentPrice, qty, volState);
+        // Evaluate using strategy manager
+        var signal = strategyManager.evaluate(symbol, currentPrice, qty, volState);
         
         // In test mode, check if we should generate a test signal
         if (testSimulator != null) {
@@ -781,70 +626,35 @@ public final class TradingBot {
             logger.info("{}: SIGNAL: BUY - {}", symbol, buy.reason());
 
             // Calculate safe position size based on symbol allocation
-            // For crypto: use smaller position size for micro-profit trading
-            double capitalPerSymbol = isCrypto ? 50.0 : portfolio.getCapitalPerSymbol();
+            double capitalPerSymbol = portfolio.getCapitalPerSymbol();
             double positionSize = riskManager.calculatePositionSize(capitalPerSymbol, currentPrice, currentVix);
             
-            // For crypto, calculate volume with proper precision
-            if (isCrypto) {
-                positionSize = Math.round(positionSize * 100000000.0) / 100000000.0; // 8 decimal places
-            }
-            
-            logger.info("{}: Position sizing: {} {} (VIX adjusted, Crypto={})", 
-                symbol, positionSize, isCrypto ? "units" : "shares", isCrypto);
+            logger.info("{}: Position sizing: {} shares (VIX adjusted)", symbol, positionSize);
 
-            // Track position with risk parameters (use tighter settings for crypto micro-profit)
-            var newPosition = isCrypto 
-                ? riskManager.createCryptoPosition(symbol, currentPrice, positionSize) 
-                : riskManager.createPosition(symbol, currentPrice, positionSize);
+            // Track position with risk parameters
+            var newPosition = riskManager.createPosition(symbol, currentPrice, positionSize);
             logger.info("{}: Position tracked: Entry=${}, StopLoss=${}, TakeProfit={}",
                 symbol, newPosition.entryPrice(), newPosition.stopLoss(), newPosition.takeProfit());
 
             // Place order (skip if in test mode)
             if (testSimulator == null) {
-                if (isCrypto) {
-                    // === CRYPTO ORDER VIA KRAKEN ===
-                    try {
-                        String krakenSymbol = com.trading.broker.KrakenClient.toKrakenSymbol(symbol);
-                        String volumeStr = String.format("%.8f", positionSize);
-                        
-                        // Use market order for immediate execution
-                        String result = krakenClient.placeMarketOrderAsync(krakenSymbol, "buy", positionSize).join();
-                        
-                        if (result.contains("ERROR")) {
-                            logger.error("🦑 Kraken order failed for {}: {}", symbol, result);
-                            TradingWebSocketHandler.broadcastActivity("🦑 ORDER FAILED: " + symbol + " - " + result, "ERROR");
-                            return Optional.empty();
-                        }
-                        
-                        logger.info("🦑 {}: Market BUY order placed: {} units", symbol, volumeStr);
-                        TradingWebSocketHandler.broadcastActivity("🦑 BUY " + symbol + ": " + volumeStr + " @ $" + 
-                            String.format("%.2f", currentPrice), "SUCCESS");
-                    } catch (Exception e) {
-                        logger.error("🦑 Failed to place Kraken order for {}: {}", symbol, e.getMessage());
-                        return Optional.empty();
-                    }
-                } else {
-                    // === STOCK ORDER VIA ALPACA ===
-                    double limitPrice = currentPrice * 1.001;
-                    
-                    client.placeBracketOrder(
-                        symbol,
-                        positionSize,
-                        "buy",
-                        newPosition.takeProfit(),  // Take-profit price
-                        newPosition.stopLoss(),     // Stop-loss price
-                        null,                       // Use stop-market (not stop-limit)
-                        limitPrice                  // Entry limit price
-                    );
-                    logger.info("{}: Bracket order placed successfully (Limit: ${})", 
-                        symbol, String.format("%.2f", limitPrice));
-                }
+                double limitPrice = currentPrice * 1.001;
+                
+                client.placeBracketOrder(
+                    symbol,
+                    positionSize,
+                    "buy",
+                    newPosition.takeProfit(),  // Take-profit price
+                    newPosition.stopLoss(),     // Stop-loss price
+                    null,                       // Use stop-market (not stop-limit)
+                    limitPrice                  // Entry limit price
+                );
+                logger.info("{}: Bracket order placed successfully (Limit: ${})", 
+                    symbol, String.format("%.2f", limitPrice));
             } else {
                 logger.info("{}: [TEST MODE] Simulated order placement (no real order)", symbol);
             }
-            TradingWebSocketHandler.broadcastActivity("BUY executed for " + symbol + ": " + positionSize + 
-                (isCrypto ? " units" : " shares"), "SUCCESS");
+            TradingWebSocketHandler.broadcastActivity("BUY executed for " + symbol + ": " + positionSize + " shares", "SUCCESS");
         
             // Broadcast trade event
             TradingWebSocketHandler.broadcastTradeEvent(
@@ -1005,145 +815,10 @@ public final class TradingBot {
         }
         return new HashMap<>();
     }
-    
-    /**
-     * Get the Kraken trading loop for API access to tracked positions.
-     */
-    public static com.trading.crypto.KrakenTradingLoop getKrakenTradingLoop() {
-        return krakenTradingLoop;
-    }
-    
-    /**
-     * Get the Coinbase trading loop for API access (US + EU).
-     */
-    public static com.trading.crypto.CoinbaseTradingLoop getCoinbaseTradingLoop() {
-        return coinbaseTradingLoop;
-    }
 
     public static void beat(String component) {
         if (heartbeatMonitor != null) {
             heartbeatMonitor.beat(component);
-        }
-    }
-
-    private static double parseKrakenPrice(String json) {
-        try {
-            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            var root = mapper.readTree(json);
-            if (root.has("result")) {
-                var result = root.get("result");
-                var fields = result.fieldNames();
-                if (fields.hasNext()) {
-                    var pair = result.get(fields.next());
-                    if (pair.has("c")) {
-                        return pair.get("c").get(0).asDouble();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Failed to parse Kraken price", e);
-        }
-        return 0.0;
-    }
-    
-    /**
-     * Evaluate crypto trading signal using momentum-based strategy.
-     * Optimized for micro-profit trading on Kraken 24/7.
-     */
-    private static TradingSignal evaluateCryptoSignal(String symbol, double currentPrice, double qty, 
-            com.trading.broker.KrakenClient krakenClient, PortfolioManager portfolio) {
-        
-        // If already holding position, don't add more
-        if (qty > 0) {
-            return new TradingSignal.Hold("Holding position - monitoring SL/TP");
-        }
-        
-        // Check max positions limit
-        int krakenMaxPositions = 3; // From config
-        long currentKrakenPositions = portfolio.getAllPositions().entrySet().stream()
-            .filter(e -> {
-                String s = e.getKey();
-                return (s.contains("/") || (s.endsWith("USD") && s.length() > 6)) && e.getValue().isPresent();
-            })
-            .count();
-        
-        if (currentKrakenPositions >= krakenMaxPositions) {
-            return new TradingSignal.Hold("Max Kraken positions reached (" + krakenMaxPositions + ")");
-        }
-        
-        try {
-            // Fetch 24h ticker data for momentum analysis
-            String krakenSymbol = com.trading.broker.KrakenClient.toKrakenSymbol(symbol);
-            String tickerJson = krakenClient.getTickerAsync(krakenSymbol).get(5, java.util.concurrent.TimeUnit.SECONDS);
-            
-            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            var root = mapper.readTree(tickerJson);
-            
-            if (root.has("error") && root.get("error").size() > 0) {
-                logger.warn("🦑 Ticker error for {}: {}", symbol, root.get("error"));
-                return new TradingSignal.Hold("Ticker fetch error");
-            }
-            
-            var result = root.get("result");
-            if (result == null || !result.fields().hasNext()) {
-                return new TradingSignal.Hold("No ticker data");
-            }
-            
-            var pairData = result.fields().next().getValue();
-            
-            // Extract key metrics:
-            // "o" = today's opening price
-            // "h" = 24h high [today, last 24h rolling]
-            // "l" = 24h low [today, last 24h rolling]
-            // "c" = last trade [price, lot volume]
-            // "v" = volume [today, last 24h]
-            // "p" = VWAP [today, last 24h]
-            
-            double openPrice = pairData.get("o").asDouble();
-            double lowPrice24h = pairData.get("l").get(1).asDouble();  // 24h low
-            double highPrice24h = pairData.get("h").get(1).asDouble(); // 24h high
-            double volume24h = pairData.get("v").get(1).asDouble();
-            double vwap24h = pairData.get("p").get(1).asDouble();
-            
-            // Calculate indicators
-            double dayChange = ((currentPrice - openPrice) / openPrice) * 100;
-            double rangePosition = (currentPrice - lowPrice24h) / (highPrice24h - lowPrice24h) * 100; // 0=at low, 100=at high
-            double distanceFromVWAP = ((currentPrice - vwap24h) / vwap24h) * 100; // negative = below VWAP
-            
-            logger.info("🦑 {} Analysis: Price=${} | Open=${} | DayChange={:.2f}% | RangePos={:.1f}% | VWAP_dist={:.2f}%",
-                symbol, currentPrice, openPrice, dayChange, rangePosition, distanceFromVWAP);
-            
-            // === MICRO-PROFIT ENTRY CRITERIA ===
-            // BUY when:
-            // 1. Price is in lower 40% of 24h range (buying the dip)
-            // 2. Price is at or below VWAP (fair value or undervalued)
-            // 3. Day change is not too negative (not in freefall, -3% max)
-            
-            boolean inBuyZone = rangePosition < 40;
-            boolean belowVWAP = distanceFromVWAP <= 0.5; // At or slightly above VWAP
-            boolean notFreefalling = dayChange > -3.0;
-            
-            if (inBuyZone && belowVWAP && notFreefalling) {
-                String reason = String.format("Micro-profit opportunity: %.1f%% range, %.2f%% from VWAP", 
-                    rangePosition, distanceFromVWAP);
-                logger.info("🦑 BUY SIGNAL: {} - {}", symbol, reason);
-                return new TradingSignal.Buy(reason);
-            }
-            
-            // Alternative: Momentum reversal buy
-            // If dropped significantly today but showing volume (potential bounce)
-            if (dayChange < -2.0 && dayChange > -5.0 && volume24h > 0) {
-                String reason = String.format("Momentum reversal: %.2f%% drop with volume", dayChange);
-                logger.info("🦑 BUY SIGNAL: {} - {}", symbol, reason);
-                return new TradingSignal.Buy(reason);
-            }
-            
-            return new TradingSignal.Hold(String.format("No entry: RangePos=%.0f%%, VWAP_dist=%.2f%%", 
-                rangePosition, distanceFromVWAP));
-                
-        } catch (Exception e) {
-            logger.warn("🦑 Failed to evaluate {}: {}", symbol, e.getMessage());
-            return new TradingSignal.Hold("Evaluation error: " + e.getMessage());
         }
     }
 

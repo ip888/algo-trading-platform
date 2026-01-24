@@ -165,7 +165,7 @@ public final class RiskManager {
     /**
      * Create a crypto TradePosition with tighter micro-profit settings.
      * Optimized for 24/7 crypto trading with quick TP/SL.
-     * Uses: TP 0.75%, SL 0.5% (from Kraken config defaults)
+     * Uses: TP 0.75%, SL 0.5%
      */
     public TradePosition createCryptoPosition(String symbol, double entryPrice, double quantity) {
         // Micro-profit crypto settings: tight take-profit and stop-loss

@@ -81,7 +81,7 @@ export const SystemStatus = () => {
       <div style={{ marginTop: '20px', padding: '16px', background: 'var(--bg-main)', borderRadius: 'var(--radius-sm)' }}>
         <div className="label" style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>CORE DECISION:</div>
         <div className="value" style={{ fontSize: '14px', fontWeight: 600 }}>
-          {botStatus?.nextAction || systemStatus?.recommendation || (marketOpen ? 'Analyzing market opportunities...' : 'Stock market closed. Crypto trades 24/7.')}
+          {botStatus?.nextAction || systemStatus?.recommendation || (marketOpen ? 'Analyzing market opportunities...' : 'Stock market closed. Waiting for next session.')}
         </div>
       </div>
     </div>

@@ -1,9 +1,9 @@
 # Fly.io Configuration for Trading Backend
 # Deploy with: fly deploy
-# Region: Warsaw (waw) - close to Spain/Poland for EU move
+# Region: Stockholm (arn) - good for EU
 
-app = "trading-backend"
-primary_region = "waw"  # Warsaw, Poland - good for EU
+app = "trading-bot-igor-waw"
+primary_region = "arn"  # Stockholm, Sweden - good for EU
 
 [build]
   dockerfile = "Dockerfile"

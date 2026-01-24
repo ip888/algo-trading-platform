@@ -45,11 +45,13 @@ public final class ResilientAlpacaClient {
         this.meterRegistry = meterRegistry;
         
         // Circuit Breaker: Open after 50% failures in 10 requests
+        // AUTO-RECOVERY: Wait only 30 seconds before trying again (was 60)
         var cbConfig = CircuitBreakerConfig.custom()
             .failureRateThreshold(50)
-            .waitDurationInOpenState(Duration.ofSeconds(60))
+            .waitDurationInOpenState(Duration.ofSeconds(30))  // Faster recovery
             .slidingWindowSize(10)
-            .permittedNumberOfCallsInHalfOpenState(3)
+            .permittedNumberOfCallsInHalfOpenState(5)  // More test calls in half-open
+            .automaticTransitionFromOpenToHalfOpenEnabled(true)  // Auto-transition!
             .build();
         this.circuitBreaker = CircuitBreaker.of("alpaca-api", cbConfig);
         
@@ -74,7 +76,60 @@ public final class ResilientAlpacaClient {
             .onStateTransition(event -> 
                 logger.warn("Circuit breaker state changed: {}", event.getStateTransition()));
         
+        // Start background health checker for auto-recovery
+        startHealthBasedRecovery();
+        
         logger.info("ResilientAlpacaClient initialized with circuit breaker, rate limiter, and retry");
+    }
+    
+    /**
+     * Background thread that checks if API is healthy and resets circuit breaker.
+     * This prevents the circuit breaker from being "stuck" in OPEN state.
+     */
+    private void startHealthBasedRecovery() {
+        Thread.ofVirtual().name("circuit-breaker-recovery").start(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(45_000);  // Check every 45 seconds
+                    
+                    if (circuitBreaker.getState() == CircuitBreaker.State.OPEN) {
+                        logger.info("🔄 Circuit breaker is OPEN - testing API health...");
+                        
+                        // Try a simple API call directly (bypass circuit breaker)
+                        try {
+                            var account = delegate.getAccount();
+                            if (account != null && account.has("status")) {
+                                logger.info("✅ API is healthy! Resetting circuit breaker.");
+                                circuitBreaker.reset();
+                            }
+                        } catch (Exception e) {
+                            logger.debug("API still unhealthy: {}", e.getMessage());
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    logger.debug("Health check error: {}", e.getMessage());
+                }
+            }
+        });
+    }
+    
+    /**
+     * Manually reset the circuit breaker. 
+     * Call this when you know the API is healthy but circuit is stuck.
+     */
+    public void resetCircuitBreaker() {
+        logger.info("🔄 Manual circuit breaker reset requested");
+        circuitBreaker.reset();
+    }
+    
+    /**
+     * Get current circuit breaker state for health checks.
+     */
+    public String getCircuitBreakerState() {
+        return circuitBreaker.getState().name();
     }
     
     /**
@@ -221,13 +276,6 @@ public final class ResilientAlpacaClient {
             delegate.cancelOrder(orderId);
             return null;
         });
-    }
-    
-    /**
-     * Get circuit breaker state for health checks
-     */
-    public String getCircuitBreakerState() {
-        return circuitBreaker.getState().name();
     }
     
     /**

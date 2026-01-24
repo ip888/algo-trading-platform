@@ -1,0 +1,67 @@
+name = "coinbase-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Account ID (set via environment or wrangler login)
+# account_id = "your-account-id"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+# KV namespace for trading state
+[[kv_namespaces]]
+binding = "STATE"
+id = "278e140578db4e768688636f18d2d4ae"
+
+# Environment variables (secrets set via wrangler secret)
+[vars]
+ENVIRONMENT = "production"
+LOG_LEVEL = "info"
+
+# Exit parameters (now used as fallback/bounds)
+TAKE_PROFIT_PERCENT = "2.0"    # Fallback TP if ATR calc fails
+STOP_LOSS_PERCENT = "1.5"      # Fallback SL if ATR calc fails
+TRAILING_STOP_PERCENT = "0.75" # Trail 0.75% below peak
+
+# Volatility-Adaptive TP/SL (ATR-based)
+ATR_SL_MULTIPLIER = "1.0"      # SL at 1x ATR below entry
+ATR_TP_MULTIPLIER = "2.0"      # TP at 2x ATR above entry (2:1 R:R)
+MIN_SL_PERCENT = "0.5"         # Min stop-loss (prevent too tight)
+MAX_SL_PERCENT = "5.0"         # Max stop-loss (prevent too wide)
+MIN_TP_PERCENT = "1.0"         # Min take-profit
+MAX_TP_PERCENT = "10.0"        # Max take-profit
+
+# Dynamic Position Sizing (Risk-Based)
+MAX_RISK_PER_TRADE_PERCENT = "2.0"    # Risk max 2% of portfolio per trade
+MAX_PORTFOLIO_PER_POSITION = "25.0"   # Never more than 25% in one position
+MIN_POSITION_USD = "10"               # Coinbase minimum
+CASH_RESERVE_PERCENT = "15.0"         # Keep 15% cash for opportunities
+MAX_TOTAL_POSITIONS = "8"             # Hard cap (safety limit)
+
+CYCLE_INTERVAL_SECONDS = "15"
+
+# Crypto symbols to trade (more = more opportunities)
+SYMBOLS = "BTC-USD,ETH-USD,SOL-USD,DOGE-USD,AVAX-USD,LINK-USD,XRP-USD,ADA-USD"
+
+# Risk management
+DAILY_TRADE_LIMIT = "30"
+MAX_CONSECUTIVE_ERRORS = "5"
+
+# Strategy filters
+ENABLE_TREND_FILTER = "true"    # Only buy dips in uptrends (price > 6h avg)
+ENABLE_VOLUME_FILTER = "true"   # Only trade high-volume coins
+MIN_VOLUME_USD = "1000000"      # Minimum $1M 24h volume
+MAX_POSITION_AGE_HOURS = "12"   # Close positions after 12h if no TP/SL hit
+
+# Scheduled triggers (cron)
+[triggers]
+# Run every minute (Cloudflare minimum)
+crons = ["* * * * *"]
+
+# Development overrides
+[env.dev]
+vars = { ENVIRONMENT = "development", LOG_LEVEL = "debug" }
+
+[env.staging]
+vars = { ENVIRONMENT = "staging", LOG_LEVEL = "debug" }

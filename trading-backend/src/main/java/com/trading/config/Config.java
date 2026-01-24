@@ -152,18 +152,6 @@ public final class Config {
         return getProperty("EMAIL_SMTP_PORT");
     }
     
-    // Trading mode
-    public String getKrakenWebsocketUrl() {
-        return getProperty("KRAKEN_WEBSOCKET_URL", "wss://ws.kraken.com");
-    }
-    
-    /**
-     * Check if Kraken trading is enabled (default false - using Alpaca Crypto instead)
-     */
-    public boolean isKrakenEnabled() {
-        return getBooleanProperty("KRAKEN_ENABLED", false);
-    }
-    
     /**
      * Check if Alpaca Crypto trading is enabled (default true)
      */
@@ -177,75 +165,6 @@ public final class Config {
     public String[] getAlpacaCryptoSymbols() {
         String symbols = getProperty("ALPACA_CRYPTO_SYMBOLS", "BTC/USD,ETH/USD,SOL/USD");
         return symbols.split(",");
-    }
-    
-    // ==================== Kraken-Specific Trading Settings ====================
-    
-    /**
-     * Kraken take-profit percentage (default 0.75% for micro-profit)
-     */
-    public double getKrakenTakeProfitPercent() {
-        return Double.parseDouble(getProperty("KRAKEN_TAKE_PROFIT_PERCENT", "0.75")) / 100.0;
-    }
-    
-    /**
-     * Kraken stop-loss percentage (default 0.5%)
-     */
-    public double getKrakenStopLossPercent() {
-        return Double.parseDouble(getProperty("KRAKEN_STOP_LOSS_PERCENT", "0.5")) / 100.0;
-    }
-    
-    /**
-     * Kraken trailing stop percentage (default 0.5%)
-     */
-    public double getKrakenTrailingStopPercent() {
-        return Double.parseDouble(getProperty("KRAKEN_TRAILING_STOP_PERCENT", "0.5")) / 100.0;
-    }
-    
-    /**
-     * Maximum concurrent Kraken positions (default 3)
-     */
-    public int getKrakenMaxPositions() {
-        return Integer.parseInt(getProperty("KRAKEN_MAX_POSITIONS", "3"));
-    }
-    
-    /**
-     * Position size in USD for Kraken crypto trades (default $75 to meet minimums)
-     */
-    public double getKrakenPositionSizeUsd() {
-        return Double.parseDouble(getProperty("KRAKEN_POSITION_SIZE_USD", "75"));
-    }
-    
-    /**
-     * Kraken trading loop cycle interval in milliseconds (default 45000 = 45 sec)
-     * Increased to reduce API calls and prevent rate limiting.
-     * Kraken allows ~15 private calls/minute, trading loop uses ~3-4 calls.
-     */
-    public long getKrakenCycleIntervalMs() {
-        return Long.parseLong(getProperty("KRAKEN_CYCLE_INTERVAL_MS", "45000"));
-    }
-    
-    /**
-     * Grid trading position size for fishing orders (default $35)
-     */
-    public double getKrakenGridPositionSize() {
-        return Double.parseDouble(getProperty("KRAKEN_GRID_POSITION_SIZE", "35"));
-    }
-    
-    /**
-     * Maximum concurrent grid orders (to preserve buying power)
-     * Default: 2 (limits capital tied up in pending orders)
-     */
-    public int getKrakenMaxGridOrders() {
-        return Integer.parseInt(getProperty("KRAKEN_MAX_GRID_ORDERS", "2"));
-    }
-    
-    /**
-     * Stale order timeout in minutes (orders older than this are canceled)
-     * Default: 5 minutes
-     */
-    public int getKrakenStaleOrderMinutes() {
-        return Integer.parseInt(getProperty("KRAKEN_STALE_ORDER_MINUTES", "5"));
     }
     
     // ==================== Platform Configuration ====================
@@ -363,7 +282,7 @@ public final class Config {
     }
     
     /**
-     * Get crypto symbols for 24/7 Kraken trading.
+     * Get crypto symbols for Alpaca crypto trading.
      */
     public java.util.List<String> getCryptoSymbols() {
         String symbols = getProperty("CRYPTO_SYMBOLS", "BTC/USD,ETH/USD,SOL/USD");

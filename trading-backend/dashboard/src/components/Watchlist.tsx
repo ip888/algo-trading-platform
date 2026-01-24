@@ -38,7 +38,7 @@ export const Watchlist = () => {
               volume: 0,
               trend: item.trend || 'NEUTRAL',
               score: item.score || 50,
-              strategy: item.type === 'CRYPTO' ? 'Crypto 24/7' : 'Stock',
+              strategy: 'Stock',
               regime: item.regime,
             });
           });
@@ -70,8 +70,8 @@ export const Watchlist = () => {
     );
   }
 
-  // Define pinned assets (Crypto/Indices) to always show at top
-  const pinned = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'SPY', 'QQQ'];
+  // Define pinned assets (major indices) to always show at top
+  const pinned = ['SPY', 'QQQ', 'IWM', 'DIA'];
   
   const sortedAssets = [...assets].sort((a, b) => {
     const aPinned = pinned.includes(a.symbol);
@@ -100,7 +100,6 @@ export const Watchlist = () => {
               <tr key={data.symbol} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
                 <td style={{ padding: '8px', fontWeight: 600 }}>
                   {data.symbol}
-                  {data.symbol.includes('/') && <span className="badge badge-warning" style={{marginLeft: '4px', fontSize: '8px'}}>CRYPTO</span>}
                 </td>
                 <td style={{ padding: '8px' }}>${data.price?.toFixed(2) || '---'}</td>
                 <td style={{ padding: '8px' }}>

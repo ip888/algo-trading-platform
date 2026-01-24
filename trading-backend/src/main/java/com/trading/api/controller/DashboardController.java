@@ -1,7 +1,6 @@
 package com.trading.api.controller;
 
 import com.trading.analysis.MarketAnalyzer;
-import com.trading.broker.KrakenClient;
 import com.trading.config.Config;
 import com.trading.filters.MarketHoursFilter;
 import com.trading.filters.VolatilityFilter;
@@ -34,12 +33,11 @@ public final class DashboardController {
     private final VolatilityFilter volatilityFilter;
     private final Config config;
     private final TradeAnalytics tradeAnalytics;
-    private final KrakenClient krakenClient;
     
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                               VolatilityFilter volatilityFilter, Config config,
-                              TradeAnalytics tradeAnalytics, KrakenClient krakenClient) {
+                              TradeAnalytics tradeAnalytics) {
         this.database = database;
         this.portfolio = portfolio;
         this.marketAnalyzer = marketAnalyzer;
@@ -47,7 +45,6 @@ public final class DashboardController {
         this.volatilityFilter = volatilityFilter;
         this.config = config;
         this.tradeAnalytics = tradeAnalytics;
-        this.krakenClient = krakenClient;
     }
     
     /**
@@ -69,10 +66,6 @@ public final class DashboardController {
         app.get("/api/market/status", this::getMarketStatus);
         app.get("/api/market/vix", this::getVIX); // NEW: VIX data
         app.get("/api/market/regime", this::getMarketRegime); // NEW: Market regime
-        
-        // Kraken endpoints
-        app.get("/api/kraken/positions", this::getKrakenPositions); // NEW: Kraken positions
-        // NOTE: /api/kraken/balance is registered in KrakenController
         
         // System status endpoints
         app.get("/api/system/status", this::getSystemStatus);
@@ -791,83 +784,17 @@ public final class DashboardController {
     }
     
     /**
-     * Get Kraken open positions.
-     */
-    /**
-     * Get Kraken open positions.
-     */
-    private void getKrakenPositions(Context ctx) {
-        ctx.future(() -> krakenClient.getOpenPositionsAsync()
-            .thenApply(json -> {
-                try {
-                    var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                    var root = mapper.readTree(json);
-                    var result = new java.util.ArrayList<Map<String, Object>>();
-                    
-                    if (root.has("result") && !root.get("result").isEmpty()) {
-                        var positionsData = root.get("result");
-                        var fields = positionsData.fieldNames();
-                        
-                        while (fields.hasNext()) {
-                            var id = fields.next();
-                            var pos = positionsData.get(id);
-                            String symbol = pos.has("pair") ? pos.get("pair").asText() : "Unknown";
-                            
-                            Map<String, Object> position = new java.util.HashMap<>();
-                            position.put("id", id);
-                            position.put("symbol", symbol);
-                            position.put("type", pos.has("type") ? pos.get("type").asText() : "buy");
-                            position.put("volume", pos.has("vol") ? pos.get("vol").asDouble() : 0.0);
-                            position.put("cost", pos.has("cost") ? pos.get("cost").asDouble() : 0.0);
-                            position.put("fee", pos.has("fee") ? pos.get("fee").asDouble() : 0.0);
-                            position.put("margin", pos.has("margin") ? pos.get("margin").asDouble() : 0.0);
-                            position.put("net", pos.has("net") ? pos.get("net").asDouble() : 0.0); // P&L
-                            position.put("openTime", pos.has("time") ? pos.get("time").asLong() : 0L);
-                            position.put("platform", "kraken");
-                            
-                            // Inject Risk Management Data (TP/SL) from PortfolioManager
-                            // Normalize symbol for lookup if needed
-                            var managedPos = portfolio.getPosition(symbol)
-                                .or(() -> portfolio.getPosition(com.trading.broker.KrakenClient.toKrakenSymbol(symbol)));
-                                
-                            if (managedPos.isPresent()) {
-                                 position.put("stopLoss", managedPos.get().stopLoss());
-                                 position.put("takeProfit", managedPos.get().takeProfit());
-                            } else {
-                                 position.put("stopLoss", null);
-                                 position.put("takeProfit", null);
-                            }
-                            
-                            result.add(position);
-                        }
-                    }
-                    return result; // implicitly wrapped in Future
-                } catch (Exception e) {
-                    logger.error("Error parsing Kraken positions JSON", e);
-                    return new java.util.ArrayList<Map<String, Object>>();
-                }
-            })
-            .thenAccept(ctx::json)
-            .exceptionally(e -> {
-                logger.error("Failed to fetch Kraken positions", e);
-                ctx.status(500).json(java.util.Collections.singletonMap("error", "Failed to fetch Kraken positions: " + e.getMessage()));
-                return null;
-            }));
-    }
-    
-    /**
      * Get current watchlist with market data for UI initial load.
      * Provides REST fallback when WebSocket hasn't pushed data yet.
      */
     private void getWatchlist(Context ctx) {
         try {
-            // Combine bullish, bearish, and crypto symbols into watchlist
+            // Combine bullish, bearish symbols into watchlist
             var watchlist = new java.util.HashSet<String>();
             watchlist.addAll(config.getBullishSymbols());
             watchlist.addAll(config.getBearishSymbols());
             watchlist.addAll(config.getMainBullishSymbols());
             watchlist.addAll(config.getMainBearishSymbols());
-            watchlist.addAll(config.getCryptoSymbols()); // Add crypto symbols (24/7)
             
             // Get current VIX level
             double vix = volatilityFilter != null ? volatilityFilter.getCurrentVIX() : 15.0;
@@ -879,36 +806,12 @@ public final class DashboardController {
                 var item = new java.util.HashMap<String, Object>();
                 item.put("symbol", symbol);
                 
-                // Determine asset type
-                boolean isCrypto = symbol.contains("/") || (symbol.endsWith("USD") && symbol.length() > 6);
-                item.put("type", isCrypto ? "CRYPTO" : "STOCK");
-                item.put("tradingHours", isCrypto ? "24/7" : "Market Hours");
+                // All symbols are stocks now (Alpaca only)
+                item.put("type", "STOCK");
+                item.put("tradingHours", "Market Hours");
                 
-                // Try to get real-time price for crypto from Kraken
-                try {
-                    if (isCrypto && krakenClient != null && krakenClient.isConfigured()) {
-                        var tickerFuture = krakenClient.getTickerAsync(symbol);
-                        var tickerJson = tickerFuture.get(3, java.util.concurrent.TimeUnit.SECONDS);
-                        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                        var root = mapper.readTree(tickerJson);
-                        if (root.has("result")) {
-                            var resultNode = root.get("result");
-                            var keys = resultNode.fieldNames();
-                            if (keys.hasNext()) {
-                                var pair = resultNode.get(keys.next());
-                                if (pair.has("c")) {
-                                    item.put("price", Double.parseDouble(pair.get("c").get(0).asText()));
-                                }
-                            }
-                        }
-                    } else {
-                        // Stocks will get prices through WebSocket in main trading loop
-                        item.put("price", 0.0);
-                    }
-                } catch (Exception e) {
-                    item.put("price", 0.0);
-                    item.put("priceError", e.getMessage());
-                }
+                // Stocks will get prices through WebSocket in main trading loop
+                item.put("price", 0.0);
                 
                 // Add regime-based recommendation
                 item.put("regime", regime);

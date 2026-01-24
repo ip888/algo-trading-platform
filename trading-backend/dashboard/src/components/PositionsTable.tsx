@@ -159,11 +159,6 @@ export const PositionsTable = () => {
                 <tr key={pos.symbol}>
                   <td className="font-bold">
                     {pos.symbol}
-                    {pos.symbol.includes('/') ? (
-                      <span className="badge badge-warning" style={{marginLeft: '6px', fontSize: '9px', padding: '2px 4px'}}>CRYPTO</span>
-                    ) : (
-                      <span className="badge badge-neutral" style={{marginLeft: '6px', fontSize: '9px', padding: '2px 4px', opacity: 0.5}}>STOCK</span>
-                    )}
                   </td>
                   <td>{quantity.toFixed(4)}</td>
                   <td>${entryPrice.toFixed(2)}</td>

@@ -1,68 +1,82 @@
 # ⚡ Algo Trading Platform: Multi-Asset Autonomous Trading System
 
-**Enterprise-grade algorithmic trading engine for Stocks (Alpaca) and Crypto (Kraken), built on Java 25 (Virtual Threads) and React 19.**
+**Enterprise-grade algorithmic trading engine for Stocks (Alpaca/Java) and Crypto (Coinbase/Rust), with modern cloud deployment.**
 
 ![Status](https://img.shields.io/badge/Status-Production-green?style=flat-square)
 ![Java](https://img.shields.io/badge/Java-25%20LTS-orange?style=flat-square)
+![Rust](https://img.shields.io/badge/Rust-2024-orange?style=flat-square)
 ![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blue?style=flat-square)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%7C%20Vite-blueviolet?style=flat-square)
-![Cloud](https://img.shields.io/badge/Cloud-Google%20Cloud%20Run-blue?style=flat-square)
+![Cloud](https://img.shields.io/badge/Cloud-Fly.io%20%7C%20Cloudflare-blue?style=flat-square)
 
 ## 📖 Executive Summary
 
 This project is a **full-stack, high-concurrency multi-asset trading platform** supporting:
-- **Stocks**: Alpaca Securities API (US markets)
-- **Crypto**: Kraken Exchange API (24/7 trading)
+- **Stocks**: Alpaca Securities API (US markets) - Java/Fly.io
+- **Crypto**: Coinbase Advanced Trade API (24/7 trading) - Rust/Cloudflare Workers
 
-Unlike typical retail bots written in Python, this system leverages **Java 25's Virtual Threads (Project Loom)** to handle thousands of concurrent market data streams with microsecond-level overhead.
+The stock trading engine leverages **Java 25's Virtual Threads (Project Loom)** for high-concurrency market data processing. The crypto bot runs on Cloudflare's edge network for ultra-low latency and 99.99% uptime.
 
 ## 🏗 System Architecture
 
-The system is a **unified monolith** deployed to Google Cloud Run, combining the execution engine with an embedded React dashboard.
+The platform consists of two independent services:
+1. **Java Trading Bot** (Fly.io) - Stock trading with embedded React dashboard
+2. **Rust Crypto Worker** (Cloudflare) - 24/7 crypto trading with web UI
 
 ```mermaid
 graph TD
-    subgraph "Google Cloud Run"
+    subgraph "Fly.io (Stocks)"
         JavaCore["☕ Java 25 Core"]
         VirtualThreads["🧵 Virtual Thread Pool"]
         AlpacaStrategy["📈 Alpaca Strategy Engine"]
-        KrakenStrategy["🦑 Kraken Trading Loop"]
-        Dashboard["🖥️ React Dashboard (Embedded)"]
+        Dashboard["🖥️ React Dashboard"]
         
         JavaCore --> VirtualThreads
         VirtualThreads --> AlpacaStrategy
-        VirtualThreads --> KrakenStrategy
         JavaCore --> Dashboard
+    end
+
+    subgraph "Cloudflare Workers (Crypto)"
+        RustWorker["🦀 Rust WASM Worker"]
+        CryptoStrategy["📊 Mean Reversion Strategy"]
+        WebUI["🌐 Web Dashboard"]
+        
+        RustWorker --> CryptoStrategy
+        RustWorker --> WebUI
     end
 
     subgraph "External APIs"
         AlpacaAPI["📡 Alpaca API"]
-        KrakenAPI["🦑 Kraken API"]
+        CoinbaseAPI["📡 Coinbase API"]
     end
 
     AlpacaStrategy <-->|REST/WSS| AlpacaAPI
-    KrakenStrategy <-->|REST| KrakenAPI
-    Dashboard <-->|WebSocket| JavaCore
+    CryptoStrategy <-->|REST| CoinbaseAPI
 ```
 
 ## 🛠 Technology Stack
 
-### 🧠 Backend: The Execution Core
+### 🧠 Stock Trading Backend (Java)
+
 - **Language:** Java 25 (LTS) with Virtual Threads (Project Loom)
 - **Framework:** Javalin - lightweight web framework (sub-1ms overhead)
 - **Build:** Maven with Shade plugin for uber-JAR
 - **Resilience:** Circuit breakers (Resilience4j), heartbeat monitoring, emergency protocol
+- **Deployment:** Fly.io (containerized)
+
+### 🦀 Crypto Trading Backend (Rust)
+
+- **Language:** Rust 2024 Edition (1.85+)
+- **Platform:** Cloudflare Workers (WASM)
+- **Strategy:** Mean reversion with ATR-based TP/SL
+- **Risk Management:** 2% risk per trade, 25% max per position
+- **Cost:** ~$5/month
 
 ### 💻 Frontend: Command & Control Dashboard
 - **Framework:** React 19 + TypeScript + Vite
 - **State:** Zustand for lightweight state management
 - **Charts:** Lightweight Charts (v5) + Recharts
 - **Real-time:** WebSocket for sub-50ms latency updates
-
-### ☁️ Infrastructure
-- **Deployment:** Google Cloud Run (serverless containers)
-- **Registry:** Google Artifact Registry
-- **Container:** Docker with GraalVM JDK 25
 
 ## 🧩 Key Features
 
@@ -72,11 +86,12 @@ graph TD
 - **Kelly Criterion**: Dynamic position sizing based on edge estimation
 - **VIX Integration**: Automatic strategy adjustment based on market fear
 
-### 2. Kraken Crypto Trading (24/7)
-- **Grid Trading**: Automated buy/sell grid with dynamic sizing
-- **Stop-Loss/Take-Profit**: Configurable SL (0.5%) and TP (0.75%) per position
-- **Volatility Detection**: Position sizing adjusted for high-volatility periods
-- **Selective Liquidation**: Close only losing positions on demand
+### 2. Coinbase Crypto Trading (24/7)
+- **Mean Reversion**: Buy the dip with trend/volume filters
+- **Volatility-Adaptive TP/SL**: ATR-based dynamic exits (2:1 R:R)
+- **Risk-Based Sizing**: 2% risk per trade, 25% max per position
+- **Time-Based Exits**: Auto-close stale positions after 12h
+- **Web Dashboard**: Real-time portfolio at `/dashboard`
 
 ### 3. Risk Management
 - **Emergency Protocol**: Manual panic button to flatten all positions
@@ -88,12 +103,12 @@ graph TD
 
 ### Prerequisites
 - Java 25 JDK (Temurin or GraalVM)
+- Rust toolchain (for crypto bot)
 - Node.js 20+
 - Docker
-- Google Cloud SDK (for deployment)
-- API Keys: Alpaca + Kraken
+- API Keys: Alpaca + Coinbase
 
-### Local Development
+### Local Development (Stock Bot)
 ```bash
 # Clone and navigate
 cd trading-backend
@@ -104,94 +119,103 @@ cd dashboard && npm install && npm run build && cd ..
 # Set environment variables
 export ALPACA_API_KEY=your_key
 export ALPACA_API_SECRET=your_secret
-export KRAKEN_API_KEY=your_key
-export KRAKEN_API_SECRET=your_secret
 
 # Build and run
 mvn clean package -DskipTests
 java --enable-preview -jar target/trading-backend-1.0-SNAPSHOT.jar
 ```
 
-### Deployment (Google Cloud Run)
+### Local Development (Crypto Bot)
 ```bash
-# Build with Cloud Build (for amd64)
-gcloud builds submit --project=YOUR_PROJECT \
-  --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/algo-trading-backend:latest
+cd coinbase-worker
+
+# Set secrets
+wrangler secret put COINBASE_API_KEY_NAME
+wrangler secret put COINBASE_PRIVATE_KEY
+
+# Run locally
+wrangler dev
 
 # Deploy
-gcloud run deploy algo-trading-backend \
-  --project=YOUR_PROJECT \
-  --region=us-central1 \
-  --image=us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/algo-trading-backend:latest \
-  --allow-unauthenticated
+wrangler deploy
 ```
+
+### Deployment
+- **Stocks (Fly.io)**: `cd trading-backend && flyctl deploy`
+- **Crypto (Cloudflare)**: `cd coinbase-worker && wrangler deploy`
 
 ## 📡 API Endpoints
 
-### Health & Status
+### Stock Bot (Java/Fly.io)
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/health` | GET | System health check |
 | `/api/heartbeat` | GET | Component heartbeat status |
 | `/api/status` | GET | Bot running status |
-
-### Alpaca (Stocks)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
 | `/api/account` | GET | Alpaca account info |
 | `/api/positions` | GET | Current stock positions |
 | `/api/orders` | GET | Open orders |
-
-### Kraken (Crypto)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/kraken/balance` | GET | Kraken wallet balance |
-| `/api/kraken/holdings` | GET | Crypto holdings with prices |
-| `/api/kraken/positions` | GET | Margin positions |
-| `/api/kraken/grid` | GET | Grid trading status |
-| `/api/kraken/liquidate-losers` | POST | Sell only losing positions |
-
-### Emergency Controls
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/emergency/panic` | POST | Flatten ALL Alpaca positions |
+| `/api/emergency/panic` | POST | Flatten ALL positions |
 | `/api/emergency/reset` | POST | Reset emergency state |
-| `/api/emergency/status` | GET | Emergency protocol status |
+
+### Crypto Bot (Rust/Cloudflare)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Dashboard UI |
+| `/health` | GET | Health check |
+| `/api/portfolio` | GET | Portfolio with live P&L |
+| `/api/positions` | GET | Current positions |
+| `/api/scan` | GET | Market scan results |
+| `/api/trigger` | POST | Force trading cycle |
+| `/api/toggle` | POST | Enable/disable trading |
 
 ## 📦 Project Structure
 ```
-trading-backend/
-├── src/main/java/com/trading/
-│   ├── api/controller/      # REST API controllers
-│   ├── bot/                 # Main TradingBot orchestrator
-│   ├── broker/              # KrakenClient, BrokerRouter
-│   ├── crypto/              # KrakenTradingLoop (24/7)
-│   ├── portfolio/           # ProfileManager, strategies
-│   ├── protection/          # EmergencyProtocol, HeartbeatMonitor
-│   └── strategy/            # GridTradingService, algorithms
-├── dashboard/               # React frontend (embedded)
-│   ├── src/components/      # UI widgets
-│   └── dist/                # Built assets (copied to JAR)
-├── Dockerfile               # Multi-stage build
-├── pom.xml                  # Maven configuration
-└── config.properties        # Trading parameters
+.
+├── trading-backend/             # Java Stock Trading Bot
+│   ├── src/main/java/com/trading/
+│   │   ├── api/controller/      # REST API controllers
+│   │   ├── bot/                 # Main TradingBot orchestrator
+│   │   ├── broker/              # Alpaca client, BrokerRouter
+│   │   ├── portfolio/           # ProfileManager, strategies
+│   │   ├── protection/          # EmergencyProtocol
+│   │   └── risk/                # Risk management
+│   ├── dashboard/               # React frontend (embedded)
+│   ├── Dockerfile               # Multi-stage build
+│   └── fly.toml                 # Fly.io config
+│
+├── coinbase-worker/             # Rust Crypto Trading Bot
+│   ├── src/
+│   │   ├── lib.rs               # Entry point, HTTP routes
+│   │   ├── auth.rs              # Coinbase JWT auth
+│   │   ├── client.rs            # Coinbase API client
+│   │   ├── strategy.rs          # Trading logic
+│   │   ├── trading.rs           # Trading engine
+│   │   └── dashboard/           # Web UI
+│   ├── wrangler.toml            # Cloudflare config
+│   └── README.md                # Crypto bot docs
+│
+└── README.md                    # This file
 ```
 
-## ⚙️ Configuration (config.properties)
+## ⚙️ Configuration
 
+### Stock Bot (config.properties)
 ```properties
-# Kraken Trading
-KRAKEN_STOP_LOSS_PERCENT=0.5
-KRAKEN_TAKE_PROFIT_PERCENT=0.75
-KRAKEN_CYCLE_INTERVAL_MS=10000
-
-# Grid Trading
-GRID_ORDER_SIZE=100.0
-GRID_VOLATILITY_THRESHOLD=0.02
-
 # Alpaca Profiles
 MAIN_TAKE_PROFIT_PERCENT=0.02
 MAIN_STOP_LOSS_PERCENT=0.01
+```
+
+### Crypto Bot (wrangler.toml)
+```toml
+ATR_SL_MULTIPLIER = "1.0"      # SL at 1x ATR
+ATR_TP_MULTIPLIER = "2.0"      # TP at 2x ATR (2:1 R:R)
+MAX_RISK_PER_TRADE_PERCENT = "2.0"
+MAX_PORTFOLIO_PER_POSITION = "25.0"
+SYMBOLS = "BTC-USD,ETH-USD,SOL-USD,..."
 ```
 
 ## 🔒 Security Notes

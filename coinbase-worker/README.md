@@ -15,21 +15,21 @@ A high-performance crypto trading bot running on Cloudflare Workers for 24/7 aut
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Cloudflare Edge Network                        │
+│                   Cloudflare Edge Network                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐    ┌────────────────────────────────────┐  │
 │  │  Cron Trigger   │───▶│         Worker (WASM/Rust)         │  │
 │  │  (every minute) │    │  - Trading Engine                  │  │
 │  └─────────────────┘    │  - Strategy Logic (Mean Reversion) │  │
-│                         │  - Risk Management                  │  │
+│                         │  - Risk Management                 │  │
 │  ┌─────────────────┐    │  - Coinbase API Client             │  │
 │  │  HTTP Endpoints │───▶└────────────────────────────────────┘  │
-│  │  /              │                    │                        │
-│  │  /health        │                    ▼                        │
+│  │  /              │                    │                       │
+│  │  /health        │                    ▼                       │
 │  │  /api/*         │    ┌────────────────────────────────────┐  │
-│  └─────────────────┘    │            KV Storage               │  │
+│  └─────────────────┘    │            KV Storage              │  │
 │                         │  - Trading State (positions, P&L)  │  │
 │                         └────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘

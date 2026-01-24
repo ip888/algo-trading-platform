@@ -42,6 +42,4 @@ primary_region = "arn"  # Stockholm, Sweden - good for EU
 
 # Secrets to set (run these before first deploy):
 # fly secrets set ALPACA_API_KEY=your_key
-# fly secrets set ALPACA_API_SECRET=your_secret  
-# fly secrets set KRAKEN_API_KEY=your_key
-# fly secrets set KRAKEN_API_SECRET=your_secret
+# fly secrets set ALPACA_API_SECRET=your_secret

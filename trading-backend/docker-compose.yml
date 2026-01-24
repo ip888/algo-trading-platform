@@ -19,9 +19,6 @@ services:
       # Alpaca API (required for stock trading)
       # - ALPACA_API_KEY=your_alpaca_key
       # - ALPACA_API_SECRET=your_alpaca_secret
-      # Kraken API (optional - for 24/7 crypto trading)
-      # - KRAKEN_API_KEY=your_kraken_key
-      # - KRAKEN_API_SECRET=your_kraken_secret
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 30s

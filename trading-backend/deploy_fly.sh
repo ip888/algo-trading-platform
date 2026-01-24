@@ -32,14 +32,10 @@ if [[ "$1" == "--first-time" ]]; then
     # Read secrets from config.properties
     ALPACA_KEY=$(grep "^ALPACA_API_KEY=" config.properties | cut -d= -f2)
     ALPACA_SECRET=$(grep "^ALPACA_API_SECRET=" config.properties | cut -d= -f2)
-    KRAKEN_KEY=$(grep "^KRAKEN_API_KEY=" config.properties | cut -d= -f2)
-    KRAKEN_SECRET=$(grep "^KRAKEN_API_SECRET=" config.properties | cut -d= -f2)
     
     fly secrets set \
         ALPACA_API_KEY="$ALPACA_KEY" \
         ALPACA_API_SECRET="$ALPACA_SECRET" \
-        KRAKEN_API_KEY="$KRAKEN_KEY" \
-        KRAKEN_API_SECRET="$KRAKEN_SECRET" \
         --app trading-backend
     
     echo "✅ Secrets configured"

@@ -353,13 +353,27 @@ async fn scan_all_symbols(env: &Env) -> std::result::Result<serde_json::Value, T
         }));
     }
     
+    // Check market regime (BTC trend)
+    let btc_stats = client.get_product_stats_public("BTC-USD").await.ok();
+    let market_regime = btc_stats.as_ref().map(|s| {
+        if s.change_24h >= 0.0 { "BULLISH" } else { "BEARISH" }
+    }).unwrap_or("UNKNOWN");
+    let btc_change = btc_stats.as_ref().map(|s| s.change_24h).unwrap_or(0.0);
+    
     Ok(serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
+        "market_regime": {
+            "status": market_regime,
+            "btc_24h_change": format!("{:.2}%", btc_change),
+            "can_open_new": market_regime == "BULLISH" || !config.enable_market_regime_filter,
+        },
         "filters": {
             "trend_filter": config.enable_trend_filter,
             "volume_filter": config.enable_volume_filter,
+            "market_regime_filter": config.enable_market_regime_filter,
             "min_volume_usd": format!("${:.0}M", config.min_volume_usd / 1_000_000.0),
             "max_position_age_hours": config.max_position_age_hours,
+            "entry_threshold": "25% (stricter)",
         },
         "positions": state.positions.len(),
         "max_positions": config.max_total_positions,

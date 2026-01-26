@@ -41,6 +41,7 @@ pub struct Config {
     /// Strategy filters
     pub enable_trend_filter: bool,      // Only buy dips in uptrends
     pub enable_volume_filter: bool,     // Only trade high-volume coins
+    pub enable_market_regime_filter: bool, // Only trade when BTC is green (market bullish)
     pub min_volume_usd: f64,            // Minimum 24h volume in USD
     pub max_position_age_hours: f64,    // Time-based exit (0 = disabled)
     
@@ -142,13 +143,17 @@ impl Config {
                 .map(|v| v.to_string().to_lowercase() == "true")
                 .unwrap_or(true),
             
+            enable_market_regime_filter: env.var("ENABLE_MARKET_REGIME_FILTER")
+                .map(|v| v.to_string().to_lowercase() == "true")
+                .unwrap_or(true),  // Don't trade when BTC is red
+            
             min_volume_usd: env.var("MIN_VOLUME_USD")
                 .map(|v| v.to_string().parse().unwrap_or(1_000_000.0))
                 .unwrap_or(1_000_000.0),
             
             max_position_age_hours: env.var("MAX_POSITION_AGE_HOURS")
-                .map(|v| v.to_string().parse().unwrap_or(12.0))
-                .unwrap_or(12.0),
+                .map(|v| v.to_string().parse().unwrap_or(48.0))
+                .unwrap_or(48.0),  // Give trades 48h to work out
         })
     }
     

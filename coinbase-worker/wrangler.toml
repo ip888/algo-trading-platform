@@ -51,8 +51,9 @@ MAX_CONSECUTIVE_ERRORS = "5"
 # Strategy filters
 ENABLE_TREND_FILTER = "true"    # Only buy dips in uptrends (price > 6h avg)
 ENABLE_VOLUME_FILTER = "true"   # Only trade high-volume coins
+ENABLE_MARKET_REGIME_FILTER = "true"  # Only trade when BTC is green (market bullish)
 MIN_VOLUME_USD = "1000000"      # Minimum $1M 24h volume
-MAX_POSITION_AGE_HOURS = "12"   # Close positions after 12h if no TP/SL hit
+MAX_POSITION_AGE_HOURS = "48"   # Close positions after 48h if no TP/SL hit (give trades time)
 
 # Scheduled triggers (cron)
 [triggers]

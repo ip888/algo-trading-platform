@@ -180,6 +180,24 @@ impl TradingEngine {
             return Ok(());
         }
         
+        // Market regime filter: check if BTC is in uptrend (market bullish)
+        // If BTC is red, don't open any new positions
+        if self.config.enable_market_regime_filter {
+            let btc_stats = match self.client.get_product_stats("BTC-USD").await {
+                Ok(s) => s,
+                Err(e) => {
+                    worker::console_warn!("Failed to get BTC stats for regime filter: {}", e);
+                    return Ok(()); // Skip entries when we can't check market regime
+                }
+            };
+            
+            if btc_stats.change_24h < 0.0 {
+                worker::console_log!("Market regime: BEARISH (BTC {:.2}%) - skipping new entries", btc_stats.change_24h);
+                return Ok(());
+            }
+            worker::console_log!("Market regime: BULLISH (BTC +{:.2}%) - scanning for entries", btc_stats.change_24h);
+        }
+        
         // Scan each configured symbol
         for symbol in &self.config.symbols {
             // Skip if already have position

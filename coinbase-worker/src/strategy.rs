@@ -77,17 +77,17 @@ impl TradingStrategy {
         }
         
         // Entry criteria (only if filters pass):
-        // 1. Price in lower 35% of 24h range (buy the dip)
+        // 1. Price in lower 25% of 24h range (stricter dip buying)
         // 2. Day change > -2% (avoid falling knives)
         // 3. Day change < 3% (avoid FOMO)
         let (signal, confidence) = if rejection_reason.is_some() {
             (TradingSignal::Hold, 0.0)
-        } else if range_position < 35.0 
+        } else if range_position < 25.0 
             && change_24h > -2.0 
             && change_24h < 3.0 
         {
-            // Strong buy signal if in lower 25%
-            let conf = if range_position < 25.0 { 0.8 } else { 0.6 };
+            // Strong buy signal if in lower 15%, normal if 15-25%
+            let conf = if range_position < 15.0 { 0.9 } else { 0.7 };
             (TradingSignal::Buy, conf)
         } else if range_position > 80.0 || change_24h > 5.0 {
             // Consider selling if at top of range or big move
@@ -346,8 +346,9 @@ mod tests {
             max_consecutive_errors: 5,
             enable_trend_filter: false,  // Disable for basic tests
             enable_volume_filter: false,  // Disable for basic tests
+            enable_market_regime_filter: false,  // Disable for basic tests
             min_volume_usd: 1_000_000.0,
-            max_position_age_hours: 12.0,
+            max_position_age_hours: 48.0,
         }
     }
     
@@ -355,11 +356,12 @@ mod tests {
     fn test_analyze_buy_signal() {
         let strategy = TradingStrategy::new(test_config());
         
-        // Price near 24h low, modest decline, uptrend, good volume
-        let analysis = strategy.analyze("BTC-USD", 50000.0, -0.5, 52000.0, 49000.0, true, 100.0);
+        // Price very near 24h low (within 25% of range), modest decline, uptrend, good volume
+        // Range: 49000-52000 = 3000, need position < 25% = 49750
+        let analysis = strategy.analyze("BTC-USD", 49500.0, -0.5, 52000.0, 49000.0, true, 100.0);
         
         assert_eq!(analysis.signal, TradingSignal::Buy);
-        assert!(analysis.range_position < 40.0);
+        assert!(analysis.range_position < 25.0);  // Stricter threshold
     }
     
     #[test]
@@ -560,8 +562,8 @@ mod tests {
     fn test_time_based_exit() {
         let strategy = TradingStrategy::new(test_config());
         
-        // Position opened 13 hours ago (> 12h max)
-        let old_time = chrono::Utc::now() - chrono::Duration::hours(13);
+        // Position opened 49 hours ago (> 48h max)
+        let old_time = chrono::Utc::now() - chrono::Duration::hours(49);
         let position = Position {
             symbol: "BTC-USD".to_string(),
             quantity: 0.001,
@@ -582,8 +584,8 @@ mod tests {
     fn test_time_exit_not_triggered_before_limit() {
         let strategy = TradingStrategy::new(test_config());
         
-        // Position opened 6 hours ago (< 12h max)
-        let recent_time = chrono::Utc::now() - chrono::Duration::hours(6);
+        // Position opened 24 hours ago (< 48h max)
+        let recent_time = chrono::Utc::now() - chrono::Duration::hours(24);
         let position = Position {
             symbol: "BTC-USD".to_string(),
             quantity: 0.001,

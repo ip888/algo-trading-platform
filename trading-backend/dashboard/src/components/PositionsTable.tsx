@@ -174,9 +174,24 @@ export const PositionsTable = () => {
                         <span style={{ color: 'var(--text-dim)' }}> | </span>
                         <span style={{ color: 'var(--positive)' }}>TP: ${takeProfit.toFixed(2)}</span>
                         {distanceToTP && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}> ({distanceToTP}%↑)</span>}
+                        <span style={{ color: 'var(--positive)', marginLeft: '8px', fontSize: '10px' }}>✓ Protected</span>
                       </>
                     ) : (
-                      <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Client-side managed</span>
+                      <span style={{
+                        color: '#ff9800',
+                        fontWeight: 500,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        background: 'rgba(255, 152, 0, 0.1)',
+                        padding: '2px 6px',
+                        borderRadius: '4px'
+                      }}>
+                        ⚠️ No Bracket
+                        <span style={{ fontSize: '9px', color: 'var(--text-muted)', fontWeight: 400 }}>
+                          (Client-side SL/TP)
+                        </span>
+                      </span>
                     )}
                   </td>
                 </tr>

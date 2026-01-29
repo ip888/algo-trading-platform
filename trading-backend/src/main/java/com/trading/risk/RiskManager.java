@@ -191,42 +191,55 @@ public final class RiskManager {
     
     /**
      * Check if trading should be halted due to excessive drawdown.
+     *
+     * SAFETY NOTE: Auto-reset was removed as it could mask real catastrophic losses.
+     * If peak equity seems incorrect, use resetPeakEquity() explicitly after manual review.
      */
     public boolean shouldHaltTrading(double currentEquity) {
-        // Update peak equity
+        // Update peak equity (only if current is higher)
         if (currentEquity > peakEquity) {
             peakEquity = currentEquity;
             logger.debug("Peak equity updated to: ${}", String.format("%.2f", peakEquity));
         }
-        
+
         double drawdown = (peakEquity - currentEquity) / peakEquity;
-        
-        // Auto-reset if peak equity seems wrong (>3x current equity)
-        // This catches initialization bugs where peak was set incorrectly
-        // Use 3x threshold to avoid interfering with max drawdown check
+
+        // SAFETY FIX: Removed auto-reset that triggered when peak > 3x current.
+        // That behavior could mask real 70%+ losses as "initialization bugs".
+        // Instead, log a warning for manual investigation.
         if (peakEquity > currentEquity * 3.0) {
-            logger.warn("⚠️ AUTO-CORRECTION: Peak equity (${}) seems incorrect vs current (${})",
+            logger.warn("⚠️ ALERT: Peak equity (${}) is >3x current (${}). " +
+                "If this is due to initialization error, call resetPeakEquity() manually. " +
+                "NOT auto-resetting to preserve safety.",
                 String.format("%.2f", peakEquity), String.format("%.2f", currentEquity));
-            logger.warn("   Resetting peak equity to current value");
-            peakEquity = currentEquity;
-            drawdown = 0;
-            logger.info("✅ AUTO-CORRECTION: Peak equity reset - trading resumed");
         }
-        
+
         if (drawdown > maxDrawdown) {
-            logger.error("CRITICAL: Max drawdown exceeded! Peak=${}, Current=${}, Drawdown={}%", 
-                String.format("%.2f", peakEquity), 
-                String.format("%.2f", currentEquity), 
+            logger.error("CRITICAL: Max drawdown exceeded! Peak=${}, Current=${}, Drawdown={}%",
+                String.format("%.2f", peakEquity),
+                String.format("%.2f", currentEquity),
                 String.format("%.2f", drawdown * 100));
             return true;
         }
-        
+
         logger.debug("Drawdown check: Peak=${}, Current=${}, Drawdown={}%",
             String.format("%.2f", peakEquity),
             String.format("%.2f", currentEquity),
             String.format("%.2f", drawdown * 100));
-        
+
         return false;
+    }
+
+    /**
+     * Manually reset peak equity to current value.
+     * Use this ONLY after manual investigation confirms the peak was incorrect.
+     * This should never be called automatically.
+     */
+    public void resetPeakEquity(double currentEquity) {
+        logger.warn("MANUAL RESET: Peak equity being reset from ${} to ${}",
+            String.format("%.2f", peakEquity), String.format("%.2f", currentEquity));
+        peakEquity = currentEquity;
+        logger.info("Peak equity reset complete. Trading drawdown check will use new baseline.");
     }
     
     /**

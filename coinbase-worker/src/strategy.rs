@@ -159,10 +159,13 @@ impl TradingStrategy {
         }
         
         // Trailing stop check (uses high water mark from position)
+        // FIX: Removed `&& pnl_percent > 0.0` condition - trailing stop should fire
+        // whenever price drops below the trailing level, even if position is now negative.
+        // Example: Entry $100, rallies to $110 (HWM), crashes to $99. Old code wouldn't
+        // trigger because pnl is -1%. New code triggers at $110 * 0.9925 = $109.18
         if let Some(high_water_mark) = position.high_water_mark {
             let trailing_sl_price = high_water_mark * (1.0 - self.config.trailing_stop_percent / 100.0);
-            let pnl_percent = (current_price - position.entry_price) / position.entry_price * 100.0;
-            if current_price <= trailing_sl_price && pnl_percent > 0.0 {
+            if current_price <= trailing_sl_price {
                 return Some(ExitReason::TrailingStop);
             }
         }
@@ -583,7 +586,7 @@ mod tests {
     #[test]
     fn test_time_exit_not_triggered_before_limit() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         // Position opened 24 hours ago (< 48h max)
         let recent_time = chrono::Utc::now() - chrono::Duration::hours(24);
         let position = Position {
@@ -596,9 +599,324 @@ mod tests {
             take_profit_price: None,
             entry_volatility: None,
         };
-        
+
         // Price hasn't moved much (no TP/SL hit)
         let exit = strategy.check_exit(&position, 50100.0);
         assert_eq!(exit, None);  // No exit yet
+    }
+
+    // ========================================================================
+    // TRAILING STOP TESTS - Comprehensive coverage for the fix
+    // ========================================================================
+
+    #[test]
+    fn test_trailing_stop_triggers_when_profitable() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        // Entry at $50,000, rallied to $51,000 (HWM), config trailing_stop = 0.5%
+        // Trailing SL = $51,000 * (1 - 0.005) = $50,745
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: Some(51000.0),  // +2% from entry
+            stop_loss_price: Some(49000.0),  // Won't hit this
+            take_profit_price: Some(52000.0), // Won't hit this
+            entry_volatility: None,
+        };
+
+        // Price at $50,740 (just below trailing SL of $50,745)
+        // Position is still profitable (+1.48%) but trailing stop triggers
+        let exit = strategy.check_exit(&position, 50740.0);
+        assert_eq!(exit, Some(ExitReason::TrailingStop));
+    }
+
+    #[test]
+    fn test_trailing_stop_triggers_even_when_negative_pnl() {
+        // THIS IS THE CRITICAL TEST FOR THE BUG FIX
+        // Old code: Would NOT trigger because pnl < 0
+        // New code: SHOULD trigger because price < trailing_sl_price
+
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        // Scenario: Entry $50,000, rallied to $51,000 (HWM), crashed to $49,500
+        // Trailing SL = $51,000 * 0.995 = $50,745
+        // Current price $49,500 is BELOW trailing SL AND BELOW entry (negative PnL)
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: Some(51000.0),  // Was +2%
+            stop_loss_price: Some(48000.0),  // Hard SL at -4% (won't hit)
+            take_profit_price: Some(53000.0),
+            entry_volatility: None,
+        };
+
+        // Price crashed to $49,500 (-1% from entry, but well below HWM)
+        // OLD BUG: pnl_percent = -1%, so `pnl_percent > 0.0` was false, no exit
+        // FIX: Trailing stop should trigger because $49,500 < $50,745
+        let exit = strategy.check_exit(&position, 49500.0);
+        assert_eq!(exit, Some(ExitReason::TrailingStop),
+            "Trailing stop MUST trigger even when current PnL is negative");
+    }
+
+    #[test]
+    fn test_trailing_stop_does_not_trigger_above_threshold() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        // Entry $50,000, HWM $51,000, trailing SL = $50,745
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: Some(51000.0),
+            stop_loss_price: Some(48000.0),
+            take_profit_price: Some(53000.0),
+            entry_volatility: None,
+        };
+
+        // Price at $50,800 (above trailing SL of $50,745)
+        let exit = strategy.check_exit(&position, 50800.0);
+        assert_eq!(exit, None, "Should not exit when price is above trailing stop level");
+    }
+
+    #[test]
+    fn test_trailing_stop_no_hwm_no_trigger() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        // No high water mark set - trailing stop should not trigger
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: None,  // No HWM
+            stop_loss_price: Some(49000.0),
+            take_profit_price: Some(52000.0),
+            entry_volatility: None,
+        };
+
+        // Price between SL and TP
+        let exit = strategy.check_exit(&position, 50500.0);
+        assert_eq!(exit, None, "No trailing stop without HWM");
+    }
+
+    #[test]
+    fn test_trailing_stop_exact_boundary() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        // HWM $51,000, trailing 0.5% = $50,745
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: Some(51000.0),
+            stop_loss_price: Some(48000.0),
+            take_profit_price: Some(53000.0),
+            entry_volatility: None,
+        };
+
+        // Price exactly at trailing SL (should trigger - <= comparison)
+        let trailing_sl = 51000.0 * (1.0 - 0.005);  // $50,745
+        let exit = strategy.check_exit(&position, trailing_sl);
+        assert_eq!(exit, Some(ExitReason::TrailingStop),
+            "Should trigger at exact trailing stop level");
+    }
+
+    #[test]
+    fn test_trailing_stop_priority_over_time_exit() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Old position (would trigger time exit) but also trailing stop
+        let old_time = chrono::Utc::now() - chrono::Duration::hours(50);
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: old_time.to_rfc3339(),
+            high_water_mark: Some(51000.0),
+            stop_loss_price: Some(48000.0),
+            take_profit_price: Some(53000.0),
+            entry_volatility: None,
+        };
+
+        // Price below trailing stop - should trigger trailing stop first
+        // (check_exit checks SL -> TP -> Trailing -> Time in order)
+        let exit = strategy.check_exit(&position, 50000.0);
+        assert_eq!(exit, Some(ExitReason::TrailingStop),
+            "Trailing stop should trigger before time exit");
+    }
+
+    // ========================================================================
+    // EDGE CASES AND ERROR HANDLING
+    // ========================================================================
+
+    #[test]
+    fn test_zero_entry_price_handling() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        // Edge case: zero entry price (should not panic)
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 0.0,  // Invalid but should not crash
+            entry_time: recent_time,
+            high_water_mark: None,
+            stop_loss_price: None,
+            take_profit_price: None,
+            entry_volatility: None,
+        };
+
+        // Should not panic - division by zero in pnl calculation
+        let exit = strategy.check_exit(&position, 100.0);
+        // With 0 entry, pnl% would be inf, so SL/TP with fallback % would trigger
+        assert!(exit.is_some() || exit.is_none()); // Just verify no panic
+    }
+
+    #[test]
+    fn test_negative_price_handling() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: Some(51000.0),
+            stop_loss_price: Some(49000.0),
+            take_profit_price: Some(52000.0),
+            entry_volatility: None,
+        };
+
+        // Negative price (invalid data) - should not panic
+        let exit = strategy.check_exit(&position, -100.0);
+        // Should hit stop loss since -100 < 49000
+        assert_eq!(exit, Some(ExitReason::StopLoss));
+    }
+
+    #[test]
+    fn test_very_large_price_handling() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: None,
+            stop_loss_price: Some(49000.0),
+            take_profit_price: Some(52000.0),
+            entry_volatility: None,
+        };
+
+        // Very large price - should trigger take profit
+        let exit = strategy.check_exit(&position, f64::MAX / 2.0);
+        assert_eq!(exit, Some(ExitReason::TakeProfit));
+    }
+
+    #[test]
+    fn test_nan_and_infinity_resilience() {
+        let strategy = TradingStrategy::new(test_config());
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: recent_time,
+            high_water_mark: Some(f64::NAN),  // Invalid HWM
+            stop_loss_price: Some(49000.0),
+            take_profit_price: Some(52000.0),
+            entry_volatility: None,
+        };
+
+        // NaN in HWM - trailing stop calc will produce NaN, comparison returns false
+        // Should not panic, trailing stop won't trigger due to NaN comparison
+        let exit = strategy.check_exit(&position, 50500.0);
+        assert_eq!(exit, None, "NaN in HWM should not trigger trailing stop");
+    }
+
+    #[test]
+    fn test_invalid_entry_time_handling() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Invalid RFC3339 timestamp
+        let position = Position {
+            symbol: "BTC-USD".to_string(),
+            quantity: 0.001,
+            entry_price: 50000.0,
+            entry_time: "not-a-valid-timestamp".to_string(),
+            high_water_mark: None,
+            stop_loss_price: Some(49000.0),
+            take_profit_price: Some(52000.0),
+            entry_volatility: None,
+        };
+
+        // Should not panic - time parsing will fail, time exit won't trigger
+        let exit = strategy.check_exit(&position, 50500.0);
+        assert_eq!(exit, None, "Invalid timestamp should not crash or trigger time exit");
+    }
+
+    #[test]
+    fn test_position_sizing_zero_portfolio() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Zero portfolio value
+        let sizing = strategy.calculate_position_size(0.0, 0.0, 1.0);
+        assert!(!sizing.can_trade, "Should not be able to trade with zero portfolio");
+        assert_eq!(sizing.size, 0.0);
+    }
+
+    #[test]
+    fn test_position_sizing_negative_values() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Negative portfolio (invalid state)
+        let sizing = strategy.calculate_position_size(-1000.0, -1000.0, 1.0);
+        // Should handle gracefully (negative * percent = negative, clamped to 0)
+        assert!(!sizing.can_trade || sizing.size <= 0.0);
+    }
+
+    #[test]
+    fn test_position_sizing_very_high_volatility() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Extreme volatility factor
+        let sizing = strategy.calculate_position_size(1000.0, 1000.0, 100.0);
+        // Position should be heavily reduced
+        assert!(sizing.volatility_adjusted < 100.0,
+            "High volatility should drastically reduce position size");
+    }
+
+    #[test]
+    fn test_analyze_zero_range() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // High = Low (zero range) - edge case
+        let analysis = strategy.analyze("BTC-USD", 50000.0, 0.0, 50000.0, 50000.0, true, 100.0);
+
+        // Should return 50% range position (fallback) and not crash
+        assert_eq!(analysis.range_position, 50.0);
+    }
+
+    #[test]
+    fn test_max_positions_overflow_protection() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Current positions exceeds hard cap
+        let max_new = strategy.max_new_positions(1000.0, 100);  // Way over cap of 8
+        assert_eq!(max_new, 0, "Should return 0 when already over cap");
     }
 }

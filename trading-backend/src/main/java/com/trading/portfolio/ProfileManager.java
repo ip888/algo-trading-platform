@@ -529,24 +529,39 @@ public class ProfileManager implements Runnable {
                 double lossPercent = pos.getLossPercent(currentPrice);
                 logger.warn("{} ⚠️ MAX LOSS EXIT: {} down {:.2f}% (limit: -{:.1f}%)", 
                     profilePrefix, symbol, lossPercent, config.getMaxLossPercent());
-                
-                // Force sell with market order for immediate execution
-                try {
-                    client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                    logger.info("{} ✅ Max loss exit order placed for {}", profilePrefix, symbol);
-                    
-                    // Record trade close
-                    database.closeTrade(symbol, Instant.now(), currentPrice, pos.calculatePnL(currentPrice));
-                    
+
+                // Retry up to 3 times if order fails
+                int maxAttempts = 3;
+                int attempt = 0;
+                boolean success = false;
+                Exception lastError = null;
+                while (attempt < maxAttempts && !success) {
+                    try {
+                        client.placeOrder(symbol, qty, "sell", "market", "day", null);
+                        logger.info("{} ✅ Max loss exit order placed for {} (attempt {}/{})", profilePrefix, symbol, attempt+1, maxAttempts);
+                        // Record trade close
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pos.calculatePnL(currentPrice));
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]", 
+                                profile.name(), symbol, lossPercent, attempt+1),
+                            "WARN"
+                        );
+                        success = true;
+                        return;
+                    } catch (Exception e) {
+                        lastError = e;
+                        logger.error("{} Failed to place max loss exit order for {} (attempt {}/{}): {}", profilePrefix, symbol, attempt+1, maxAttempts, e.getMessage());
+                        try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                        attempt++;
+                    }
+                }
+                if (!success) {
                     TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss)", 
-                            profile.name(), symbol, lossPercent),
-                        "WARN"
+                        String.format("[%s] CRITICAL: Max loss exit FAILED for %s after %d attempts. Manual intervention required!", 
+                            profile.name(), symbol, maxAttempts),
+                        "ERROR"
                     );
-                    
-                    return;
-                } catch (Exception e) {
-                    logger.error("{} Failed to place max loss exit order for {}", profilePrefix, symbol, e);
+                    logger.error("{} CRITICAL: Max loss exit FAILED for {} after {} attempts. Last error: {}", profilePrefix, symbol, maxAttempts, lastError != null ? lastError.getMessage() : "none");
                 }
             }
             
@@ -965,56 +980,71 @@ public class ProfileManager implements Runnable {
                 "INFO"
             );
             
-            try {
-                client.placeBracketOrder(symbol, positionSize, "buy", 
-                    takeProfit, stopLoss, null, null);
-                logger.info("{} {}: ✅ Bracket order placed successfully", profilePrefix, symbol);
-                
-                // Broadcast success to UI
-                TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ✅ BUY ORDER FILLED: %s %.3f shares @ $%.2f", 
-                        profile.name(), symbol, positionSize, currentPrice),
-                    "SUCCESS"
-                );
-            } catch (Exception e) {
-                logger.warn("{} {}: Bracket order failed, placing market order: {}", 
-                    profilePrefix, symbol, e.getMessage());
-                
+            // Place bracket order and check if server-side protection was applied
+            var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
+                takeProfit, stopLoss, null, null);
+
+            if (!bracketResult.success()) {
+                // Order failed completely - try simple market order as fallback
+                logger.warn("{} {}: Bracket order failed ({}), trying market order",
+                    profilePrefix, symbol, bracketResult.message());
+
                 try {
                     client.placeOrder(symbol, positionSize, "buy", "market", "day", null);
                     broadcastOrderData(symbol, positionSize, "buy", "market", "filled", currentPrice);
-                    
-                    // Broadcast success to UI
+
+                    // Market order succeeded but NO bracket protection
                     TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] ✅ BUY ORDER FILLED (Market): %s %.3f shares @ $%.2f", 
+                        String.format("[%s] ⚠️ BUY ORDER FILLED (No Protection): %s %.3f shares @ $%.2f",
                             profile.name(), symbol, positionSize, currentPrice),
-                        "SUCCESS"
+                        "WARN"
                     );
+
+                    // Record as unprotected position
+                    logger.warn("{} {}: ⚠️ Position has NO server-side SL/TP protection!",
+                        profilePrefix, symbol);
                 } catch (Exception marketOrderError) {
-                    // SELF-HEALING: Check if it's insufficient buying power
-                    if (marketOrderError.getMessage().contains("insufficient buying power")) {
-                        logger.error("{} {}: ❌ Order FAILED - Insufficient buying power", 
+                    if (marketOrderError.getMessage() != null &&
+                        marketOrderError.getMessage().contains("insufficient buying power")) {
+                        logger.error("{} {}: ❌ Order FAILED - Insufficient buying power",
                             profilePrefix, symbol);
-                        
-                        // Broadcast failure to UI with details
+
                         TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ❌ BUY ORDER FAILED: %s - Insufficient buying power (Tried: $%.2f, Available: $%.2f)", 
+                            String.format("[%s] ❌ BUY ORDER FAILED: %s - Insufficient buying power (Tried: $%.2f, Available: $%.2f)",
                                 profile.name(), symbol, positionSize * currentPrice, buyingPower),
                             "ERROR"
                         );
-                        
-                        // Don't update portfolio or record trade - order failed
                         return;
                     } else {
-                        // Other error - broadcast and rethrow
                         TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ❌ BUY ORDER FAILED: %s - %s", 
+                            String.format("[%s] ❌ BUY ORDER FAILED: %s - %s",
                                 profile.name(), symbol, marketOrderError.getMessage()),
                             "ERROR"
                         );
                         throw marketOrderError;
                     }
                 }
+            } else if (bracketResult.needsClientSideMonitoring()) {
+                // Order succeeded but fractional - NO bracket protection
+                logger.warn("{} {}: ⚠️ Fractional order - NO server-side bracket protection!",
+                    profilePrefix, symbol);
+                logger.warn("{} {}: Client-side SL/TP monitoring will be used (10-second check cycle)",
+                    profilePrefix, symbol);
+
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⚠️ BUY FILLED (Fractional): %s %.3f shares @ $%.2f - NO bracket protection!",
+                        profile.name(), symbol, positionSize, currentPrice),
+                    "WARN"
+                );
+            } else {
+                // Full bracket protection applied
+                logger.info("{} {}: ✅ Bracket order with full SL/TP protection", profilePrefix, symbol);
+
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ✅ BUY ORDER FILLED: %s %.3f shares @ $%.2f (Protected)",
+                        profile.name(), symbol, positionSize, currentPrice),
+                    "SUCCESS"
+                );
             }
         }
         
@@ -1544,6 +1574,7 @@ public class ProfileManager implements Runnable {
         
         try {
             var alpacaPositions = client.getPositions();
+            logger.info("{} 🔍 Checking {} positions for take-profit/stop-loss", profilePrefix, alpacaPositions.size());
             
             for (var alpacaPos : alpacaPositions) {
                 String symbol = alpacaPos.symbol();
@@ -1601,6 +1632,12 @@ public class ProfileManager implements Runnable {
             // Get profile-specific targets
             double takeProfitPercent = profile.takeProfitPercent();
                 double stopLossPercent = profile.stopLossPercent();
+                
+                // Log P&L status for each position
+                logger.info("{} {} P&L check: current=+{}% vs target=+{}% (entry=${}, now=${})",
+                    profilePrefix, symbol, String.format("%.2f", pnlPercent), 
+                    String.format("%.1f", takeProfitPercent), 
+                    String.format("%.2f", entryPrice), String.format("%.2f", currentPrice));
                 
                 // Check for take-profit trigger
                 if (pnlPercent >= takeProfitPercent) {

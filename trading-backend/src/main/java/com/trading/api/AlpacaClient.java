@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.trading.api.model.Bar;
+import com.trading.api.model.BracketOrderResult;
 import com.trading.api.model.Position;
 import com.trading.config.Config;
 import org.slf4j.Logger;
@@ -306,8 +307,17 @@ public final class AlpacaClient {
         }
     }
 
-    public void placeBracketOrder(String symbol, double qty, String side, 
-                                   double takeProfitPrice, double stopLossPrice, 
+    /**
+     * Place a bracket order with automatic take-profit and stop-loss.
+     *
+     * IMPORTANT: For fractional quantities, Alpaca does NOT support bracket orders.
+     * This method will fall back to a simple DAY order and return a result indicating
+     * that the position needs client-side SL/TP monitoring.
+     *
+     * @return BracketOrderResult indicating whether server-side protection was applied
+     */
+    public BracketOrderResult placeBracketOrder(String symbol, double qty, String side,
+                                   double takeProfitPrice, double stopLossPrice,
                                    Double stopLossLimitPrice, Double limitPrice) {
         try {
             // Create main order object
@@ -316,46 +326,63 @@ public final class AlpacaClient {
                 .put("qty", String.format("%.9f", qty))
                 .put("side", side)
                 .put("type", limitPrice != null ? "limit" : "market");
-        // Check if fractional
-        boolean isFractional = qty % 1 != 0;
-        
-        if (isFractional) {
-            logger.warn("Fractional quantities do not support Bracket orders. Placing simple DAY order instead. Stops must be managed client-side.");
-            // Remove bracket params and force DAY
-            order.put("time_in_force", "day");
-            // We cannot send take_profit or stop_loss for simple orders
-        } else {
-            // Whole shares: Use Bracket + GTC
-            order.put("time_in_force", "gtc");
-            order.put("order_class", "bracket");
-            
-            // Add Take Profit
-            var takeProfit = objectMapper.createObjectNode()
-                .put("limit_price", String.format("%.2f", takeProfitPrice));
-            order.set("take_profit", takeProfit);
 
-            // Add Stop Loss
-            var stopLoss = objectMapper.createObjectNode()
-                .put("stop_price", String.format("%.2f", stopLossPrice));
-            if (stopLossLimitPrice != null) {
-                stopLoss.put("limit_price", String.format("%.2f", stopLossLimitPrice));
+            // Check if fractional - use small epsilon for floating point comparison
+            boolean isFractional = Math.abs(qty - Math.floor(qty)) > 0.0001;
+
+            if (isFractional) {
+                logger.warn("⚠️ FRACTIONAL ORDER: {} {} shares of {} - NO bracket protection available!",
+                    String.format("%.4f", qty), side, symbol);
+                logger.warn("   → Position will require client-side SL/TP monitoring (10-second check cycle)");
+
+                // Remove bracket params and force DAY
+                order.put("time_in_force", "day");
+                // We cannot send take_profit or stop_loss for simple orders
+
+                if (limitPrice != null) {
+                    order.put("limit_price", String.format("%.2f", limitPrice));
+                }
+
+                var body = objectMapper.writeValueAsString(order);
+                logger.info("Placing SIMPLE order (fractional fallback): {}", body);
+                sendRequest(config.baseUrl() + "/v2/orders", "POST", body);
+
+                // Return result indicating NO bracket protection
+                return BracketOrderResult.withoutBracket(symbol, qty);
+
+            } else {
+                // Whole shares: Use Bracket + GTC
+                order.put("time_in_force", "gtc");
+                order.put("order_class", "bracket");
+
+                // Add Take Profit
+                var takeProfit = objectMapper.createObjectNode()
+                    .put("limit_price", String.format("%.2f", takeProfitPrice));
+                order.set("take_profit", takeProfit);
+
+                // Add Stop Loss
+                var stopLoss = objectMapper.createObjectNode()
+                    .put("stop_price", String.format("%.2f", stopLossPrice));
+                if (stopLossLimitPrice != null) {
+                    stopLoss.put("limit_price", String.format("%.2f", stopLossLimitPrice));
+                }
+                order.set("stop_loss", stopLoss);
+
+                if (limitPrice != null) {
+                    order.put("limit_price", String.format("%.2f", limitPrice));
+                    // NOTE: Bracket orders do NOT support extended hours on Alpaca.
+                }
+
+                var body = objectMapper.writeValueAsString(order);
+                logger.info("Placing BRACKET order with SL/TP protection: {}", body);
+                sendRequest(config.baseUrl() + "/v2/orders", "POST", body);
+
+                // Return result indicating full bracket protection
+                return BracketOrderResult.withBracket(symbol, qty);
             }
-            order.set("stop_loss", stopLoss);
-        }
-
-            if (limitPrice != null) {
-                order.put("limit_price", String.format("%.2f", limitPrice));
-                
-                // NOTE: Bracket orders do NOT support extended hours on Alpaca.
-                // We must NOT add the extended_hours flag here.
-            }
-
-            var body = objectMapper.writeValueAsString(order);
-            logger.info("Placing bracket order: {}", body);
-            sendRequest(config.baseUrl() + "/v2/orders", "POST", body);
         } catch (Exception e) {
-            logger.error("Failed to place bracket order", e);
-            throw new RuntimeException("Bracket order placement failed", e);
+            logger.error("Failed to place bracket order for {}", symbol, e);
+            return BracketOrderResult.failed(symbol, qty, e.getMessage());
         }
     }
 

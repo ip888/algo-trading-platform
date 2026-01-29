@@ -2,6 +2,7 @@ package com.trading.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.trading.api.model.Bar;
+import com.trading.api.model.BracketOrderResult;
 import com.trading.api.model.Position;
 import com.trading.config.Config;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -45,10 +46,10 @@ public final class ResilientAlpacaClient {
         this.meterRegistry = meterRegistry;
         
         // Circuit Breaker: Open after 50% failures in 10 requests
-        // AUTO-RECOVERY: Wait only 30 seconds before trying again (was 60)
+        // AUTO-RECOVERY: Wait only 15 seconds before trying again (faster for trading)
         var cbConfig = CircuitBreakerConfig.custom()
             .failureRateThreshold(50)
-            .waitDurationInOpenState(Duration.ofSeconds(30))  // Faster recovery
+            .waitDurationInOpenState(Duration.ofSeconds(15))  // Faster recovery for trading
             .slidingWindowSize(10)
             .permittedNumberOfCallsInHalfOpenState(5)  // More test calls in half-open
             .automaticTransitionFromOpenToHalfOpenEnabled(true)  // Auto-transition!
@@ -56,8 +57,9 @@ public final class ResilientAlpacaClient {
         this.circuitBreaker = CircuitBreaker.of("alpaca-api", cbConfig);
         
         // Rate Limiter: Alpaca allows 200 requests/minute
+        // Use 150 to leave headroom for both profiles sharing this limiter
         var rlConfig = RateLimiterConfig.custom()
-            .limitForPeriod(200)
+            .limitForPeriod(150)  // Conservative: 2 profiles share this
             .limitRefreshPeriod(Duration.ofMinutes(1))
             .timeoutDuration(Duration.ofSeconds(5))
             .build();
@@ -220,18 +222,20 @@ public final class ResilientAlpacaClient {
         });
     }
     
-    public void placeBracketOrder(String symbol, double qty, String side,
+    /**
+     * Place a bracket order with resilience patterns.
+     *
+     * @return BracketOrderResult indicating whether server-side protection was applied.
+     *         For fractional quantities, returns result with hasBracketProtection=false,
+     *         meaning client-side SL/TP monitoring is required.
+     */
+    public BracketOrderResult placeBracketOrder(String symbol, double qty, String side,
                                  double takeProfitPrice, double stopLossPrice,
                                  Double stopLossLimitPrice, Double limitPrice) {
-        executeResilient("placeBracketOrder", () -> {
-            try {
-                delegate.placeBracketOrder(symbol, qty, side, takeProfitPrice, 
-                    stopLossPrice, stopLossLimitPrice, limitPrice);
-                return null;
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
+        return executeResilient("placeBracketOrder", () ->
+            delegate.placeBracketOrder(symbol, qty, side, takeProfitPrice,
+                stopLossPrice, stopLossLimitPrice, limitPrice)
+        );
     }
 
     public void cancelAllOrders() {

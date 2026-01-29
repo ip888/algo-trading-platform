@@ -100,22 +100,31 @@ function updatePortfolio(debug) {
     document.getElementById('cashReserve').textContent = p.cash_reserve || '--';
 }
 
-function updateRiskSizing(debug) {
+function updateCapitalTier(debug) {
     if (!debug) return;
-    
-    if (debug.risk_sizing) {
-        const r = debug.risk_sizing;
-        document.getElementById('positionSize').textContent = r.final_size || '--';
-        document.getElementById('riskPerTrade').textContent = r.max_risk_per_trade || '--';
-        document.getElementById('maxPerPosition').textContent = r.max_per_position || '--';
-        document.getElementById('canTrade').textContent = r.can_trade 
-            ? '✅ Yes' 
-            : '❌ No (' + (r.reason || 'N/A') + ')';
+
+    // Capital Tier info
+    if (debug.capital_tier) {
+        const t = debug.capital_tier;
+        document.getElementById('tierName').textContent = t.tier || '--';
+        document.getElementById('tierRecommendation').textContent = t.recommendation || '--';
+        document.getElementById('tierRisk').textContent = t.risk_per_trade || '--';
+        document.getElementById('tierMaxPosition').textContent = t.max_position_percent || '--';
+        document.getElementById('canTrade').textContent = t.can_trade
+            ? '✅ Yes'
+            : '❌ No';
     }
-    
+
+    // Fee tier info
+    if (debug.fee_tier) {
+        const f = debug.fee_tier;
+        document.getElementById('feeRoundTrip').textContent = f.round_trip || '--';
+        document.getElementById('minProfitableTP').textContent = f.min_profitable_tp || '--';
+    }
+
+    // Positions count
     if (debug.positions) {
-        document.getElementById('posCount').textContent = debug.positions.current + '/' + debug.positions.hard_cap;
-        document.getElementById('maxNew').textContent = debug.positions.max_new;
+        document.getElementById('posCount').textContent = debug.positions.current + '/' + debug.positions.tier_cap;
     }
 }
 
@@ -195,7 +204,7 @@ async function updateDashboard() {
     updateTimestamp();
     updateStatus(status);
     updatePortfolio(debug);
-    updateRiskSizing(debug);
+    updateCapitalTier(debug);
     updatePositionsTable(portfolio);
     updateScanGrid(scan);
 }

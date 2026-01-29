@@ -66,23 +66,25 @@ pub const TEMPLATE: &str = r#"
                 </div>
             </div>
 
-            <!-- Risk Sizing Card -->
+            <!-- Capital Tier Card -->
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">⚙️ Risk Sizing</span>
+                    <span class="card-title">🎯 Capital Tier</span>
                 </div>
+                <div class="card-value" id="tierName" style="font-size: 20px;">--</div>
+                <div class="tier-recommendation" id="tierRecommendation" style="color: var(--text-dim); font-size: 12px; margin: 8px 0;">--</div>
                 <div class="risk-info">
                     <div class="risk-row">
-                        <span class="risk-label">Position Size</span>
-                        <span id="positionSize">--</span>
+                        <span class="risk-label">Risk/Trade</span>
+                        <span id="tierRisk">--</span>
                     </div>
                     <div class="risk-row">
-                        <span class="risk-label">Risk per Trade</span>
-                        <span id="riskPerTrade">--</span>
+                        <span class="risk-label">Max Position</span>
+                        <span id="tierMaxPosition">--</span>
                     </div>
                     <div class="risk-row">
-                        <span class="risk-label">Max per Position</span>
-                        <span id="maxPerPosition">--</span>
+                        <span class="risk-label">Positions</span>
+                        <span id="posCount">--</span>
                     </div>
                     <div class="risk-row">
                         <span class="risk-label">Can Trade</span>
@@ -91,12 +93,12 @@ pub const TEMPLATE: &str = r#"
                 </div>
                 <div class="metrics" style="margin-top: 16px;">
                     <div class="metric">
-                        <div class="metric-label">Positions</div>
-                        <div class="metric-value" id="posCount">--</div>
+                        <div class="metric-label">Fee (Round-trip)</div>
+                        <div class="metric-value" id="feeRoundTrip">--</div>
                     </div>
                     <div class="metric">
-                        <div class="metric-label">Max New</div>
-                        <div class="metric-value" id="maxNew">--</div>
+                        <div class="metric-label">Min TP Needed</div>
+                        <div class="metric-value" id="minProfitableTP">--</div>
                     </div>
                 </div>
             </div>

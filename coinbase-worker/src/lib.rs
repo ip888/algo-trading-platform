@@ -30,6 +30,7 @@
 #![allow(clippy::manual_clamp)]            // Explicit NaN handling in trading code
 
 mod auth;
+mod capital_tier;
 mod client;
 mod config;
 mod dashboard;
@@ -41,6 +42,7 @@ mod types;
 use worker::{event, console_log, Request, Env, Context, Response, Router, ScheduledEvent, ScheduleContext};
 
 pub use auth::CoinbaseAuth;
+pub use capital_tier::{CapitalTier, TierParameters, FeeTier};
 pub use client::CoinbaseClient;
 pub use config::Config;
 pub use error::TradingError;
@@ -354,9 +356,11 @@ async fn scan_all_symbols(env: &Env) -> std::result::Result<serde_json::Value, T
     }
     
     // Check market regime (BTC trend)
+    // Use -1% threshold: allows trading in flat/slightly red markets
+    // Only blocks during real dumps (BTC < -1%)
     let btc_stats = client.get_product_stats_public("BTC-USD").await.ok();
     let market_regime = btc_stats.as_ref().map(|s| {
-        if s.change_24h >= 0.0 { "BULLISH" } else { "BEARISH" }
+        if s.change_24h >= -1.0 { "BULLISH" } else { "BEARISH" }
     }).unwrap_or("UNKNOWN");
     let btc_change = btc_stats.as_ref().map(|s| s.change_24h).unwrap_or(0.0);
     
@@ -389,7 +393,7 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
     let strategy = TradingStrategy::new(config.clone());
     let state = get_trading_state(env).await
         .map_err(|e| TradingError::Trading(e.to_string()))?;
-    
+
     // Get accounts to check balance (USD + USDC both count as cash)
     let accounts = client.get_accounts().await?;
     let usd_balance: f64 = accounts.accounts
@@ -397,7 +401,7 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
         .filter(|a| a.currency == "USD" || a.currency == "USDC")
         .filter_map(|a| a.available_balance.value.parse::<f64>().ok())
         .sum();
-    
+
     // Calculate total portfolio
     let mut positions_value = 0.0;
     for pos in &state.positions {
@@ -406,17 +410,21 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
         }
     }
     let total_portfolio = usd_balance + positions_value;
-    
+
+    // Get capital tier info for adaptive parameters
+    let tier_params = capital_tier::TierParameters::for_portfolio(total_portfolio);
+    let fee_tier = capital_tier::FeeTier::from_volume(0.0); // Assume low volume for now
+
     // Check AVAX specifically
     let symbol = "AVAX-USD";
     let stats = client.get_product_stats(symbol).await?;
-    
+
     // Calculate volatility factor
     let range_percent = ((stats.high_24h - stats.low_24h) / stats.low_24h) * 100.0;
     let volatility_factor = (range_percent / 3.0).max(0.5).min(2.0);
-    
+
     let sizing = strategy.calculate_position_size(total_portfolio, usd_balance, volatility_factor);
-    
+
     let analysis = strategy.analyze(
         symbol,
         stats.price,
@@ -426,12 +434,27 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
         stats.is_uptrend,
         stats.volume_24h,
     );
-    
+
     let should_enter = strategy.should_enter(&analysis, state.positions.len(), total_portfolio);
     let has_position = state.get_position(symbol).is_some();
     let max_new_positions = strategy.max_new_positions(total_portfolio, state.positions.len());
-    
+
     Ok(serde_json::json!({
+        "capital_tier": {
+            "tier": tier_params.tier.name(),
+            "recommendation": tier_params.recommendation,
+            "can_trade": tier_params.can_trade,
+            "max_positions": tier_params.max_positions,
+            "max_position_percent": format!("{}%", tier_params.max_position_percent),
+            "risk_per_trade": format!("{}%", tier_params.risk_per_trade_percent),
+            "entry_threshold_multiplier": format!("{:.2}x", tier_params.entry_threshold_multiplier),
+        },
+        "fee_tier": {
+            "taker_fee": format!("{}%", fee_tier.taker_fee_percent),
+            "maker_fee": format!("{}%", fee_tier.maker_fee_percent),
+            "round_trip": format!("{}%", fee_tier.round_trip_percent()),
+            "min_profitable_tp": format!("{}%", fee_tier.min_profitable_tp(1.0)),
+        },
         "portfolio": {
             "total_portfolio": format!("${:.2}", total_portfolio),
             "usd_balance": format!("${:.2}", usd_balance),
@@ -439,13 +462,13 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
             "cash_reserve": format!("${:.2} ({}%)", total_portfolio * config.cash_reserve_percent / 100.0, config.cash_reserve_percent),
         },
         "risk_sizing": {
-            "max_risk_per_trade": format!("{}%", config.max_risk_per_trade_percent),
-            "risk_amount": format!("${:.2}", total_portfolio * config.max_risk_per_trade_percent / 100.0),
+            "tier_risk_percent": format!("{}%", tier_params.risk_per_trade_percent),
+            "risk_amount": format!("${:.2}", total_portfolio * tier_params.risk_per_trade_percent / 100.0),
             "stop_loss": format!("{}%", config.stop_loss_percent),
             "risk_based_size": format!("${:.2}", sizing.risk_based),
             "volatility_factor": format!("{:.2}x", volatility_factor),
             "volatility_adjusted": format!("${:.2}", sizing.volatility_adjusted),
-            "max_per_position": format!("${:.2} ({}%)", sizing.max_per_position, config.max_portfolio_per_position),
+            "max_per_position": format!("${:.2} ({}%)", sizing.max_per_position, tier_params.max_position_percent),
             "final_size": format!("${:.2}", sizing.size),
             "can_trade": sizing.can_trade,
             "reason": sizing.reason,
@@ -453,6 +476,7 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
         "positions": {
             "current": state.positions.len(),
             "max_new": max_new_positions,
+            "tier_cap": tier_params.max_positions,
             "hard_cap": config.max_total_positions,
         },
         "avax_stats": {

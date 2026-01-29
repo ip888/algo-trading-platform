@@ -8,43 +8,52 @@ use worker::Env;
 pub struct Config {
     /// Environment (production, staging, development)
     pub environment: String,
-    
+
     /// Log level
     pub log_level: String,
-    
+
     /// Exit parameters (fallback values)
     pub take_profit_percent: f64,
     pub stop_loss_percent: f64,
     pub trailing_stop_percent: f64,
-    
+
     /// Volatility-Adaptive TP/SL (ATR-based)
     pub atr_sl_multiplier: f64,     // SL at Nx ATR below entry
     pub atr_tp_multiplier: f64,     // TP at Nx ATR above entry
     pub min_sl_percent: f64,        // Min stop-loss bound
     pub max_sl_percent: f64,        // Max stop-loss bound
-    pub min_tp_percent: f64,        // Min take-profit bound  
+    pub min_tp_percent: f64,        // Min take-profit bound
     pub max_tp_percent: f64,        // Max take-profit bound
-    
+
     /// Dynamic Position Sizing (Risk-Based)
-    pub max_risk_per_trade_percent: f64,    // Risk max X% of portfolio per trade
-    pub max_portfolio_per_position: f64,    // Max % of portfolio in one position
-    pub min_position_usd: f64,              // Minimum position size (Coinbase minimum)
+    /// Note: These are BASE values - actual values are adjusted by CapitalTier
+    pub max_risk_per_trade_percent: f64,    // Base risk % (tier-adjusted: 0.5-2%)
+    pub max_portfolio_per_position: f64,    // Base max % per position (tier-adjusted: 20-80%)
+    pub min_position_usd: f64,              // Absolute Coinbase minimum
     pub cash_reserve_percent: f64,          // Keep X% cash for opportunities
-    pub max_total_positions: usize,         // Hard safety cap
-    
+    pub max_total_positions: usize,         // Hard safety cap (tier adjusts lower)
+
+    /// Fee Configuration (auto-adjusts based on 30-day volume)
+    pub base_fee_percent: f64,              // Default fee tier (0.6% for $0-$1K volume)
+
+    /// Adaptive Entry Threshold
+    pub base_entry_threshold: f64,          // Base score needed to enter (0-100)
+    pub min_entry_threshold: f64,           // Floor (never too permissive)
+    pub max_entry_threshold: f64,           // Ceiling (never too restrictive)
+
     pub cycle_interval_seconds: u64,
-    
+
     /// Risk management
     pub daily_trade_limit: u32,
     pub max_consecutive_errors: u32,
-    
+
     /// Strategy filters
     pub enable_trend_filter: bool,      // Only buy dips in uptrends
     pub enable_volume_filter: bool,     // Only trade high-volume coins
     pub enable_market_regime_filter: bool, // Only trade when BTC is green (market bullish)
     pub min_volume_usd: f64,            // Minimum 24h volume in USD
     pub max_position_age_hours: f64,    // Time-based exit (0 = disabled)
-    
+
     /// Symbols to trade
     pub symbols: Vec<String>,
 }
@@ -114,7 +123,25 @@ impl Config {
             max_total_positions: env.var("MAX_TOTAL_POSITIONS")
                 .map(|v| v.to_string().parse().unwrap_or(8))
                 .unwrap_or(8),  // Hard safety cap
-            
+
+            // Fee Configuration
+            base_fee_percent: env.var("BASE_FEE_PERCENT")
+                .map(|v| v.to_string().parse().unwrap_or(0.60))
+                .unwrap_or(0.60),  // Coinbase default tier
+
+            // Adaptive Entry Threshold
+            base_entry_threshold: env.var("BASE_ENTRY_THRESHOLD")
+                .map(|v| v.to_string().parse().unwrap_or(60.0))
+                .unwrap_or(60.0),  // Base score to enter
+
+            min_entry_threshold: env.var("MIN_ENTRY_THRESHOLD")
+                .map(|v| v.to_string().parse().unwrap_or(40.0))
+                .unwrap_or(40.0),  // Floor
+
+            max_entry_threshold: env.var("MAX_ENTRY_THRESHOLD")
+                .map(|v| v.to_string().parse().unwrap_or(85.0))
+                .unwrap_or(85.0),  // Ceiling
+
             cycle_interval_seconds: env.var("CYCLE_INTERVAL_SECONDS")
                 .map(|v| v.to_string().parse().unwrap_or(15))
                 .unwrap_or(15),

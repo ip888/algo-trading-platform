@@ -33,11 +33,23 @@ MIN_TP_PERCENT = "1.0"         # Min take-profit
 MAX_TP_PERCENT = "10.0"        # Max take-profit
 
 # Dynamic Position Sizing (Risk-Based)
-MAX_RISK_PER_TRADE_PERCENT = "2.0"    # Risk max 2% of portfolio per trade
-MAX_PORTFOLIO_PER_POSITION = "25.0"   # Never more than 25% in one position
-MIN_POSITION_USD = "10"               # Coinbase minimum
+# Note: These are BASE values - actual values are adjusted by CapitalTier
+MAX_RISK_PER_TRADE_PERCENT = "2.0"    # Base risk % (tier-adjusted: 0.5-2%)
+MAX_PORTFOLIO_PER_POSITION = "25.0"   # Base max % per position (tier-adjusted: 20-80%)
+MIN_POSITION_USD = "10"               # Absolute Coinbase minimum
 CASH_RESERVE_PERCENT = "15.0"         # Keep 15% cash for opportunities
-MAX_TOTAL_POSITIONS = "8"             # Hard cap (safety limit)
+MAX_TOTAL_POSITIONS = "8"             # Hard cap (tier-adjusted: 1-5)
+
+# Fee Configuration (Coinbase Advanced Trade - Taker Fees)
+# Bot tracks 30-day volume and auto-adjusts fee assumption
+BASE_FEE_PERCENT = "0.60"             # Default fee tier ($0-$1K volume)
+# Fee tiers: $0-1K=0.60%, $1K-10K=0.40%, $10K-50K=0.25%, $50K+=0.20%
+
+# Adaptive Entry Threshold
+# Base threshold auto-adjusts based on recent win rate
+BASE_ENTRY_THRESHOLD = "60.0"         # Base score needed to enter (0-100)
+MIN_ENTRY_THRESHOLD = "40.0"          # Floor (never too permissive)
+MAX_ENTRY_THRESHOLD = "85.0"          # Ceiling (never too restrictive)
 
 CYCLE_INTERVAL_SECONDS = "15"
 

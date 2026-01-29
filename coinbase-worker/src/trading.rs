@@ -1,7 +1,9 @@
 //! Trading engine - orchestrates the trading cycle
 //!
 //! Coordinates strategy, API client, and state management.
+//! Uses adaptive capital-tier parameters for risk management.
 
+use crate::capital_tier::TierParameters;
 use crate::client::CoinbaseClient;
 use crate::config::Config;
 use crate::error::Result;
@@ -169,19 +171,29 @@ impl TradingEngine {
         }
         let total_portfolio = usd_balance + positions_value;
         
-        worker::console_log!("Portfolio: ${:.2} (${:.2} USD + ${:.2} positions)", 
-            total_portfolio, usd_balance, positions_value);
-        
-        // Check if we can open more positions
+        // Get capital tier info for adaptive parameters
+        let tier_params = TierParameters::for_portfolio(total_portfolio);
+
+        worker::console_log!("Portfolio: ${:.2} | Tier: {} | Risk: {}% | Max Positions: {}",
+            total_portfolio, tier_params.tier.name(), tier_params.risk_per_trade_percent, tier_params.max_positions);
+
+        // Check if trading is allowed at this tier
+        if !tier_params.can_trade {
+            worker::console_log!("Trading disabled: {}", tier_params.recommendation);
+            return Ok(());
+        }
+
+        // Check if we can open more positions (tier-adjusted)
         let max_new = self.strategy.max_new_positions(total_portfolio, state.positions.len());
         if max_new == 0 {
-            worker::console_log!("At max positions ({}/{})", 
-                state.positions.len(), self.config.max_total_positions);
+            worker::console_log!("At max positions ({}/{} for {} tier)",
+                state.positions.len(), tier_params.max_positions, tier_params.tier.name());
             return Ok(());
         }
         
-        // Market regime filter: check if BTC is in uptrend (market bullish)
-        // If BTC is red, don't open any new positions
+        // Market regime filter: check if BTC is above -1% threshold
+        // Allows trading in flat/slightly red markets, blocks during real dumps
+        const BTC_REGIME_THRESHOLD: f64 = -1.0; // Allow trades if BTC > -1%
         if self.config.enable_market_regime_filter {
             let btc_stats = match self.client.get_product_stats("BTC-USD").await {
                 Ok(s) => s,
@@ -191,11 +203,11 @@ impl TradingEngine {
                 }
             };
             
-            if btc_stats.change_24h < 0.0 {
-                worker::console_log!("Market regime: BEARISH (BTC {:.2}%) - skipping new entries", btc_stats.change_24h);
+            if btc_stats.change_24h < BTC_REGIME_THRESHOLD {
+                worker::console_log!("Market regime: BEARISH (BTC {:.2}% < {:.0}% threshold) - skipping new entries", btc_stats.change_24h, BTC_REGIME_THRESHOLD);
                 return Ok(());
             }
-            worker::console_log!("Market regime: BULLISH (BTC +{:.2}%) - scanning for entries", btc_stats.change_24h);
+            worker::console_log!("Market regime: OK (BTC {:.2}% >= {:.0}% threshold) - scanning for entries", btc_stats.change_24h, BTC_REGIME_THRESHOLD);
         }
         
         // Scan each configured symbol

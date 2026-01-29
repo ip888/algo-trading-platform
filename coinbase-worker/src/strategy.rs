@@ -4,7 +4,9 @@
 //! - Entry signals based on price position in 24h range
 //! - Take-profit and stop-loss exits
 //! - Trailing stop for profit protection
+//! - Adaptive capital-tier based risk management
 
+use crate::capital_tier::{CapitalTier, TierParameters};
 use crate::config::Config;
 use crate::types::Position;
 
@@ -184,51 +186,69 @@ impl TradingStrategy {
         None
     }
     
-    /// Calculate position size using risk-based dynamic sizing
-    /// 
-    /// Formula: Position = min(RiskAmount / StopLoss%, MaxPortfolioPercent, AvailableAfterReserve)
-    /// 
-    /// Example with $1000 portfolio, 2% risk, 1.5% stop-loss:
-    /// - Risk amount = $1000 × 2% = $20
-    /// - Position from risk = $20 / 1.5% = $1,333
-    /// - Max per position = $1000 × 25% = $250
-    /// - Result = $250 (capped)
+    /// Calculate position size using risk-based dynamic sizing with capital-tier adjustment
+    ///
+    /// Uses adaptive parameters based on portfolio size:
+    /// - Micro (<$100): No trading, paper trade only
+    /// - Tiny ($100-$500): 0.5% risk, 1 position max
+    /// - Small ($500-$2K): 1% risk, 2 positions max
+    /// - Medium ($2K-$5K): 1.5% risk, 3 positions max
+    /// - Standard ($5K-$25K): 2% risk, 4 positions max
+    /// - Large ($25K+): 2% risk, 5 positions max
     pub fn calculate_position_size(&self, total_portfolio: f64, available_usd: f64, volatility_factor: f64) -> PositionSizeResult {
+        // Get tier-adjusted parameters
+        let tier_params = TierParameters::for_portfolio(total_portfolio);
+
+        // Check if trading is allowed at this tier
+        if !tier_params.can_trade {
+            return PositionSizeResult {
+                size: 0.0,
+                risk_based: 0.0,
+                volatility_adjusted: 0.0,
+                max_per_position: 0.0,
+                available_after_reserve: 0.0,
+                can_trade: false,
+                reason: Some(format!("{} - {}", tier_params.tier.name(), tier_params.recommendation)),
+                tier: Some(tier_params.tier),
+            };
+        }
+
         // Calculate available after cash reserve
         let reserved_cash = total_portfolio * (self.config.cash_reserve_percent / 100.0);
         let available_for_trading = (total_portfolio - reserved_cash).max(0.0);
-        
-        // Risk-based sizing: how much can we risk?
-        let risk_amount = total_portfolio * (self.config.max_risk_per_trade_percent / 100.0);
+
+        // Risk-based sizing using TIER-ADJUSTED risk percent (not config default)
+        let risk_percent = tier_params.risk_per_trade_percent;
+        let risk_amount = total_portfolio * (risk_percent / 100.0);
         let stop_loss_decimal = self.config.stop_loss_percent / 100.0;
-        
+
         // Position size that would risk exactly our risk amount at stop-loss
         let risk_based_size = if stop_loss_decimal > 0.0 {
             risk_amount / stop_loss_decimal
         } else {
             available_for_trading * 0.25  // Fallback
         };
-        
+
         // Apply volatility adjustment (high volatility = smaller position)
-        // volatility_factor: 1.0 = normal, >1.0 = high vol, <1.0 = low vol
         let volatility_adjusted = risk_based_size / volatility_factor.max(0.5);
-        
-        // Cap at max % of portfolio per position
-        let max_per_position = total_portfolio * (self.config.max_portfolio_per_position / 100.0);
-        
+
+        // Cap at TIER-ADJUSTED max % of portfolio per position
+        let max_position_percent = tier_params.max_position_percent;
+        let max_per_position = total_portfolio * (max_position_percent / 100.0);
+
         // Can't use more than available cash
         let capped_size = volatility_adjusted
             .min(max_per_position)
             .min(available_usd)
             .min(available_for_trading);
-        
+
         // Final size must be above minimum
         let final_size = if capped_size >= self.config.min_position_usd {
             capped_size
         } else {
             0.0  // Can't trade - not enough capital
         };
-        
+
         PositionSizeResult {
             size: final_size,
             risk_based: risk_based_size,
@@ -237,42 +257,49 @@ impl TradingStrategy {
             available_after_reserve: available_for_trading,
             can_trade: final_size >= self.config.min_position_usd,
             reason: if final_size < self.config.min_position_usd {
-                Some(format!("Below ${} minimum", self.config.min_position_usd))
+                Some(format!("Below ${} minimum (Tier: {})", self.config.min_position_usd, tier_params.tier.name()))
             } else {
                 None
             },
+            tier: Some(tier_params.tier),
         }
     }
     
     /// Calculate how many more positions we can open
-    /// Now based purely on available capital, not arbitrary counts
+    /// Uses tier-based position limits that adapt to portfolio size
     pub fn max_new_positions(&self, total_portfolio: f64, current_positions: usize) -> usize {
-        // Hard safety cap from config (prevents runaway)
+        // Get tier-adjusted max positions
+        let tier_params = TierParameters::for_portfolio(total_portfolio);
+
+        // Tier-based cap (more conservative than hard cap for small accounts)
+        let tier_max = tier_params.max_positions;
         let hard_cap = self.config.max_total_positions;
-        if current_positions >= hard_cap {
+        let effective_cap = tier_max.min(hard_cap);
+
+        if current_positions >= effective_cap {
             return 0;
         }
-        
+
         // Calculate how many more positions we can afford
-        // Based on: available capital / position size
-        let max_per_position = total_portfolio * (self.config.max_portfolio_per_position / 100.0);
+        let max_position_percent = tier_params.max_position_percent;
+        let max_per_position = total_portfolio * (max_position_percent / 100.0);
         let reserve = total_portfolio * (self.config.cash_reserve_percent / 100.0);
         let min_size = self.config.min_position_usd;
-        
+
         // Estimate current positions value (assume max size each for conservative calc)
         let positions_value = current_positions as f64 * max_per_position;
         let available_for_new = (total_portfolio - positions_value - reserve).max(0.0);
-        
+
         // How many more positions can we open with remaining capital?
         let capital_based_new = if max_per_position > min_size {
             (available_for_new / max_per_position).floor() as usize
         } else {
             0
         };
-        
-        // Return minimum of hard cap remaining and capital-based limit
-        let remaining_to_cap = hard_cap.saturating_sub(current_positions);
-        remaining_to_cap.min(capital_based_new.max(1)) // At least 1 if under hard cap
+
+        // Return minimum of tier cap remaining and capital-based limit
+        let remaining_to_cap = effective_cap.saturating_sub(current_positions);
+        remaining_to_cap.min(capital_based_new.max(1)) // At least 1 if under cap
     }
     
     /// Check if we should enter a new position
@@ -297,6 +324,7 @@ pub struct PositionSizeResult {
     pub available_after_reserve: f64,   // Available after cash reserve
     pub can_trade: bool,                // Whether we can open a position
     pub reason: Option<String>,         // Why we can't trade (if applicable)
+    pub tier: Option<CapitalTier>,      // Current capital tier
 }
 
 /// Reason for exiting a position
@@ -343,6 +371,10 @@ mod tests {
             min_position_usd: 10.0,
             cash_reserve_percent: 15.0,
             max_total_positions: 8,
+            base_fee_percent: 0.60,
+            base_entry_threshold: 60.0,
+            min_entry_threshold: 40.0,
+            max_entry_threshold: 85.0,
             cycle_interval_seconds: 15,
             symbols: vec!["BTC-USD".to_string()],
             daily_trade_limit: 30,
@@ -477,55 +509,63 @@ mod tests {
     #[test]
     fn test_position_sizing_risk_based() {
         let strategy = TradingStrategy::new(test_config());
-        
-        // With $1000 portfolio, 2% risk, 1% stop-loss:
-        // Risk = $20, Position = $20/0.01 = $2000
-        // But capped at 25% = $250
+
+        // With $1000 portfolio (TINY tier: 0.5% risk, 80% max position, 1 position max)
+        // Risk = $1000 * 0.5% = $5, Position = $5 / 1% SL = $500
+        // Capped at 80% = $800 for TINY tier
+        // So position is $500 (risk-based, under cap)
         let sizing = strategy.calculate_position_size(1000.0, 1000.0, 1.0);
         assert!(sizing.can_trade);
-        assert_eq!(sizing.size, 250.0);  // Capped at 25%
-        
-        // With $100 portfolio, 2% risk, 1% stop-loss:
-        // Risk = $2, Position = $2/0.01 = $200
-        // But capped at 25% = $25, and available after 15% reserve = $85
+        assert_eq!(sizing.tier, Some(CapitalTier::Small));  // $1000 is SMALL tier
+        // SMALL tier: 1% risk, 50% max position
+        // Risk = $10, Position = $10 / 1% = $1000, capped at 50% = $500
+        assert_eq!(sizing.size, 500.0);
+
+        // With $100 portfolio (TINY tier: 0.5% risk, 80% max position)
+        // Risk = $0.50, Position = $0.50 / 1% = $50
+        // Capped at 80% = $80, but risk-based is $50
+        // Available after 15% reserve = $85
         let sizing = strategy.calculate_position_size(100.0, 100.0, 1.0);
         assert!(sizing.can_trade);
-        assert_eq!(sizing.size, 25.0);  // Capped at 25%
-        
-        // With $50 portfolio:
-        // 25% max = $12.50, which is above $10 min
+        assert_eq!(sizing.tier, Some(CapitalTier::Tiny));
+        assert_eq!(sizing.size, 50.0);  // Risk-based: $0.50 / 0.01 = $50
+
+        // With $50 portfolio (MICRO tier: cannot trade)
         let sizing = strategy.calculate_position_size(50.0, 50.0, 1.0);
-        assert!(sizing.can_trade);
-        assert_eq!(sizing.size, 12.5);
-        
+        assert!(!sizing.can_trade);  // MICRO tier cannot trade
+        assert_eq!(sizing.tier, Some(CapitalTier::Micro));
+
         // High volatility (2x) reduces position size
         let sizing_normal = strategy.calculate_position_size(1000.0, 1000.0, 1.0);
         let sizing_high_vol = strategy.calculate_position_size(1000.0, 1000.0, 2.0);
-        // With 2x volatility, risk_based is halved, but we're still capped at 25%
-        // so both end up at $250
+        // With 2x volatility, risk_based is halved
         assert!(sizing_high_vol.volatility_adjusted < sizing_normal.volatility_adjusted);
     }
     
     #[test]
     fn test_max_new_positions() {
         let strategy = TradingStrategy::new(test_config());
-        
-        // With $1000 portfolio:
-        // - 25% max per position = $250
-        // - 15% reserve = $150
-        // - Available for positions = $850
-        // - Max positions = 850/250 = 3.4 → 3 new when at 0
-        // But we guarantee at least 1 if under hard cap
+
+        // With $1000 portfolio (SMALL tier: max 2 positions)
+        // Can open positions since at 0
         assert!(strategy.max_new_positions(1000.0, 0) >= 1);
-        
-        // At hard cap (8) - no more positions
-        assert_eq!(strategy.max_new_positions(1000.0, 8), 0);
-        
-        // With positions already, still allows more if capital available
-        assert!(strategy.max_new_positions(1000.0, 2) >= 1);
-        
-        // Tiny portfolio - still allows at least 1 if under cap
-        assert!(strategy.max_new_positions(50.0, 0) >= 1);
+
+        // SMALL tier max is 2, so at 2 positions, no more allowed
+        assert_eq!(strategy.max_new_positions(1000.0, 2), 0);
+
+        // At hard cap (8) - no more positions regardless of tier
+        assert_eq!(strategy.max_new_positions(10000.0, 8), 0);
+
+        // $5000 portfolio (STANDARD tier: max 4 positions)
+        // At 2 positions, can open more
+        assert!(strategy.max_new_positions(5000.0, 2) >= 1);
+
+        // MICRO portfolio (<$100) - cannot trade at all
+        assert_eq!(strategy.max_new_positions(50.0, 0), 0);
+
+        // TINY portfolio ($100-$500) - max 1 position
+        assert!(strategy.max_new_positions(200.0, 0) >= 1);
+        assert_eq!(strategy.max_new_positions(200.0, 1), 0);
     }
     
     #[test]

@@ -9,7 +9,7 @@
 /// Capital tier classification
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CapitalTier {
-    /// $0 - $100: Paper trade only, system learns
+    /// $0 - $100: Insufficient capital, trading disabled
     Micro,
     /// $100 - $500: Ultra conservative, 1 position max
     Tiny,
@@ -44,7 +44,7 @@ impl CapitalTier {
     /// Maximum positions allowed for this tier
     pub fn max_positions(&self) -> usize {
         match self {
-            CapitalTier::Micro => 0,    // Paper trade only
+            CapitalTier::Micro => 0,    // Trading disabled
             CapitalTier::Tiny => 1,     // Single position
             CapitalTier::Small => 2,    // Limited diversification
             CapitalTier::Medium => 3,   // Moderate diversification
@@ -98,7 +98,7 @@ impl CapitalTier {
     pub fn recommendation(&self) -> &'static str {
         match self {
             CapitalTier::Micro =>
-                "MICRO (<$100): Paper trading mode. Add capital to begin live trading.",
+                "MICRO (<$100): Insufficient capital. Add funds to begin trading.",
             CapitalTier::Tiny =>
                 "TINY ($100-$500): Ultra-conservative mode. Single position, tight risk controls.",
             CapitalTier::Small =>

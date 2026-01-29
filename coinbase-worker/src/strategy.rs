@@ -189,7 +189,7 @@ impl TradingStrategy {
     /// Calculate position size using risk-based dynamic sizing with capital-tier adjustment
     ///
     /// Uses adaptive parameters based on portfolio size:
-    /// - Micro (<$100): No trading, paper trade only
+    /// - Micro (<$100): Insufficient capital, trading disabled
     /// - Tiny ($100-$500): 0.5% risk, 1 position max
     /// - Small ($500-$2K): 1% risk, 2 positions max
     /// - Medium ($2K-$5K): 1.5% risk, 3 positions max

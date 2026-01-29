@@ -99,6 +99,19 @@ graph TD
 - **PDT Protection**: Pattern day trader safeguards (Alpaca)
 - **Position Tracking**: Real-time P&L monitoring with entry prices
 
+### 4. Adaptive Capital-Tier Risk Management (NEW)
+- **BracketOrderResult**: Tracks whether server-side SL/TP protection was applied
+- **CapitalTierManager**: Automatic risk adjustment based on account size
+  - MICRO (<$500): Ultra-conservative, max 2 positions, prefer whole shares
+  - SMALL ($500-$2K): Conservative, 3 positions, whole shares for bracket protection
+  - MEDIUM ($2K-$5K): Balanced, 4 positions
+  - STANDARD ($5K-$25K): Full trading capabilities
+  - PDT ($25K+): Unrestricted day trading
+- **PositionProtectionAuditor**: Monitors positions without broker-side protection
+  - Telegram alerts when fractional orders skip bracket protection
+  - WebSocket broadcasts to dashboard for real-time UI warnings
+- **Dashboard Warning**: Positions without bracket orders show "⚠️ No Bracket" indicator
+
 ## 🚀 Getting Started
 
 ### Prerequisites

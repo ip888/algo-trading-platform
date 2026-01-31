@@ -17,17 +17,17 @@
 //! ~$5/month on Cloudflare Workers paid plan
 
 // Clippy configuration for trading code patterns
-#![allow(clippy::similar_names)]           // state/stats are common trading names
-#![allow(clippy::too_many_arguments)]      // Trading functions need many params
-#![allow(clippy::cast_precision_loss)]     // Float casts OK for display
+#![allow(clippy::similar_names)] // state/stats are common trading names
+#![allow(clippy::too_many_arguments)] // Trading functions need many params
+#![allow(clippy::cast_precision_loss)] // Float casts OK for display
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
-#![allow(clippy::too_many_lines)]          // Complex trading logic functions
-#![allow(clippy::doc_markdown)]            // Doc style flexibility
-#![allow(clippy::needless_pass_by_value)]  // Worker framework patterns
-#![allow(clippy::if_not_else)]             // Readability preference
-#![allow(clippy::map_unwrap_or)]           // Explicit error handling preference
-#![allow(clippy::manual_clamp)]            // Explicit NaN handling in trading code
+#![allow(clippy::too_many_lines)] // Complex trading logic functions
+#![allow(clippy::doc_markdown)] // Doc style flexibility
+#![allow(clippy::needless_pass_by_value)] // Worker framework patterns
+#![allow(clippy::if_not_else)] // Readability preference
+#![allow(clippy::map_unwrap_or)] // Explicit error handling preference
+#![allow(clippy::manual_clamp)] // Explicit NaN handling in trading code
 
 mod auth;
 mod capital_tier;
@@ -39,10 +39,12 @@ mod strategy;
 mod trading;
 mod types;
 
-use worker::{event, console_log, Request, Env, Context, Response, Router, ScheduledEvent, ScheduleContext};
+use worker::{
+    Context, Env, Request, Response, Router, ScheduleContext, ScheduledEvent, console_log, event,
+};
 
 pub use auth::CoinbaseAuth;
-pub use capital_tier::{CapitalTier, TierParameters, FeeTier};
+pub use capital_tier::{CapitalTier, FeeTier, TierParameters};
 pub use client::CoinbaseClient;
 pub use config::Config;
 pub use error::TradingError;
@@ -69,7 +71,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
                 Ok(c) => c,
                 Err(e) => return Response::error(format!("Config error: {e}"), 500),
             };
-            
+
             Response::from_json(&serde_json::json!({
                 "status": "healthy",
                 "version": env!("CARGO_PKG_VERSION"),
@@ -115,24 +117,30 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         .get_async("/api/balance", |_req, ctx| async move {
             let auth = match CoinbaseAuth::from_env(&ctx.env) {
                 Ok(a) => a,
-                Err(e) => return Response::from_json(&serde_json::json!({
-                    "error": format!("{e}")
-                })),
+                Err(e) => {
+                    return Response::from_json(&serde_json::json!({
+                        "error": format!("{e}")
+                    }));
+                }
             };
             let client = CoinbaseClient::new(auth);
-            
+
             match client.get_accounts().await {
                 Ok(accounts) => {
-                    let balances: Vec<_> = accounts.accounts.iter()
+                    let balances: Vec<_> = accounts
+                        .accounts
+                        .iter()
                         .filter(|a| {
                             let val: f64 = a.available_balance.value.parse().unwrap_or(0.0);
                             val > 0.0
                         })
-                        .map(|a| serde_json::json!({
-                            "currency": a.currency,
-                            "available": a.available_balance.value,
-                            "hold": a.hold.value,
-                        }))
+                        .map(|a| {
+                            serde_json::json!({
+                                "currency": a.currency,
+                                "available": a.available_balance.value,
+                                "hold": a.hold.value,
+                            })
+                        })
                         .collect();
                     Response::from_json(&serde_json::json!({
                         "accounts": balances
@@ -162,20 +170,24 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
             // Check if secrets exist
             let key_name = match ctx.env.secret("COINBASE_API_KEY_NAME") {
                 Ok(s) => s.to_string(),
-                Err(_) => return Response::from_json(&serde_json::json!({
-                    "status": "error",
-                    "message": "COINBASE_API_KEY_NAME secret not set"
-                })),
+                Err(_) => {
+                    return Response::from_json(&serde_json::json!({
+                        "status": "error",
+                        "message": "COINBASE_API_KEY_NAME secret not set"
+                    }));
+                }
             };
-            
+
             let private_key = match ctx.env.secret("COINBASE_PRIVATE_KEY") {
                 Ok(s) => s.to_string(),
-                Err(_) => return Response::from_json(&serde_json::json!({
-                    "status": "error", 
-                    "message": "COINBASE_PRIVATE_KEY secret not set"
-                })),
+                Err(_) => {
+                    return Response::from_json(&serde_json::json!({
+                        "status": "error",
+                        "message": "COINBASE_PRIVATE_KEY secret not set"
+                    }));
+                }
             };
-            
+
             // Check key format
             let key_info = if private_key.contains("BEGIN EC PRIVATE KEY") {
                 "SEC1 EC format detected"
@@ -184,7 +196,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
             } else {
                 "Unknown format"
             };
-            
+
             match CoinbaseAuth::new(key_name, &private_key) {
                 Ok(_) => Response::from_json(&serde_json::json!({
                     "status": "ok",
@@ -201,16 +213,19 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         // Enable/disable trading
         .post_async("/api/toggle", |mut req, ctx| async move {
             let mut state = get_trading_state(&ctx.env).await?;
-            
+
             // If body provided with "enabled", use that; otherwise toggle
             let enabled = match req.json::<serde_json::Value>().await {
-                Ok(body) => body.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(!state.enabled),
+                Ok(body) => body
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(!state.enabled),
                 Err(_) => !state.enabled, // No body = toggle current state
             };
-            
+
             state.enabled = enabled;
             save_trading_state(&ctx.env, &state).await?;
-            
+
             Response::from_json(&serde_json::json!({
                 "enabled": enabled,
                 "message": if enabled { "Trading enabled" } else { "Trading disabled" }
@@ -253,11 +268,12 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 /// Execute a trading cycle
 async fn run_trading_cycle(env: &Env) -> std::result::Result<TradingCycleResult, TradingError> {
     let config = Config::from_env(env)?;
-    
+
     // Get current state from KV
-    let mut state = get_trading_state(env).await
+    let mut state = get_trading_state(env)
+        .await
         .map_err(|e| TradingError::Trading(e.to_string()))?;
-    
+
     // Check if trading is enabled
     if !state.enabled {
         return Ok(TradingCycleResult {
@@ -269,28 +285,29 @@ async fn run_trading_cycle(env: &Env) -> std::result::Result<TradingCycleResult,
             cycle_time_ms: 0,
         });
     }
-    
+
     // Initialize Coinbase client
     let auth = CoinbaseAuth::from_env(env)?;
     let client = CoinbaseClient::new(auth);
-    
+
     // Initialize trading engine
     let engine = TradingEngine::new(client, config);
-    
+
     // Run the trading cycle
     let result = engine.run_cycle(&mut state).await?;
-    
+
     // Save updated state to KV
-    save_trading_state(env, &state).await
+    save_trading_state(env, &state)
+        .await
         .map_err(|e| TradingError::Trading(e.to_string()))?;
-    
+
     Ok(result)
 }
 
 /// Get trading state from KV storage
 async fn get_trading_state(env: &Env) -> WResult<TradingStateData> {
     let kv = env.kv("STATE")?;
-    
+
     match kv.get(STATE_KEY).json::<TradingStateData>().await? {
         Some(state) => Ok(state),
         None => Ok(TradingStateData::default()),
@@ -310,11 +327,12 @@ async fn scan_all_symbols(env: &Env) -> std::result::Result<serde_json::Value, T
     let auth = CoinbaseAuth::from_env(env)?;
     let client = CoinbaseClient::new(auth);
     let strategy = TradingStrategy::new(config.clone());
-    let state = get_trading_state(env).await
+    let state = get_trading_state(env)
+        .await
         .map_err(|e| TradingError::Trading(e.to_string()))?;
-    
+
     let mut scans = Vec::new();
-    
+
     for symbol in &config.symbols {
         // Use public endpoint for scan (no auth required)
         let stats = match client.get_product_stats_public(symbol).await {
@@ -327,7 +345,7 @@ async fn scan_all_symbols(env: &Env) -> std::result::Result<serde_json::Value, T
                 continue;
             }
         };
-        
+
         let analysis = strategy.analyze(
             symbol,
             stats.price,
@@ -337,9 +355,9 @@ async fn scan_all_symbols(env: &Env) -> std::result::Result<serde_json::Value, T
             stats.is_uptrend,
             stats.volume_24h,
         );
-        
+
         let has_position = state.get_position(symbol).is_some();
-        
+
         scans.push(serde_json::json!({
             "symbol": symbol,
             "price": format!("${:.2}", stats.price),
@@ -354,16 +372,23 @@ async fn scan_all_symbols(env: &Env) -> std::result::Result<serde_json::Value, T
             "has_position": has_position,
         }));
     }
-    
+
     // Check market regime (BTC trend)
     // Use -1% threshold: allows trading in flat/slightly red markets
     // Only blocks during real dumps (BTC < -1%)
     let btc_stats = client.get_product_stats_public("BTC-USD").await.ok();
-    let market_regime = btc_stats.as_ref().map(|s| {
-        if s.change_24h >= -1.0 { "BULLISH" } else { "BEARISH" }
-    }).unwrap_or("UNKNOWN");
+    let market_regime = btc_stats
+        .as_ref()
+        .map(|s| {
+            if s.change_24h >= -1.0 {
+                "BULLISH"
+            } else {
+                "BEARISH"
+            }
+        })
+        .unwrap_or("UNKNOWN");
     let btc_change = btc_stats.as_ref().map(|s| s.change_24h).unwrap_or(0.0);
-    
+
     Ok(serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "market_regime": {
@@ -391,12 +416,14 @@ async fn debug_trading_check(env: &Env) -> std::result::Result<serde_json::Value
     let auth = CoinbaseAuth::from_env(env)?;
     let client = CoinbaseClient::new(auth);
     let strategy = TradingStrategy::new(config.clone());
-    let state = get_trading_state(env).await
+    let state = get_trading_state(env)
+        .await
         .map_err(|e| TradingError::Trading(e.to_string()))?;
 
     // Get accounts to check balance (USD + USDC both count as cash)
     let accounts = client.get_accounts().await?;
-    let usd_balance: f64 = accounts.accounts
+    let usd_balance: f64 = accounts
+        .accounts
         .iter()
         .filter(|a| a.currency == "USD" || a.currency == "USDC")
         .filter_map(|a| a.available_balance.value.parse::<f64>().ok())
@@ -507,33 +534,34 @@ async fn get_portfolio_with_pnl(env: &Env) -> std::result::Result<serde_json::Va
     let config = Config::from_env(env)?;
     let auth = CoinbaseAuth::from_env(env)?;
     let client = CoinbaseClient::new(auth);
-    let state = get_trading_state(env).await
+    let state = get_trading_state(env)
+        .await
         .map_err(|e| TradingError::Trading(e.to_string()))?;
-    
+
     let mut positions_with_pnl = Vec::new();
     let mut total_invested = 0.0;
     let mut total_current_value = 0.0;
     let mut total_unrealized_pnl = 0.0;
-    
+
     for position in &state.positions {
         // Get current price
         let current_price = match client.get_price(&position.symbol).await {
             Ok(p) => p,
             Err(_) => position.entry_price, // fallback
         };
-        
+
         let entry_value = position.quantity * position.entry_price;
         let current_value = position.quantity * current_price;
         let unrealized_pnl = current_value - entry_value;
         let pnl_percent = (current_price - position.entry_price) / position.entry_price * 100.0;
-        
+
         // Calculate time held
         let entry_time = chrono::DateTime::parse_from_rfc3339(&position.entry_time)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
         let duration = chrono::Utc::now() - entry_time;
         let hours_held = duration.num_minutes() as f64 / 60.0;
-        
+
         // Exit targets - use position-specific if available, else config defaults
         let (take_profit_price, tp_percent) = if let Some(tp) = position.take_profit_price {
             let pct = (tp / position.entry_price - 1.0) * 100.0;
@@ -542,7 +570,7 @@ async fn get_portfolio_with_pnl(env: &Env) -> std::result::Result<serde_json::Va
             let tp = position.entry_price * (1.0 + config.take_profit_percent / 100.0);
             (tp, config.take_profit_percent)
         };
-        
+
         let (stop_loss_price, sl_percent) = if let Some(sl) = position.stop_loss_price {
             let pct = (1.0 - sl / position.entry_price) * 100.0;
             (sl, pct)
@@ -550,11 +578,11 @@ async fn get_portfolio_with_pnl(env: &Env) -> std::result::Result<serde_json::Va
             let sl = position.entry_price * (1.0 - config.stop_loss_percent / 100.0);
             (sl, config.stop_loss_percent)
         };
-        
+
         total_invested += entry_value;
         total_current_value += current_value;
         total_unrealized_pnl += unrealized_pnl;
-        
+
         positions_with_pnl.push(serde_json::json!({
             "symbol": position.symbol,
             "quantity": format!("{:.4}", position.quantity),
@@ -573,24 +601,25 @@ async fn get_portfolio_with_pnl(env: &Env) -> std::result::Result<serde_json::Va
             "volatility": position.entry_volatility.map(|v| format!("{v:.1}%")),
         }));
     }
-    
+
     // Get USD + USDC balance (both count as available cash)
     let usd_balance = match client.get_accounts().await {
-        Ok(accounts) => accounts.accounts
+        Ok(accounts) => accounts
+            .accounts
             .iter()
             .filter(|a| a.currency == "USD" || a.currency == "USDC")
             .filter_map(|a| a.available_balance.value.parse::<f64>().ok())
             .sum(),
         Err(_) => 0.0,
     };
-    
+
     let total_portfolio = usd_balance + total_current_value;
-    let total_pnl_percent = if total_invested > 0.0 { 
-        (total_unrealized_pnl / total_invested) * 100.0 
-    } else { 
-        0.0 
+    let total_pnl_percent = if total_invested > 0.0 {
+        (total_unrealized_pnl / total_invested) * 100.0
+    } else {
+        0.0
     };
-    
+
     Ok(serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "summary": {

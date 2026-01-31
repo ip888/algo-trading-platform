@@ -13,6 +13,10 @@ primary_region = "arn"  # Stockholm, Sweden - good for EU
   JAVA_TOOL_OPTIONS = "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC"
   # Timezone
   TZ = "Europe/Warsaw"
+  # Rate limiting - increase delay to prevent 429 errors with 2 profiles
+  API_REQUEST_DELAY_MS = "500"
+  SYMBOL_BATCH_SIZE = "4"
+  ENABLE_ADAPTIVE_RATE_CONTROL = "true"
 
 [http_service]
   internal_port = 8080

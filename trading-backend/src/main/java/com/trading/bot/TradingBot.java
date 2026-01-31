@@ -214,11 +214,20 @@ public final class TradingBot {
         
         // Use Java 25 virtual threads for parallel execution
         // Virtual threads are stable and production-ready in Java 25
+        // STAGGER START: Main starts first, then Experimental 5 seconds later
+        // This prevents both profiles from hitting API simultaneously and causing rate limits
         Thread mainThread = Thread.ofVirtual().name("profile-main").start(() -> {
             mainManager.run();
         });
         
         Thread expThread = Thread.ofVirtual().name("profile-experimental").start(() -> {
+            try {
+                Thread.sleep(5000); // Stagger by 5 seconds to avoid API rate limit conflicts
+                logger.info("Experimental profile starting (staggered by 5s)...");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
             expManager.run();
         });
         

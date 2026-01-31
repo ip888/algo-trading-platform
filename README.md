@@ -184,7 +184,7 @@ wrangler deploy
 | `/api/trigger` | POST | Force trading cycle |
 | `/api/toggle` | POST | Enable/disable trading |
 
-## 📦 Project Structure
+## 📦 Project Structure 
 ```
 .
 ├── trading-backend/             # Java Stock Trading Bot

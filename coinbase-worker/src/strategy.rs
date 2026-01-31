@@ -6,7 +6,7 @@
 //! - Trailing stop for profit protection
 //! - Adaptive capital-tier based risk management
 
-use crate::capital_tier::{CapitalTier, TierParameters};
+use crate::capital_tier::{CapitalTier, FeeTier, TierParameters};
 use crate::config::Config;
 use crate::types::Position;
 
@@ -21,12 +21,12 @@ pub struct MarketAnalysis {
     pub symbol: String,
     pub price: f64,
     pub change_24h: f64,
-    pub range_position: f64,  // 0-100, lower = near 24h low
+    pub range_position: f64, // 0-100, lower = near 24h low
     pub signal: TradingSignal,
-    pub confidence: f64,      // 0-1
-    pub is_uptrend: bool,     // Trend filter: price above 6h avg
-    pub volume_24h: f64,      // Volume filter: 24h volume in USD
-    pub rejection_reason: Option<String>,  // Why trade was rejected
+    pub confidence: f64,                  // 0-1
+    pub is_uptrend: bool,                 // Trend filter: price above 6h avg
+    pub volume_24h: f64,                  // Volume filter: 24h volume in USD
+    pub rejection_reason: Option<String>, // Why trade was rejected
 }
 
 /// Trading signal
@@ -42,14 +42,14 @@ impl TradingStrategy {
     pub fn new(config: Config) -> Self {
         Self { config }
     }
-    
+
     /// Analyze market conditions for a symbol
     pub fn analyze(
-        &self, 
-        symbol: &str, 
-        price: f64, 
-        change_24h: f64, 
-        high_24h: f64, 
+        &self,
+        symbol: &str,
+        price: f64,
+        change_24h: f64,
+        high_24h: f64,
         low_24h: f64,
         is_uptrend: bool,
         volume_24h: f64,
@@ -61,33 +61,33 @@ impl TradingStrategy {
         } else {
             50.0
         };
-        
+
         // Volume in USD (volume * price)
         let volume_usd = volume_24h * price;
-        
+
         // Check filters
         let mut rejection_reason: Option<String> = None;
-        
+
         // Trend filter: only buy if in uptrend (price above 6h average)
         if self.config.enable_trend_filter && !is_uptrend {
             rejection_reason = Some("Downtrend (price below 6h avg)".to_string());
         }
-        
+
         // Volume filter: only trade high-volume coins
         if self.config.enable_volume_filter && volume_usd < self.config.min_volume_usd {
-            rejection_reason = Some(format!("Low volume (${:.0} < ${:.0})", volume_usd, self.config.min_volume_usd));
+            rejection_reason = Some(format!(
+                "Low volume (${:.0} < ${:.0})",
+                volume_usd, self.config.min_volume_usd
+            ));
         }
-        
+
         // Entry criteria (only if filters pass):
         // 1. Price in lower 25% of 24h range (stricter dip buying)
         // 2. Day change > -2% (avoid falling knives)
         // 3. Day change < 3% (avoid FOMO)
         let (signal, confidence) = if rejection_reason.is_some() {
             (TradingSignal::Hold, 0.0)
-        } else if range_position < 25.0 
-            && change_24h > -2.0 
-            && change_24h < 3.0 
-        {
+        } else if range_position < 25.0 && change_24h > -2.0 && change_24h < 3.0 {
             // Strong buy signal if in lower 15%, normal if 15-25%
             let conf = if range_position < 15.0 { 0.9 } else { 0.7 };
             (TradingSignal::Buy, conf)
@@ -97,7 +97,7 @@ impl TradingStrategy {
         } else {
             (TradingSignal::Hold, 0.0)
         };
-        
+
         MarketAnalysis {
             symbol: symbol.to_string(),
             price,
@@ -110,29 +110,48 @@ impl TradingStrategy {
             rejection_reason,
         }
     }
-    
-    /// Calculate dynamic TP/SL based on volatility (ATR-based)
+
+    /// Calculate dynamic TP/SL based on volatility (ATR-based) with fee awareness
     /// Returns (stop_loss_price, take_profit_price, sl_percent, tp_percent)
-    pub fn calculate_dynamic_tp_sl(&self, entry_price: f64, volatility_percent: f64) -> (f64, f64, f64, f64) {
+    ///
+    /// CRITICAL: TP must be above minimum profitable threshold (fees + target profit)
+    /// Otherwise every "winning" trade actually loses money to fees.
+    pub fn calculate_dynamic_tp_sl(
+        &self,
+        entry_price: f64,
+        volatility_percent: f64,
+    ) -> (f64, f64, f64, f64) {
+        // Get fee tier (assume base tier for now, could be passed in)
+        let fee_tier = FeeTier::from_volume(0.0);
+
+        // Minimum TP needed to make 1% net profit after fees
+        // For 0.6% taker fee: round_trip = 1.2%, min_profitable_tp = 2.2%
+        let min_profitable_tp = fee_tier.min_profitable_tp(1.0);
+
         // ATR-based calculation
         // volatility_percent is the 24h range as % (high-low)/low * 100
         let atr_percent = volatility_percent / 2.0; // Approximate ATR as half of daily range
-        
+
         // Calculate raw SL/TP percentages based on ATR multipliers
         let raw_sl_percent = atr_percent * self.config.atr_sl_multiplier;
         let raw_tp_percent = atr_percent * self.config.atr_tp_multiplier;
-        
-        // Clamp to min/max bounds
-        let sl_percent = raw_sl_percent.clamp(self.config.min_sl_percent, self.config.max_sl_percent);
-        let tp_percent = raw_tp_percent.clamp(self.config.min_tp_percent, self.config.max_tp_percent);
-        
+
+        // Clamp SL to min/max bounds
+        let sl_percent =
+            raw_sl_percent.clamp(self.config.min_sl_percent, self.config.max_sl_percent);
+
+        // Clamp TP to min/max bounds, BUT ensure it's above fee-aware minimum
+        let config_tp =
+            raw_tp_percent.clamp(self.config.min_tp_percent, self.config.max_tp_percent);
+        let tp_percent = config_tp.max(min_profitable_tp);
+
         // Calculate actual price levels
         let stop_loss_price = entry_price * (1.0 - sl_percent / 100.0);
         let take_profit_price = entry_price * (1.0 + tp_percent / 100.0);
-        
+
         (stop_loss_price, take_profit_price, sl_percent, tp_percent)
     }
-    
+
     /// Check if a position should be closed (SL/TP hit or time-based)
     /// Uses position-specific dynamic TP/SL if available, falls back to config defaults
     pub fn check_exit(&self, position: &Position, current_price: f64) -> Option<ExitReason> {
@@ -147,31 +166,37 @@ impl TradingStrategy {
                 return Some(ExitReason::StopLoss);
             }
         }
-        
-        // Check take-profit (prefer position-specific, fallback to config)
+
+        // Check take-profit (prefer position-specific, fallback to fee-aware config)
         if let Some(tp_price) = position.take_profit_price {
             if current_price >= tp_price {
                 return Some(ExitReason::TakeProfit);
             }
         } else {
+            // Fallback: use fee-aware minimum TP
+            let fee_tier = FeeTier::from_volume(0.0);
+            let min_profitable_tp = fee_tier.min_profitable_tp(1.0);
+            let effective_tp = self.config.take_profit_percent.max(min_profitable_tp);
+
             let pnl_percent = (current_price - position.entry_price) / position.entry_price * 100.0;
-            if pnl_percent >= self.config.take_profit_percent {
+            if pnl_percent >= effective_tp {
                 return Some(ExitReason::TakeProfit);
             }
         }
-        
+
         // Trailing stop check (uses high water mark from position)
         // FIX: Removed `&& pnl_percent > 0.0` condition - trailing stop should fire
         // whenever price drops below the trailing level, even if position is now negative.
         // Example: Entry $100, rallies to $110 (HWM), crashes to $99. Old code wouldn't
         // trigger because pnl is -1%. New code triggers at $110 * 0.9925 = $109.18
         if let Some(high_water_mark) = position.high_water_mark {
-            let trailing_sl_price = high_water_mark * (1.0 - self.config.trailing_stop_percent / 100.0);
+            let trailing_sl_price =
+                high_water_mark * (1.0 - self.config.trailing_stop_percent / 100.0);
             if current_price <= trailing_sl_price {
                 return Some(ExitReason::TrailingStop);
             }
         }
-        
+
         // Time-based exit: close if held too long without action
         if self.config.max_position_age_hours > 0.0 {
             if let Ok(entry_time) = chrono::DateTime::parse_from_rfc3339(&position.entry_time) {
@@ -182,10 +207,10 @@ impl TradingStrategy {
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Calculate position size using risk-based dynamic sizing with capital-tier adjustment
     ///
     /// Uses adaptive parameters based on portfolio size:
@@ -195,7 +220,12 @@ impl TradingStrategy {
     /// - Medium ($2K-$5K): 1.5% risk, 3 positions max
     /// - Standard ($5K-$25K): 2% risk, 4 positions max
     /// - Large ($25K+): 2% risk, 5 positions max
-    pub fn calculate_position_size(&self, total_portfolio: f64, available_usd: f64, volatility_factor: f64) -> PositionSizeResult {
+    pub fn calculate_position_size(
+        &self,
+        total_portfolio: f64,
+        available_usd: f64,
+        volatility_factor: f64,
+    ) -> PositionSizeResult {
         // Get tier-adjusted parameters
         let tier_params = TierParameters::for_portfolio(total_portfolio);
 
@@ -208,7 +238,11 @@ impl TradingStrategy {
                 max_per_position: 0.0,
                 available_after_reserve: 0.0,
                 can_trade: false,
-                reason: Some(format!("{} - {}", tier_params.tier.name(), tier_params.recommendation)),
+                reason: Some(format!(
+                    "{} - {}",
+                    tier_params.tier.name(),
+                    tier_params.recommendation
+                )),
                 tier: Some(tier_params.tier),
             };
         }
@@ -226,7 +260,7 @@ impl TradingStrategy {
         let risk_based_size = if stop_loss_decimal > 0.0 {
             risk_amount / stop_loss_decimal
         } else {
-            available_for_trading * 0.25  // Fallback
+            available_for_trading * 0.25 // Fallback
         };
 
         // Apply volatility adjustment (high volatility = smaller position)
@@ -246,7 +280,7 @@ impl TradingStrategy {
         let final_size = if capped_size >= self.config.min_position_usd {
             capped_size
         } else {
-            0.0  // Can't trade - not enough capital
+            0.0 // Can't trade - not enough capital
         };
 
         PositionSizeResult {
@@ -257,14 +291,18 @@ impl TradingStrategy {
             available_after_reserve: available_for_trading,
             can_trade: final_size >= self.config.min_position_usd,
             reason: if final_size < self.config.min_position_usd {
-                Some(format!("Below ${} minimum (Tier: {})", self.config.min_position_usd, tier_params.tier.name()))
+                Some(format!(
+                    "Below ${} minimum (Tier: {})",
+                    self.config.min_position_usd,
+                    tier_params.tier.name()
+                ))
             } else {
                 None
             },
             tier: Some(tier_params.tier),
         }
     }
-    
+
     /// Calculate how many more positions we can open
     /// Uses tier-based position limits that adapt to portfolio size
     pub fn max_new_positions(&self, total_portfolio: f64, current_positions: usize) -> usize {
@@ -301,14 +339,19 @@ impl TradingStrategy {
         let remaining_to_cap = effective_cap.saturating_sub(current_positions);
         remaining_to_cap.min(capital_based_new.max(1)) // At least 1 if under cap
     }
-    
+
     /// Check if we should enter a new position
-    pub fn should_enter(&self, analysis: &MarketAnalysis, current_positions: usize, total_portfolio: f64) -> bool {
+    pub fn should_enter(
+        &self,
+        analysis: &MarketAnalysis,
+        current_positions: usize,
+        total_portfolio: f64,
+    ) -> bool {
         // Check position cap
         if self.max_new_positions(total_portfolio, current_positions) == 0 {
             return false;
         }
-        
+
         // Only enter on Buy signal with sufficient confidence
         analysis.signal == TradingSignal::Buy && analysis.confidence >= 0.6
     }
@@ -317,14 +360,14 @@ impl TradingStrategy {
 /// Result of position size calculation
 #[derive(Debug, Clone)]
 pub struct PositionSizeResult {
-    pub size: f64,                      // Final position size in USD
-    pub risk_based: f64,                // Size based purely on risk calculation
-    pub volatility_adjusted: f64,       // After volatility adjustment
-    pub max_per_position: f64,          // Max allowed per position
-    pub available_after_reserve: f64,   // Available after cash reserve
-    pub can_trade: bool,                // Whether we can open a position
-    pub reason: Option<String>,         // Why we can't trade (if applicable)
-    pub tier: Option<CapitalTier>,      // Current capital tier
+    pub size: f64,                    // Final position size in USD
+    pub risk_based: f64,              // Size based purely on risk calculation
+    pub volatility_adjusted: f64,     // After volatility adjustment
+    pub max_per_position: f64,        // Max allowed per position
+    pub available_after_reserve: f64, // Available after cash reserve
+    pub can_trade: bool,              // Whether we can open a position
+    pub reason: Option<String>,       // Why we can't trade (if applicable)
+    pub tier: Option<CapitalTier>,    // Current capital tier
 }
 
 /// Reason for exiting a position
@@ -352,7 +395,7 @@ impl std::fmt::Display for ExitReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn test_config() -> Config {
         Config {
             environment: "test".to_string(),
@@ -379,107 +422,128 @@ mod tests {
             symbols: vec!["BTC-USD".to_string()],
             daily_trade_limit: 30,
             max_consecutive_errors: 5,
-            enable_trend_filter: false,  // Disable for basic tests
-            enable_volume_filter: false,  // Disable for basic tests
-            enable_market_regime_filter: false,  // Disable for basic tests
+            enable_trend_filter: false,         // Disable for basic tests
+            enable_volume_filter: false,        // Disable for basic tests
+            enable_market_regime_filter: false, // Disable for basic tests
             min_volume_usd: 1_000_000.0,
             max_position_age_hours: 48.0,
         }
     }
-    
+
     #[test]
     fn test_analyze_buy_signal() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         // Price very near 24h low (within 25% of range), modest decline, uptrend, good volume
         // Range: 49000-52000 = 3000, need position < 25% = 49750
         let analysis = strategy.analyze("BTC-USD", 49500.0, -0.5, 52000.0, 49000.0, true, 100.0);
-        
+
         assert_eq!(analysis.signal, TradingSignal::Buy);
-        assert!(analysis.range_position < 25.0);  // Stricter threshold
+        assert!(analysis.range_position < 25.0); // Stricter threshold
     }
-    
+
     #[test]
     fn test_analyze_avoid_falling_knife() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         // Price crashing hard (-5%)
         let analysis = strategy.analyze("BTC-USD", 48000.0, -5.0, 52000.0, 47000.0, true, 100.0);
-        
+
         assert_eq!(analysis.signal, TradingSignal::Hold);
     }
-    
+
     #[test]
     fn test_check_exit_stop_loss() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         let position = Position {
             symbol: "BTC-USD".to_string(),
             quantity: 0.001,
             entry_price: 50000.0,
             entry_time: "2024-01-01T00:00:00Z".to_string(),
             high_water_mark: None,
-            stop_loss_price: None,  // Use config fallback
+            stop_loss_price: None, // Use config fallback
             take_profit_price: None,
             entry_volatility: None,
         };
-        
+
         // Price dropped 1.5% (below 1% SL)
         let exit = strategy.check_exit(&position, 49250.0);
         assert_eq!(exit, Some(ExitReason::StopLoss));
     }
-    
+
     #[test]
     fn test_check_exit_take_profit() {
         let strategy = TradingStrategy::new(test_config());
-        
+        let recent_time = chrono::Utc::now().to_rfc3339();
+
         let position = Position {
             symbol: "BTC-USD".to_string(),
             quantity: 0.001,
             entry_price: 50000.0,
-            entry_time: "2024-01-01T00:00:00Z".to_string(),
+            entry_time: recent_time.clone(),
             high_water_mark: None,
             stop_loss_price: None,
-            take_profit_price: None,  // Use config fallback
+            take_profit_price: None, // Use fee-aware fallback (min 2.2%)
             entry_volatility: None,
         };
-        
-        // Price up 2% (above 1.5% TP)
-        let exit = strategy.check_exit(&position, 51000.0);
+
+        // Price up 2.5% (above fee-aware min TP of 2.2%)
+        // Fee-aware TP = max(config 1.5%, min_profitable 2.2%) = 2.2%
+        let exit = strategy.check_exit(&position, 51250.0);
         assert_eq!(exit, Some(ExitReason::TakeProfit));
+
+        // Price up 2.0% (below fee-aware min TP of 2.2%) - should NOT trigger
+        let exit = strategy.check_exit(&position, 51000.0);
+        assert_eq!(exit, None);
     }
-    
+
     #[test]
     fn test_dynamic_tp_sl_calculation() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         // Entry at $50,000, volatility 4% (daily range)
         // ATR ≈ 2% (half of range)
-        // SL = 1x ATR = 2%, TP = 2x ATR = 4%
+        // SL = 1x ATR = 2%, TP = 2x ATR = 4% (above fee min 2.2%, so stays 4%)
         let (sl, tp, sl_pct, tp_pct) = strategy.calculate_dynamic_tp_sl(50000.0, 4.0);
-        
-        assert!((sl_pct - 2.0).abs() < 0.01);  // 2% SL
-        assert!((tp_pct - 4.0).abs() < 0.01);  // 4% TP
-        assert!((sl - 49000.0).abs() < 1.0);   // $49,000 SL
-        assert!((tp - 52000.0).abs() < 1.0);   // $52,000 TP
-        
+
+        assert!((sl_pct - 2.0).abs() < 0.01); // 2% SL
+        assert!((tp_pct - 4.0).abs() < 0.01); // 4% TP (above fee min)
+        assert!((sl - 49000.0).abs() < 1.0); // $49,000 SL
+        assert!((tp - 52000.0).abs() < 1.0); // $52,000 TP
+
         // Low volatility: 1% range → 0.5% ATR
-        // Should be clamped to min (0.5% SL, 1% TP)
+        // Config would clamp to min 1% TP, but fee-aware min is 2.2%
+        // So TP becomes 2.2% (fee-aware floor)
         let (_, _, sl_pct, tp_pct) = strategy.calculate_dynamic_tp_sl(50000.0, 1.0);
-        assert_eq!(sl_pct, 0.5);  // Clamped to min
-        assert_eq!(tp_pct, 1.0);  // Clamped to min
-        
+        assert_eq!(sl_pct, 0.5); // Clamped to min SL
+        assert!((tp_pct - 2.2).abs() < 0.01); // Fee-aware min TP (1.2% fees + 1% profit)
+
         // High volatility: 12% range → 6% ATR
-        // Should be clamped to max (5% SL, 10% TP)
+        // Should be clamped to max (5% SL, 10% TP) - both above fee min
         let (_, _, sl_pct, tp_pct) = strategy.calculate_dynamic_tp_sl(50000.0, 12.0);
-        assert_eq!(sl_pct, 5.0);  // Clamped to max
-        assert_eq!(tp_pct, 10.0); // Clamped to max
+        assert_eq!(sl_pct, 5.0); // Clamped to max
+        assert_eq!(tp_pct, 10.0); // Clamped to max (above fee min)
     }
-    
+
+    #[test]
+    fn test_fee_aware_tp_floor() {
+        let strategy = TradingStrategy::new(test_config());
+
+        // Even with 0% volatility (edge case), TP should never be below fee-aware min
+        let (_, _, _, tp_pct) = strategy.calculate_dynamic_tp_sl(50000.0, 0.0);
+
+        // min_profitable_tp = round_trip (1.2%) + target profit (1%) = 2.2%
+        assert!(
+            tp_pct >= 2.2,
+            "TP must be at least fee-aware minimum (2.2%)"
+        );
+    }
+
     #[test]
     fn test_position_specific_sl_tp() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         // Position with custom SL at $49,000 (2% below $50k entry)
         let recent_time = chrono::Utc::now().to_rfc3339();
         let position = Position {
@@ -488,24 +552,24 @@ mod tests {
             entry_price: 50000.0,
             entry_time: recent_time.clone(),
             high_water_mark: None,
-            stop_loss_price: Some(49000.0),  // Custom 2% SL
+            stop_loss_price: Some(49000.0),   // Custom 2% SL
             take_profit_price: Some(52000.0), // Custom 4% TP
             entry_volatility: Some(4.0),
         };
-        
+
         // Price at $48,900 (below custom SL) - should trigger
         let exit = strategy.check_exit(&position, 48900.0);
         assert_eq!(exit, Some(ExitReason::StopLoss));
-        
+
         // Price at $52,100 (above custom TP) - should trigger
         let exit = strategy.check_exit(&position, 52100.0);
         assert_eq!(exit, Some(ExitReason::TakeProfit));
-        
+
         // Price at $50,500 (between SL and TP) - no exit
         let exit = strategy.check_exit(&position, 50500.0);
         assert_eq!(exit, None);
     }
-    
+
     #[test]
     fn test_position_sizing_risk_based() {
         let strategy = TradingStrategy::new(test_config());
@@ -516,7 +580,7 @@ mod tests {
         // So position is $500 (risk-based, under cap)
         let sizing = strategy.calculate_position_size(1000.0, 1000.0, 1.0);
         assert!(sizing.can_trade);
-        assert_eq!(sizing.tier, Some(CapitalTier::Small));  // $1000 is SMALL tier
+        assert_eq!(sizing.tier, Some(CapitalTier::Small)); // $1000 is SMALL tier
         // SMALL tier: 1% risk, 50% max position
         // Risk = $10, Position = $10 / 1% = $1000, capped at 50% = $500
         assert_eq!(sizing.size, 500.0);
@@ -528,11 +592,11 @@ mod tests {
         let sizing = strategy.calculate_position_size(100.0, 100.0, 1.0);
         assert!(sizing.can_trade);
         assert_eq!(sizing.tier, Some(CapitalTier::Tiny));
-        assert_eq!(sizing.size, 50.0);  // Risk-based: $0.50 / 0.01 = $50
+        assert_eq!(sizing.size, 50.0); // Risk-based: $0.50 / 0.01 = $50
 
         // With $50 portfolio (MICRO tier: cannot trade)
         let sizing = strategy.calculate_position_size(50.0, 50.0, 1.0);
-        assert!(!sizing.can_trade);  // MICRO tier cannot trade
+        assert!(!sizing.can_trade); // MICRO tier cannot trade
         assert_eq!(sizing.tier, Some(CapitalTier::Micro));
 
         // High volatility (2x) reduces position size
@@ -541,7 +605,7 @@ mod tests {
         // With 2x volatility, risk_based is halved
         assert!(sizing_high_vol.volatility_adjusted < sizing_normal.volatility_adjusted);
     }
-    
+
     #[test]
     fn test_max_new_positions() {
         let strategy = TradingStrategy::new(test_config());
@@ -567,44 +631,54 @@ mod tests {
         assert!(strategy.max_new_positions(200.0, 0) >= 1);
         assert_eq!(strategy.max_new_positions(200.0, 1), 0);
     }
-    
+
     #[test]
     fn test_trend_filter_blocks_downtrend() {
         let mut config = test_config();
         config.enable_trend_filter = true;
         let strategy = TradingStrategy::new(config);
-        
+
         // Good dip setup but in downtrend (price < 6h avg)
         let analysis = strategy.analyze("BTC-USD", 50000.0, -0.5, 52000.0, 49000.0, false, 100.0);
-        
+
         // Should be rejected due to downtrend
         assert_eq!(analysis.signal, TradingSignal::Hold);
         assert!(analysis.rejection_reason.is_some());
-        assert!(analysis.rejection_reason.expect("Should have rejection reason").contains("Downtrend"));
+        assert!(
+            analysis
+                .rejection_reason
+                .expect("Should have rejection reason")
+                .contains("Downtrend")
+        );
     }
-    
+
     #[test]
     fn test_volume_filter_blocks_low_volume() {
         let mut config = test_config();
         config.enable_volume_filter = true;
         config.min_volume_usd = 1_000_000.0;
         let strategy = TradingStrategy::new(config);
-        
+
         // Good dip setup but low volume (500k < 1M min)
         // volume_24h param is in base units, gets multiplied by price
         let analysis = strategy.analyze("BTC-USD", 50000.0, -0.5, 52000.0, 49000.0, true, 10.0);
         // 10 * 50000 = 500,000 USD volume
-        
+
         // Should be rejected due to low volume
         assert_eq!(analysis.signal, TradingSignal::Hold);
         assert!(analysis.rejection_reason.is_some());
-        assert!(analysis.rejection_reason.expect("Should have rejection reason").contains("Low volume"));
+        assert!(
+            analysis
+                .rejection_reason
+                .expect("Should have rejection reason")
+                .contains("Low volume")
+        );
     }
-    
+
     #[test]
     fn test_time_based_exit() {
         let strategy = TradingStrategy::new(test_config());
-        
+
         // Position opened 49 hours ago (> 48h max)
         let old_time = chrono::Utc::now() - chrono::Duration::hours(49);
         let position = Position {
@@ -617,12 +691,12 @@ mod tests {
             take_profit_price: None,
             entry_volatility: None,
         };
-        
+
         // Price hasn't moved much (no TP/SL hit)
         let exit = strategy.check_exit(&position, 50100.0);
         assert_eq!(exit, Some(ExitReason::TimeExpired));
     }
-    
+
     #[test]
     fn test_time_exit_not_triggered_before_limit() {
         let strategy = TradingStrategy::new(test_config());
@@ -642,7 +716,7 @@ mod tests {
 
         // Price hasn't moved much (no TP/SL hit)
         let exit = strategy.check_exit(&position, 50100.0);
-        assert_eq!(exit, None);  // No exit yet
+        assert_eq!(exit, None); // No exit yet
     }
 
     // ========================================================================
@@ -661,8 +735,8 @@ mod tests {
             quantity: 0.001,
             entry_price: 50000.0,
             entry_time: recent_time,
-            high_water_mark: Some(51000.0),  // +2% from entry
-            stop_loss_price: Some(49000.0),  // Won't hit this
+            high_water_mark: Some(51000.0),   // +2% from entry
+            stop_loss_price: Some(49000.0),   // Won't hit this
             take_profit_price: Some(52000.0), // Won't hit this
             entry_volatility: None,
         };
@@ -690,8 +764,8 @@ mod tests {
             quantity: 0.001,
             entry_price: 50000.0,
             entry_time: recent_time,
-            high_water_mark: Some(51000.0),  // Was +2%
-            stop_loss_price: Some(48000.0),  // Hard SL at -4% (won't hit)
+            high_water_mark: Some(51000.0), // Was +2%
+            stop_loss_price: Some(48000.0), // Hard SL at -4% (won't hit)
             take_profit_price: Some(53000.0),
             entry_volatility: None,
         };
@@ -700,8 +774,11 @@ mod tests {
         // OLD BUG: pnl_percent = -1%, so `pnl_percent > 0.0` was false, no exit
         // FIX: Trailing stop should trigger because $49,500 < $50,745
         let exit = strategy.check_exit(&position, 49500.0);
-        assert_eq!(exit, Some(ExitReason::TrailingStop),
-            "Trailing stop MUST trigger even when current PnL is negative");
+        assert_eq!(
+            exit,
+            Some(ExitReason::TrailingStop),
+            "Trailing stop MUST trigger even when current PnL is negative"
+        );
     }
 
     #[test]
@@ -723,7 +800,10 @@ mod tests {
 
         // Price at $50,800 (above trailing SL of $50,745)
         let exit = strategy.check_exit(&position, 50800.0);
-        assert_eq!(exit, None, "Should not exit when price is above trailing stop level");
+        assert_eq!(
+            exit, None,
+            "Should not exit when price is above trailing stop level"
+        );
     }
 
     #[test]
@@ -737,7 +817,7 @@ mod tests {
             quantity: 0.001,
             entry_price: 50000.0,
             entry_time: recent_time,
-            high_water_mark: None,  // No HWM
+            high_water_mark: None, // No HWM
             stop_loss_price: Some(49000.0),
             take_profit_price: Some(52000.0),
             entry_volatility: None,
@@ -766,10 +846,13 @@ mod tests {
         };
 
         // Price exactly at trailing SL (should trigger - <= comparison)
-        let trailing_sl = 51000.0 * (1.0 - 0.005);  // $50,745
+        let trailing_sl = 51000.0 * (1.0 - 0.005); // $50,745
         let exit = strategy.check_exit(&position, trailing_sl);
-        assert_eq!(exit, Some(ExitReason::TrailingStop),
-            "Should trigger at exact trailing stop level");
+        assert_eq!(
+            exit,
+            Some(ExitReason::TrailingStop),
+            "Should trigger at exact trailing stop level"
+        );
     }
 
     #[test]
@@ -792,8 +875,11 @@ mod tests {
         // Price below trailing stop - should trigger trailing stop first
         // (check_exit checks SL -> TP -> Trailing -> Time in order)
         let exit = strategy.check_exit(&position, 50000.0);
-        assert_eq!(exit, Some(ExitReason::TrailingStop),
-            "Trailing stop should trigger before time exit");
+        assert_eq!(
+            exit,
+            Some(ExitReason::TrailingStop),
+            "Trailing stop should trigger before time exit"
+        );
     }
 
     // ========================================================================
@@ -809,7 +895,7 @@ mod tests {
         let position = Position {
             symbol: "BTC-USD".to_string(),
             quantity: 0.001,
-            entry_price: 0.0,  // Invalid but should not crash
+            entry_price: 0.0, // Invalid but should not crash
             entry_time: recent_time,
             high_water_mark: None,
             stop_loss_price: None,
@@ -876,7 +962,7 @@ mod tests {
             quantity: 0.001,
             entry_price: 50000.0,
             entry_time: recent_time,
-            high_water_mark: Some(f64::NAN),  // Invalid HWM
+            high_water_mark: Some(f64::NAN), // Invalid HWM
             stop_loss_price: Some(49000.0),
             take_profit_price: Some(52000.0),
             entry_volatility: None,
@@ -906,7 +992,10 @@ mod tests {
 
         // Should not panic - time parsing will fail, time exit won't trigger
         let exit = strategy.check_exit(&position, 50500.0);
-        assert_eq!(exit, None, "Invalid timestamp should not crash or trigger time exit");
+        assert_eq!(
+            exit, None,
+            "Invalid timestamp should not crash or trigger time exit"
+        );
     }
 
     #[test]
@@ -915,7 +1004,10 @@ mod tests {
 
         // Zero portfolio value
         let sizing = strategy.calculate_position_size(0.0, 0.0, 1.0);
-        assert!(!sizing.can_trade, "Should not be able to trade with zero portfolio");
+        assert!(
+            !sizing.can_trade,
+            "Should not be able to trade with zero portfolio"
+        );
         assert_eq!(sizing.size, 0.0);
     }
 
@@ -936,8 +1028,10 @@ mod tests {
         // Extreme volatility factor
         let sizing = strategy.calculate_position_size(1000.0, 1000.0, 100.0);
         // Position should be heavily reduced
-        assert!(sizing.volatility_adjusted < 100.0,
-            "High volatility should drastically reduce position size");
+        assert!(
+            sizing.volatility_adjusted < 100.0,
+            "High volatility should drastically reduce position size"
+        );
     }
 
     #[test]
@@ -956,7 +1050,7 @@ mod tests {
         let strategy = TradingStrategy::new(test_config());
 
         // Current positions exceeds hard cap
-        let max_new = strategy.max_new_positions(1000.0, 100);  // Way over cap of 8
+        let max_new = strategy.max_new_positions(1000.0, 100); // Way over cap of 8
         assert_eq!(max_new, 0, "Should return 0 when already over cap");
     }
 }

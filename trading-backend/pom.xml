@@ -10,7 +10,7 @@
     <packaging>jar</packaging>
 
     <name>Trading Backend</name>
-    <description>Production Trading Bot - Java 21 (Cloud Run compatible)</description>
+    <description>Production Trading Bot - Java 25 (Cloud Run compatible)</description>
 
     <properties>
         <maven.compiler.source>25</maven.compiler.source>

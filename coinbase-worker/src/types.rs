@@ -29,12 +29,12 @@ impl Position {
     pub fn unrealized_pnl(&self, current_price: f64) -> f64 {
         (current_price - self.entry_price) * self.quantity
     }
-    
+
     /// Calculate unrealized P&L as percentage
     pub fn unrealized_pnl_percent(&self, current_price: f64) -> f64 {
         (current_price - self.entry_price) / self.entry_price * 100.0
     }
-    
+
     /// Update high water mark for trailing stop
     pub fn update_high_water_mark(&mut self, current_price: f64) {
         match self.high_water_mark {
@@ -109,26 +109,26 @@ impl Default for TradingCycleResult {
 pub struct TradingStateData {
     /// Trading enabled flag
     pub enabled: bool,
-    
+
     /// Current open positions
     pub positions: Vec<Position>,
-    
+
     /// Last trading cycle timestamp
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_cycle_time: Option<String>,
-    
+
     /// Total number of trades executed
     pub total_trades: u64,
-    
+
     /// Total realized P&L (USD)
     pub total_pnl: f64,
-    
+
     /// Consecutive errors counter
     pub consecutive_errors: u32,
-    
+
     /// Daily trade count (reset at midnight UTC)
     pub daily_trades: u32,
-    
+
     /// Day of last trade (for daily reset)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_trade_day: Option<String>,
@@ -139,17 +139,17 @@ impl TradingStateData {
     pub fn should_pause(&self, max_errors: u32) -> bool {
         self.consecutive_errors >= max_errors
     }
-    
+
     /// Record a successful cycle
     pub fn record_success(&mut self) {
         self.consecutive_errors = 0;
     }
-    
+
     /// Record an error
     pub fn record_error(&mut self) {
         self.consecutive_errors += 1;
     }
-    
+
     /// Update daily trade count
     pub fn increment_daily_trades(&mut self, today: &str) {
         if self.last_trade_day.as_deref() != Some(today) {
@@ -158,22 +158,22 @@ impl TradingStateData {
         }
         self.daily_trades += 1;
     }
-    
+
     /// Get position by symbol
     pub fn get_position(&self, symbol: &str) -> Option<&Position> {
         self.positions.iter().find(|p| p.symbol == symbol)
     }
-    
+
     /// Get mutable position by symbol
     pub fn get_position_mut(&mut self, symbol: &str) -> Option<&mut Position> {
         self.positions.iter_mut().find(|p| p.symbol == symbol)
     }
-    
+
     /// Add a new position
     pub fn add_position(&mut self, position: Position) {
         self.positions.push(position);
     }
-    
+
     /// Remove a position by symbol
     pub fn remove_position(&mut self, symbol: &str) -> Option<Position> {
         if let Some(idx) = self.positions.iter().position(|p| p.symbol == symbol) {
@@ -227,7 +227,7 @@ pub struct HealthResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_position_pnl() {
         let pos = Position {
@@ -240,12 +240,12 @@ mod tests {
             take_profit_price: None,
             entry_volatility: None,
         };
-        
+
         // Price up to 51000
         assert!((pos.unrealized_pnl(51000.0) - 1.0).abs() < 0.0001);
         assert!((pos.unrealized_pnl_percent(51000.0) - 2.0).abs() < 0.0001);
     }
-    
+
     #[test]
     fn test_high_water_mark() {
         let mut pos = Position {
@@ -258,28 +258,28 @@ mod tests {
             take_profit_price: None,
             entry_volatility: None,
         };
-        
+
         // Below entry - no HWM
         pos.update_high_water_mark(49500.0);
         assert!(pos.high_water_mark.is_none());
-        
+
         // Above entry - set HWM
         pos.update_high_water_mark(51000.0);
         assert_eq!(pos.high_water_mark, Some(51000.0));
-        
+
         // New high - update HWM
         pos.update_high_water_mark(52000.0);
         assert_eq!(pos.high_water_mark, Some(52000.0));
-        
+
         // Pullback - keep HWM
         pos.update_high_water_mark(51500.0);
         assert_eq!(pos.high_water_mark, Some(52000.0));
     }
-    
+
     #[test]
     fn test_trading_state_positions() {
         let mut state = TradingStateData::default();
-        
+
         let pos = Position {
             symbol: "BTC-USD".to_string(),
             quantity: 0.001,
@@ -290,31 +290,31 @@ mod tests {
             take_profit_price: Some(51000.0),
             entry_volatility: Some(3.5),
         };
-        
+
         state.add_position(pos);
         assert_eq!(state.positions.len(), 1);
-        
+
         assert!(state.get_position("BTC-USD").is_some());
         assert!(state.get_position("ETH-USD").is_none());
-        
+
         let removed = state.remove_position("BTC-USD");
         assert!(removed.is_some());
         assert!(state.positions.is_empty());
     }
-    
+
     #[test]
     fn test_error_tracking() {
         let mut state = TradingStateData::default();
-        
+
         state.record_error();
         state.record_error();
         assert!(!state.should_pause(5)); // 2 errors, threshold 5
-        
+
         state.record_error();
         state.record_error();
         state.record_error();
         assert!(state.should_pause(5)); // 5 errors, threshold 5
-        
+
         state.record_success();
         assert!(!state.should_pause(5)); // Reset after success
     }

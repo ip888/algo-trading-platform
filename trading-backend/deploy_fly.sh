@@ -45,7 +45,8 @@ fi
 echo "📦 Building JAR..."
 mvn clean package -DskipTests -q
 
-if [[ ! -f "target/trading-backend.jar" ]]; then
+JAR_FILE=$(ls target/trading-backend*.jar 2>/dev/null | grep -v original | head -1)
+if [[ -z "$JAR_FILE" ]]; then
     echo "❌ Build failed - JAR not found"
     exit 1
 fi
@@ -54,7 +55,7 @@ echo "✅ JAR built successfully"
 
 # Deploy to Fly.io
 echo "🚀 Deploying to Fly.io (Warsaw)..."
-fly deploy --region waw
+fly deploy
 
 echo ""
 echo "✅ Deployment complete!"

@@ -1,5 +1,6 @@
 package com.trading.protection;
 
+import com.trading.api.AlpacaClient;
 import com.trading.api.ResilientAlpacaClient;
 import com.trading.api.model.Position;
 import org.slf4j.Logger;
@@ -17,6 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 
  * Alpaca (stocks) only.
  * 
+ * CRITICAL: Uses direct AlpacaClient (bypasses circuit breaker) for emergency operations.
+ * This ensures panic sells go through even when circuit breaker is open.
+ * 
  * Modern design:
  * - Uses AtomicBoolean for lock-free triggered state
  * - compareAndSet for atomic check-and-set operation
@@ -25,7 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class EmergencyProtocol {
     private static final Logger logger = LoggerFactory.getLogger(EmergencyProtocol.class);
     
-    private final ResilientAlpacaClient alpacaClient;
+    private final ResilientAlpacaClient resilientClient;
+    private final AlpacaClient directClient; // For emergency bypass
     
     // Modern: AtomicBoolean for lock-free state management
     private final AtomicBoolean triggered = new AtomicBoolean(false);
@@ -36,7 +41,8 @@ public class EmergencyProtocol {
     private volatile String lastTriggerReason;
 
     public EmergencyProtocol(ResilientAlpacaClient client) {
-        this.alpacaClient = client;
+        this.resilientClient = client;
+        this.directClient = client.getDelegate(); // Bypass circuit breaker for emergencies
     }
 
     /**
@@ -83,6 +89,7 @@ public class EmergencyProtocol {
 
     /**
      * Cancel all orders and close all positions immediately.
+     * CRITICAL: Uses directClient to bypass circuit breaker for emergency operations.
      * @return Details of what was closed
      */
     private Map<String, Object> flattenAll() {
@@ -90,9 +97,10 @@ public class EmergencyProtocol {
         List<Map<String, Object>> alpacaClosed = new ArrayList<>();
         
         // ===== STEP 1: Cancel ALL Alpaca Orders =====
-        logger.warn("STEP 1: Cancelling all Alpaca open orders...");
+        // Use directClient to bypass circuit breaker
+        logger.warn("STEP 1: Cancelling all Alpaca open orders (direct API - bypassing circuit breaker)...");
         try {
-            alpacaClient.cancelAllOrders();
+            directClient.cancelAllOrders();
             result.put("alpacaOrdersCancelled", true);
             logger.info("✅ All Alpaca orders cancelled.");
         } catch (Exception e) {
@@ -102,16 +110,17 @@ public class EmergencyProtocol {
         }
 
         // ===== STEP 2: Close ALL Alpaca Positions =====
-        logger.warn("STEP 2: Closing all Alpaca positions...");
+        // Use directClient to bypass circuit breaker
+        logger.warn("STEP 2: Closing all Alpaca positions (direct API - bypassing circuit breaker)...");
         try {
-            List<Position> positions = alpacaClient.getPositions();
+            List<Position> positions = directClient.getPositions();
             if (positions.isEmpty()) {
                 logger.info("No open Alpaca positions to close.");
             } else {
                 for (Position pos : positions) {
                     try {
                         logger.warn("Closing Alpaca position: {} ({} shares)", pos.symbol(), pos.quantity());
-                        alpacaClient.placeOrder(
+                        directClient.placeOrder(
                             pos.symbol(), 
                             Math.abs(pos.quantity()), 
                             pos.quantity() > 0 ? "sell" : "buy",

@@ -56,24 +56,23 @@ impl CapitalTier {
     /// Maximum % of portfolio in a single position
     pub fn max_position_percent(&self) -> f64 {
         match self {
-            CapitalTier::Micro => 0.0,   // No trading
-            CapitalTier::Tiny => 80.0,   // Concentrated (1 position)
-            CapitalTier::Small => 50.0,  // Semi-concentrated
-            CapitalTier::Medium => 35.0, // Balanced
+            CapitalTier::Micro => 0.0,     // No trading
+            CapitalTier::Tiny => 80.0,     // Concentrated (1 position)
+            CapitalTier::Small => 50.0,    // Semi-concentrated
+            CapitalTier::Medium => 35.0,   // Balanced
             CapitalTier::Standard => 25.0, // Standard
-            CapitalTier::Large => 20.0,  // Well diversified
+            CapitalTier::Large => 20.0,    // Well diversified
         }
     }
 
     /// Risk % per trade (scales with capital)
     pub fn risk_per_trade_percent(&self) -> f64 {
         match self {
-            CapitalTier::Micro => 0.0,   // No trading
-            CapitalTier::Tiny => 0.5,    // Ultra conservative
-            CapitalTier::Small => 1.0,   // Conservative
-            CapitalTier::Medium => 1.5,  // Moderate
-            CapitalTier::Standard => 2.0, // Standard Kelly
-            CapitalTier::Large => 2.0,   // Standard Kelly
+            CapitalTier::Micro => 0.0,                         // No trading
+            CapitalTier::Tiny => 0.5,                          // Ultra conservative
+            CapitalTier::Small => 1.0,                         // Conservative
+            CapitalTier::Medium => 1.5,                        // Moderate
+            CapitalTier::Standard | CapitalTier::Large => 2.0, // Standard Kelly
         }
     }
 
@@ -85,30 +84,33 @@ impl CapitalTier {
     /// Entry threshold multiplier (higher = more selective)
     pub fn entry_threshold_multiplier(&self) -> f64 {
         match self {
-            CapitalTier::Micro => 1.5,   // Very selective (if enabled)
-            CapitalTier::Tiny => 1.3,    // More selective
-            CapitalTier::Small => 1.15,  // Slightly selective
-            CapitalTier::Medium => 1.0,  // Normal
-            CapitalTier::Standard => 1.0, // Normal
-            CapitalTier::Large => 0.95,  // Slightly less selective (more opportunities)
+            CapitalTier::Micro => 1.5,  // Very selective (if enabled)
+            CapitalTier::Tiny => 1.3,   // More selective
+            CapitalTier::Small => 1.15, // Slightly selective
+            CapitalTier::Medium | CapitalTier::Standard => 1.0, // Normal
+            CapitalTier::Large => 0.95, // Slightly less selective (more opportunities)
         }
     }
 
     /// Get tier recommendation message
     pub fn recommendation(&self) -> &'static str {
         match self {
-            CapitalTier::Micro =>
-                "MICRO (<$100): Insufficient capital. Add funds to begin trading.",
-            CapitalTier::Tiny =>
-                "TINY ($100-$500): Ultra-conservative mode. Single position, tight risk controls.",
-            CapitalTier::Small =>
-                "SMALL ($500-$2K): Conservative mode. Focus on capital preservation.",
-            CapitalTier::Medium =>
-                "MEDIUM ($2K-$5K): Balanced mode. Good risk/reward with moderate diversification.",
-            CapitalTier::Standard =>
-                "STANDARD ($5K-$25K): Full trading capabilities. Standard risk parameters.",
-            CapitalTier::Large =>
-                "LARGE ($25K+): Full capabilities with enhanced diversification.",
+            CapitalTier::Micro => {
+                "MICRO (<$100): Insufficient capital. Add funds to begin trading."
+            }
+            CapitalTier::Tiny => {
+                "TINY ($100-$500): Ultra-conservative mode. Single position, tight risk controls."
+            }
+            CapitalTier::Small => {
+                "SMALL ($500-$2K): Conservative mode. Focus on capital preservation."
+            }
+            CapitalTier::Medium => {
+                "MEDIUM ($2K-$5K): Balanced mode. Good risk/reward with moderate diversification."
+            }
+            CapitalTier::Standard => {
+                "STANDARD ($5K-$25K): Full trading capabilities. Standard risk parameters."
+            }
+            CapitalTier::Large => "LARGE ($25K+): Full capabilities with enhanced diversification.",
         }
     }
 
@@ -164,13 +166,25 @@ impl FeeTier {
     /// Get fee tier from 30-day volume
     pub fn from_volume(volume_30d: f64) -> Self {
         if volume_30d < 1_000.0 {
-            FeeTier { taker_fee_percent: 0.60, maker_fee_percent: 0.40 }
+            FeeTier {
+                taker_fee_percent: 0.60,
+                maker_fee_percent: 0.40,
+            }
         } else if volume_30d < 10_000.0 {
-            FeeTier { taker_fee_percent: 0.40, maker_fee_percent: 0.25 }
+            FeeTier {
+                taker_fee_percent: 0.40,
+                maker_fee_percent: 0.25,
+            }
         } else if volume_30d < 50_000.0 {
-            FeeTier { taker_fee_percent: 0.25, maker_fee_percent: 0.15 }
+            FeeTier {
+                taker_fee_percent: 0.25,
+                maker_fee_percent: 0.15,
+            }
         } else {
-            FeeTier { taker_fee_percent: 0.20, maker_fee_percent: 0.10 }
+            FeeTier {
+                taker_fee_percent: 0.20,
+                maker_fee_percent: 0.10,
+            }
         }
     }
 
@@ -281,8 +295,11 @@ mod tests {
         let mut prev_positions = 0;
         for tier in tiers.iter().skip(1) {
             let positions = tier.max_positions();
-            assert!(positions >= prev_positions,
-                "Tier {:?} should have >= positions than previous", tier);
+            assert!(
+                positions >= prev_positions,
+                "Tier {:?} should have >= positions than previous",
+                tier
+            );
             prev_positions = positions;
         }
     }

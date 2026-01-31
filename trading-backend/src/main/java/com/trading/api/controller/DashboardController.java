@@ -106,6 +106,62 @@ public final class DashboardController {
         
         // Profit targets endpoint (REST fallback for initial load)
         app.get("/api/profit-targets", this::getProfitTargets);
+        
+        // Manual position close endpoint (for take profit issues)
+        app.post("/api/positions/{symbol}/close", this::closePosition);
+    }
+    
+    /**
+     * Close a position manually by symbol.
+     * POST /api/positions/{symbol}/close
+     */
+    private void closePosition(Context ctx) {
+        String symbol = ctx.pathParam("symbol");
+        logger.info("🔧 Manual close requested for {}", symbol);
+        
+        try {
+            var client = new com.trading.api.AlpacaClient(config);
+            var positions = client.getPositions();
+            
+            // Find the position
+            var position = positions.stream()
+                .filter(p -> p.symbol().equalsIgnoreCase(symbol))
+                .findFirst();
+            
+            if (position.isEmpty()) {
+                ctx.status(404).json(Map.of("error", "Position not found: " + symbol));
+                return;
+            }
+            
+            var pos = position.get();
+            double qty = pos.quantity();
+            double entryPrice = pos.avgEntryPrice();
+            double currentPrice = Math.abs(pos.marketValue() / qty);
+            double pnlDollars = (currentPrice - entryPrice) * qty;
+            double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100.0;
+            
+            // Place sell order
+            client.placeOrder(symbol, qty, "sell", "market", "day", null);
+            
+            // Record in DB
+            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnlDollars);
+            
+            logger.info("✅ Manually closed {}: qty={}, entry=${}, exit=${}, P&L=${} ({}%)",
+                symbol, qty, entryPrice, currentPrice, String.format("%.2f", pnlDollars), String.format("%.2f", pnlPercent));
+            
+            ctx.json(Map.of(
+                "success", true,
+                "symbol", symbol,
+                "quantity", qty,
+                "entryPrice", entryPrice,
+                "exitPrice", currentPrice,
+                "pnlDollars", pnlDollars,
+                "pnlPercent", pnlPercent
+            ));
+        } catch (Exception e) {
+            logger.error("❌ Failed to close {}: {}", symbol, e.getMessage(), e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
     }
     
     /**

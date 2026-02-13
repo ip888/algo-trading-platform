@@ -693,11 +693,24 @@ public class ProfileManager implements Runnable {
                 symbol);
             
             TradingWebSocketHandler.broadcastActivity(
-                String.format("[%s] ⚠️ SKIPPED: %s (max %d positions reached)", 
+                String.format("[%s] ⚠️ SKIPPED: %s (max %d positions reached)",
                     profile.name(), symbol, config.getMaxPositionsAtOnce()),
                 "WARN"
             );
             return;
+        }
+
+        // ========== PENDING ORDER CHECK ==========
+        // Prevent duplicate orders for the same symbol (fixes order spam issue)
+        try {
+            var pendingOrders = client.getOpenOrders(symbol);
+            if (pendingOrders.isArray() && pendingOrders.size() > 0) {
+                logger.info("{} {} already has {} pending order(s), skipping new entry",
+                    profilePrefix, symbol, pendingOrders.size());
+                return;
+            }
+        } catch (Exception e) {
+            logger.debug("{} Could not check pending orders for {}: {}", profilePrefix, symbol, e.getMessage());
         }
         
         // ========== AI COMPONENT 1: SENTIMENT ANALYSIS ==========
@@ -1611,6 +1624,12 @@ public class ProfileManager implements Runnable {
                 double qty = alpacaPos.quantity();
                 double marketValue = alpacaPos.marketValue();
                 double entryPrice = alpacaPos.avgEntryPrice();
+
+                // Skip dust positions (< $1 market value) to prevent order spam
+                if (Math.abs(marketValue) < 1.0) {
+                    logger.debug("{} Skipping dust position: {} (value=${})", profilePrefix, symbol, String.format("%.2f", marketValue));
+                    continue;
+                }
                 
                 // Calculate current price from market value
                 double currentPrice = Math.abs(marketValue / qty);

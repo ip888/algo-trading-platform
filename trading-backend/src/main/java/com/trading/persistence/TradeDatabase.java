@@ -531,4 +531,87 @@ public final class TradeDatabase {
             lock.unlockWrite(stamp);
         }
     }
+
+    /**
+     * Export all trades as a list of maps suitable for JSON serialization.
+     * @param status Filter by status ("OPEN", "CLOSED") or null for all
+     * @return List of trade records
+     */
+    public java.util.List<java.util.Map<String, Object>> exportTrades(String status) {
+        var trades = new java.util.ArrayList<java.util.Map<String, Object>>();
+        String sql = status != null
+            ? "SELECT * FROM trades WHERE status = ? ORDER BY entry_time DESC"
+            : "SELECT * FROM trades ORDER BY entry_time DESC";
+
+        long stamp = lock.readLock();
+        try (var stmt = status != null
+                ? connection.prepareStatement(sql)
+                : connection.prepareStatement(sql)) {
+            if (status != null) {
+                ((PreparedStatement) stmt).setString(1, status);
+            }
+            var rs = stmt.executeQuery();
+            while (rs.next()) {
+                var trade = new java.util.LinkedHashMap<String, Object>();
+                trade.put("id", rs.getInt("id"));
+                trade.put("symbol", rs.getString("symbol"));
+                trade.put("strategy", rs.getString("strategy"));
+                trade.put("profile", rs.getString("profile"));
+                trade.put("entryTime", rs.getString("entry_time"));
+                trade.put("exitTime", rs.getString("exit_time"));
+                trade.put("entryPrice", rs.getDouble("entry_price"));
+                trade.put("exitPrice", rs.getDouble("exit_price"));
+                trade.put("quantity", rs.getDouble("quantity"));
+                trade.put("pnl", rs.getDouble("pnl"));
+                trade.put("status", rs.getString("status"));
+                trade.put("stopLoss", rs.getDouble("stop_loss"));
+                trade.put("takeProfit", rs.getDouble("take_profit"));
+                trade.put("createdAt", rs.getString("created_at"));
+                trades.add(trade);
+            }
+        } catch (SQLException e) {
+            logger.error("Failed to export trades", e);
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return trades;
+    }
+
+    /**
+     * Export all trades as CSV string.
+     * @param status Filter by status ("OPEN", "CLOSED") or null for all
+     * @return CSV string with header row
+     */
+    public String exportTradesAsCsv(String status) {
+        var sb = new StringBuilder();
+        sb.append("id,symbol,strategy,profile,entry_time,exit_time,entry_price,exit_price,quantity,pnl,status,stop_loss,take_profit,created_at\n");
+
+        var trades = exportTrades(status);
+        for (var trade : trades) {
+            sb.append(trade.get("id")).append(',');
+            sb.append(csvEscape(trade.get("symbol"))).append(',');
+            sb.append(csvEscape(trade.get("strategy"))).append(',');
+            sb.append(csvEscape(trade.get("profile"))).append(',');
+            sb.append(csvEscape(trade.get("entryTime"))).append(',');
+            sb.append(csvEscape(trade.get("exitTime"))).append(',');
+            sb.append(trade.get("entryPrice")).append(',');
+            sb.append(trade.get("exitPrice")).append(',');
+            sb.append(trade.get("quantity")).append(',');
+            sb.append(trade.get("pnl")).append(',');
+            sb.append(csvEscape(trade.get("status"))).append(',');
+            sb.append(trade.get("stopLoss")).append(',');
+            sb.append(trade.get("takeProfit")).append(',');
+            sb.append(csvEscape(trade.get("createdAt"))).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String csvEscape(Object value) {
+        if (value == null) return "";
+        String str = value.toString();
+        if (str.contains(",") || str.contains("\"") || str.contains("\n")) {
+            return "\"" + str.replace("\"", "\"\"") + "\"";
+        }
+        return str;
+    }
 }

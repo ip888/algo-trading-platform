@@ -1,6 +1,8 @@
 package com.trading.api.controller;
 
 import com.trading.analysis.MarketAnalyzer;
+import com.trading.analysis.MarketRegimeDetector.MarketRegime;
+import com.trading.backtest.BacktestEngine;
 import com.trading.config.Config;
 import com.trading.filters.MarketHoursFilter;
 import com.trading.filters.VolatilityFilter;
@@ -109,6 +111,13 @@ public final class DashboardController {
         
         // Manual position close endpoint (for take profit issues)
         app.post("/api/positions/{symbol}/close", this::closePosition);
+
+        // Trade export endpoints
+        app.get("/api/trades/export/json", this::exportTradesJson);
+        app.get("/api/trades/export/csv", this::exportTradesCsv);
+
+        // Backtesting endpoint
+        app.get("/api/backtest", this::runBacktest);
     }
     
     /**
@@ -885,6 +894,86 @@ public final class DashboardController {
             ));
         } catch (Exception e) {
             logger.error("Failed to get watchlist", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * Export trades as JSON.
+     * GET /api/trades/export/json?status=CLOSED
+     */
+    private void exportTradesJson(Context ctx) {
+        String status = ctx.queryParam("status");
+        var trades = database.exportTrades(status);
+        ctx.header("Content-Disposition", "attachment; filename=\"trades.json\"");
+        ctx.json(trades);
+    }
+
+    /**
+     * Export trades as CSV.
+     * GET /api/trades/export/csv?status=CLOSED
+     */
+    private void exportTradesCsv(Context ctx) {
+        String status = ctx.queryParam("status");
+        String csv = database.exportTradesAsCsv(status);
+        ctx.header("Content-Type", "text/csv");
+        ctx.header("Content-Disposition", "attachment; filename=\"trades.csv\"");
+        ctx.result(csv);
+    }
+
+    /**
+     * Run a backtest on historical data.
+     * GET /api/backtest?symbol=SPY&days=90&capital=1000&regime=RANGE_BOUND
+     */
+    private void runBacktest(Context ctx) {
+        String symbol = ctx.queryParamAsClass("symbol", String.class).getOrDefault("SPY");
+        int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(90);
+        double capital = ctx.queryParamAsClass("capital", Double.class).getOrDefault(1000.0);
+        String regimeStr = ctx.queryParamAsClass("regime", String.class).getOrDefault("RANGE_BOUND");
+
+        try {
+            MarketRegime regime = MarketRegime.valueOf(regimeStr);
+            var client = new com.trading.api.AlpacaClient(config);
+            var strategyManager = new com.trading.strategy.StrategyManager(client, null, config);
+            var engine = new BacktestEngine(strategyManager);
+
+            var bars = client.getBars(symbol, "1Day", days);
+            if (bars.isEmpty()) {
+                ctx.status(400).json(Map.of("error", "No historical data for " + symbol));
+                return;
+            }
+
+            var btConfig = new BacktestEngine.BacktestConfig(
+                symbol, capital, 0.9, 0.8, 0.4, 0.02, regime, 50
+            );
+            var result = engine.run(btConfig, bars);
+
+            var response = new HashMap<String, Object>();
+            response.put("symbol", result.symbol());
+            response.put("initialCapital", result.initialCapital());
+            response.put("finalCapital", result.finalCapital());
+            response.put("returnPercent", result.returnPercent());
+            response.put("totalTrades", result.totalTrades());
+            response.put("wins", result.wins());
+            response.put("losses", result.losses());
+            response.put("winRate", result.winRate());
+            response.put("profitFactor", result.profitFactor());
+            response.put("maxDrawdownPercent", result.maxDrawdownPercent());
+            response.put("totalPnL", result.totalPnL());
+            response.put("trades", result.trades().stream().map(t -> Map.of(
+                "entryTime", t.entryTime() != null ? t.entryTime().toString() : "",
+                "exitTime", t.exitTime() != null ? t.exitTime().toString() : "",
+                "entryPrice", t.entryPrice(),
+                "exitPrice", t.exitPrice(),
+                "quantity", t.quantity(),
+                "pnl", t.pnl(),
+                "exitReason", t.exitReason()
+            )).toList());
+            ctx.json(response);
+        } catch (IllegalArgumentException e) {
+            ctx.status(400).json(Map.of("error", "Invalid regime: " + regimeStr));
+        } catch (Exception e) {
+            logger.error("Backtest failed", e);
             ctx.status(500).json(Map.of("error", e.getMessage()));
         }
     }

@@ -20,6 +20,9 @@ import com.trading.strategy.StrategyManager;
 import com.trading.strategy.SymbolSelector;
 import com.trading.strategy.TradingProfile;
 import com.trading.strategy.TradingSignal;
+import com.trading.execution.SmartOrderTypeSelector;
+import com.trading.execution.SmartOrderTypeSelector.OrderContext;
+import com.trading.execution.SmartOrderTypeSelector.OrderTypeDecision;
 import com.trading.testing.TestModeSimulator;
 import com.trading.websocket.TradingWebSocketHandler;
 import org.slf4j.Logger;
@@ -63,6 +66,7 @@ public class ProfileManager implements Runnable {
     private final com.trading.analysis.VolumeProfileAnalyzer volumeProfileAnalyzer;
     private final com.trading.health.PositionHealthScorer healthScorer;
     private final com.trading.execution.SmartOrderRouter smartOrderRouter;
+    private final SmartOrderTypeSelector orderTypeSelector;
     private final com.trading.lending.StockLendingTracker lendingTracker;
     private final com.trading.options.OptionsStrategyManager optionsManager;
     
@@ -95,7 +99,12 @@ public class ProfileManager implements Runnable {
     // Key = symbol, Value = timestamp when cooldown expires
     private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
     // Cooldown period read from config.getStopLossCooldownMs() - default 30 minutes
-    
+
+    // Current market state (updated each cycle, used by profit target checks)
+    private volatile double latestVix = 15.0;
+    private volatile MarketRegime latestRegime = MarketRegime.RANGE_BOUND;
+    private volatile double latestEquity = 0.0;
+
     private volatile boolean running = true;
     
     public ProfileManager(
@@ -178,6 +187,7 @@ public class ProfileManager implements Runnable {
         this.volumeProfileAnalyzer = new com.trading.analysis.VolumeProfileAnalyzer(config);
         this.healthScorer = new com.trading.health.PositionHealthScorer();
         this.smartOrderRouter = new com.trading.execution.SmartOrderRouter(config, client.getDelegate());
+        this.orderTypeSelector = new SmartOrderTypeSelector();
         this.lendingTracker = new com.trading.lending.StockLendingTracker(config);
         this.optionsManager = new com.trading.options.OptionsStrategyManager(config);
         
@@ -259,6 +269,11 @@ public class ProfileManager implements Runnable {
         
         // Use actual equity for P&L calculation, capped at configured capital for position sizing
         var equity = Math.min(accountEquity, capital);
+
+        // Store latest market state for use in profit target checks
+        this.latestVix = currentVix;
+        this.latestRegime = regime;
+        this.latestEquity = equity;
         
         logger.debug("{} Account equity: ${}, Buying power: ${}, Using: ${}", 
             profilePrefix, 
@@ -612,7 +627,7 @@ public class ProfileManager implements Runnable {
             // 1. We don't have a position (qty == 0), OR
             // 2. We have a position but BUY signal is strong (can add to position)
             if (qty == 0 || (isTarget && buyingPower > 1.0)) {
-                handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, profilePrefix);
+                handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
             } else if (qty > 0) {
                 logger.debug("{} Skipping BUY for {} (already have position, low buying power: ${})", 
                     profilePrefix, symbol, String.format("%.2f", buyingPower));
@@ -650,8 +665,8 @@ public class ProfileManager implements Runnable {
         }
     }
     
-    private void handleBuy(String symbol, double currentPrice, double equity, 
-                          double buyingPower, double currentVix, String profilePrefix) throws Exception {
+    private void handleBuy(String symbol, double currentPrice, double equity,
+                          double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
         
         // ========== STOP LOSS COOLDOWN CHECK ==========
         // Prevent immediate re-entry after stop loss (this was causing repeated losses)
@@ -975,14 +990,22 @@ public class ProfileManager implements Runnable {
             
             // Broadcast order attempt to UI
             TradingWebSocketHandler.broadcastActivity(
-                String.format("[%s] 🔄 Attempting to BUY %s: %.3f shares @ $%.2f (Cost: $%.2f)", 
+                String.format("[%s] 🔄 Attempting to BUY %s: %.3f shares @ $%.2f (Cost: $%.2f)",
                     profile.name(), symbol, positionSize, currentPrice, orderValue),
                 "INFO"
             );
-            
+
+            // Determine optimal order type (limit vs market) based on conditions
+            var orderCtx = new OrderContext(
+                symbol, "buy", currentPrice, equity, currentVix, regime,
+                profile.strategyType(), false, false, false
+            );
+            var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
+            Double entryLimitPrice = orderDecision.limitPrice();
+
             // Place bracket order and check if server-side protection was applied
             var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
-                takeProfit, stopLoss, null, null);
+                takeProfit, stopLoss, null, entryLimitPrice);
 
             if (!bracketResult.success()) {
                 // Order failed completely - try simple market order as fallback
@@ -1072,16 +1095,23 @@ public class ProfileManager implements Runnable {
     
     private void handleSell(String symbol, double currentPrice, TradePosition position,
                            String profilePrefix) throws Exception {
-        
+
         double pnl = position.calculatePnL(currentPrice);
-        
+
         logger.info("{} {}: SELLING - Entry=${}, Exit=${}, P&L=${}",
-            profilePrefix, symbol, position.entryPrice(), currentPrice, 
+            profilePrefix, symbol, position.entryPrice(), currentPrice,
             String.format("%.2f", pnl));
-        
+
         // Place sell order (skip if in test mode)
         if (testSimulator == null) {
-            client.placeOrder(symbol, position.quantity(), "sell", "market", "day", null);
+            // Determine optimal order type for signal-based exit
+            var orderCtx = new OrderContext(
+                symbol, "sell", currentPrice, latestEquity, latestVix, latestRegime,
+                profile.strategyType(), true, false, false
+            );
+            var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
+            client.placeOrder(symbol, position.quantity(), "sell",
+                orderDecision.orderType(), orderDecision.timeInForce(), orderDecision.limitPrice());
         }
         
         // Update portfolio
@@ -1661,10 +1691,18 @@ public class ProfileManager implements Runnable {
                         } catch (Exception cancelEx) {
                             logger.warn("{} No existing orders to cancel for {}: {}", profilePrefix, symbol, cancelEx.getMessage());
                         }
-                        
-                        logger.info("{} Calling client.placeOrder({}, {}, sell, market, day, null)", profilePrefix, symbol, qty);
-                        client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                        broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);   
+
+                        // Use smart order type for take-profit exits (limit is fine here)
+                        var tpCtx = new OrderContext(
+                            symbol, "sell", currentPrice, latestEquity, latestVix, latestRegime,
+                            profile.strategyType(), true, false, false
+                        );
+                        var tpDecision = orderTypeSelector.selectOrderType(tpCtx);
+
+                        logger.info("{} Calling client.placeOrder({}, {}, sell, {}, {}, {})", profilePrefix, symbol, qty,
+                            tpDecision.orderType(), tpDecision.timeInForce(), tpDecision.limitPrice());
+                        client.placeOrder(symbol, qty, "sell", tpDecision.orderType(), tpDecision.timeInForce(), tpDecision.limitPrice());
+                        broadcastOrderData(symbol, qty, "sell", tpDecision.orderType(), "filled", currentPrice);   
                         logger.info("{} ✅ Order API call completed for {}", profilePrefix, symbol);
                         
                         // Calculate actual P&L in dollars

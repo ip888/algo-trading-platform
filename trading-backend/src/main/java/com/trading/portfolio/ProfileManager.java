@@ -98,7 +98,17 @@ public class ProfileManager implements Runnable {
     // Re-entry cooldown after stop loss (prevent immediate re-buy after SL)
     // Key = symbol, Value = timestamp when cooldown expires
     private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
-    // Cooldown period read from config.getStopLossCooldownMs() - default 30 minutes
+
+    // Track symbols with pending exit orders to prevent duplicate sell/closeTrade calls
+    // When a sell order is placed in checkAllPositionsForProfitTargets, the symbol is added here.
+    // On next cycle, if the position still exists on Alpaca (order not yet filled), we skip it.
+    // Entries are removed when the position disappears from Alpaca (order filled).
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingExitOrders = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // Track consecutive stop-loss hits per symbol to prevent repeated re-entry on falling stocks
+    // Key = symbol, Value = count of consecutive SL hits (reset on successful trade or manual clear)
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> consecutiveStopLosses = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_CONSECUTIVE_SL_BEFORE_EXTENDED_COOLDOWN = 2;
 
     // Current market state (updated each cycle, used by profit target checks)
     private volatile double latestVix = 15.0;
@@ -242,7 +252,13 @@ public class ProfileManager implements Runnable {
     
     private void runTradingCycle() throws Exception {
         String profilePrefix = "[" + profile.name() + "]";
-        
+
+        // Clean up expired stop-loss cooldowns to prevent memory leak
+        cleanupExpiredCooldowns();
+
+        // Reconcile internal portfolio state with Alpaca positions
+        reconcilePortfolioWithAlpaca(profilePrefix);
+
         // Get current market regime (uses advanced detection if enabled)
         MarketRegime regime;
         List<String> targetSymbols;
@@ -316,54 +332,39 @@ public class ProfileManager implements Runnable {
         // CRITICAL: Check ALL positions for take-profit/stop-loss, not just current targets
         // This ensures positions from previous regimes are still monitored for exits
         checkAllPositionsForProfitTargets(profilePrefix);
-        
-        // Check market hours (crypto trades 24/7, so check if we have any non-crypto symbols)
+
+        // Check market hours
         boolean isMarketOpen = marketHoursFilter.isMarketOpen();
         boolean bypassMarketHours = config.isMarketHoursBypassEnabled();
-        boolean hasCryptoSymbols = targetSymbols.stream().anyMatch(s -> s.contains("/"));
-        
-        if (!isMarketOpen && !bypassMarketHours && !hasCryptoSymbols) {
-            logger.debug("{} Market is closed (no crypto symbols to trade)", profilePrefix);
+
+        if (!isMarketOpen && !bypassMarketHours) {
+            logger.debug("{} Market is closed", profilePrefix);
             return;
         }
-        
-        // If market closed but has crypto, we'll filter to crypto-only below
-        boolean cryptoOnlyMode = !isMarketOpen && !bypassMarketHours && hasCryptoSymbols;
-        
+
         // Check entry timing (avoid first 15 minutes)
         if (!isGoodEntryTime()) {
             logger.debug("{} Not in entry window - skipping new entries", profilePrefix);
             return;
         }
-        
+
         // Check for max drawdown
         if (riskManager.shouldHaltTrading(equity)) {
             logger.error("{} HALTING TRADING: Max drawdown exceeded!", profilePrefix);
             return;
         }
-        
+
         // Determine symbols to process (target + active positions not in target)
         Set<String> symbolsToProcess = new HashSet<>(targetSymbols);
         var activeSymbols = portfolio.getActiveStoredSymbols();
-        
+
         for (String activeSymbol : activeSymbols) {
             if (!targetSymbols.contains(activeSymbol)) {
                 symbolsToProcess.add(activeSymbol);
                 logger.debug("{} Including {} for exit management", profilePrefix, activeSymbol);
             }
         }
-        
-        // If in crypto-only mode (market closed), filter to only crypto symbols
-        if (cryptoOnlyMode) {
-            symbolsToProcess = symbolsToProcess.stream()
-                .filter(s -> s.contains("/"))  // Crypto pairs contain "/"
-                .collect(java.util.stream.Collectors.toSet());
-            if (!symbolsToProcess.isEmpty()) {
-                logger.info("{} 🌙 Market closed - trading {} crypto symbols 24/7", 
-                    profilePrefix, symbolsToProcess.size());
-            }
-        }
-        
+
         logger.debug("{} Processing {} symbols", profilePrefix, symbolsToProcess.size());
         
         // Trade each symbol
@@ -545,6 +546,9 @@ public class ProfileManager implements Runnable {
                 logger.warn("{} ⚠️ MAX LOSS EXIT: {} down {:.2f}% (limit: -{:.1f}%)", 
                     profilePrefix, symbol, lossPercent, config.getMaxLossPercent());
 
+                // Cancel existing orders to free up held shares
+                cancelExistingOrders(profilePrefix, symbol);
+
                 // Retry up to 3 times if order fails
                 int maxAttempts = 3;
                 int attempt = 0;
@@ -561,6 +565,7 @@ public class ProfileManager implements Runnable {
                                 profile.name(), symbol, lossPercent, attempt+1),
                             "WARN"
                         );
+                        portfolio.setPosition(symbol, Optional.empty());
                         success = true;
                         return;
                     } catch (Exception e) {
@@ -590,18 +595,20 @@ public class ProfileManager implements Runnable {
                         profilePrefix, symbol, pos.getHoursHeld(), config.getMaxHoldTimeHours());
                     
                     try {
+                        cancelExistingOrders(profilePrefix, symbol);
                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
                         logger.info("{} ✅ Time-based exit order placed for {}", profilePrefix, symbol);
-                        
+
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnl);
-                        
+                        portfolio.setPosition(symbol, Optional.empty());
+
                         TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] TIME-BASED EXIT: %s (held %d hours)", 
+                            String.format("[%s] TIME-BASED EXIT: %s (held %d hours)",
                                 profile.name(), symbol, pos.getHoursHeld()),
                             "INFO"
                         );
-                        
+
                         return;
                     } catch (Exception e) {
                         logger.error("{} Failed to place time-based exit order for {}", profilePrefix, symbol, e);
@@ -829,10 +836,11 @@ public class ProfileManager implements Runnable {
         // This prevents "insufficient buying power" errors
         double availableCapital = Math.min(buyingPower * 0.95, equity); // Use 95% of buying power for safety
         // ========== POSITION SIZING ==========
+        // Pass actual VIX for volatility-based size adjustment (NOT stop-loss percent)
         double positionSize = riskManager.calculatePositionSize(
-            availableCapital, 
-            currentPrice, 
-            profile.stopLossPercent() / 100.0
+            availableCapital,
+            currentPrice,
+            currentVix
         );
         
         // ========== PHASE 3: ADAPTIVE POSITION SIZING ==========
@@ -1117,6 +1125,9 @@ public class ProfileManager implements Runnable {
 
         // Place sell order (skip if in test mode)
         if (testSimulator == null) {
+            // Cancel existing orders to free up held shares
+            cancelExistingOrders("[" + profile.name() + "]", symbol);
+
             // Determine optimal order type for signal-based exit
             var orderCtx = new OrderContext(
                 symbol, "sell", currentPrice, latestEquity, latestVix, latestRegime,
@@ -1186,9 +1197,21 @@ public class ProfileManager implements Runnable {
             
             for (var alpacaPos : allPositions) {
                 String symbol = alpacaPos.symbol();
-                double currentPrice = alpacaPos.marketValue() / alpacaPos.quantity();
-                double entryPrice = alpacaPos.avgEntryPrice();
                 double qty = alpacaPos.quantity();
+
+                // Guard against division by zero for empty positions
+                if (qty == 0) {
+                    logger.debug("{} Skipping zero-quantity position: {}", profilePrefix, symbol);
+                    continue;
+                }
+
+                double currentPrice = alpacaPos.marketValue() / qty;
+                double entryPrice = alpacaPos.avgEntryPrice();
+
+                if (entryPrice == 0) {
+                    logger.warn("{} Skipping position with zero entry price: {}", profilePrefix, symbol);
+                    continue;
+                }
                 
                 // Get tracked position if exists
                 var trackedPos = portfolio.getPosition(symbol);
@@ -1212,13 +1235,15 @@ public class ProfileManager implements Runnable {
                             profilePrefix, symbol, exitDecision.reason());
                         
                         try {
+                            cancelExistingOrders(profilePrefix, symbol);
                             client.placeOrder(symbol, qtyToExit, "sell", "market", "day", null);
                             
                             if (exitDecision.isPartial()) {
-                                logger.info("{} ✅ Partial exit executed: {} ({:.1f}% of position)", 
+                                logger.info("{} ✅ Partial exit executed: {} ({:.1f}% of position)",
                                     profilePrefix, symbol, exitDecision.quantity() * 100);
                             } else {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
+                                portfolio.setPosition(symbol, Optional.empty());
                             }
                             
                             TradingWebSocketHandler.broadcastActivity(
@@ -1248,6 +1273,7 @@ public class ProfileManager implements Runnable {
                                     ((currentPrice - entryPrice) / entryPrice) * 100);
                                 if (partialExit > 0) {
                                     double partialQty = qty * (partialExit / 100.0);
+                                    cancelExistingOrders(profilePrefix, symbol);
                                     client.placeOrder(symbol, partialQty, "sell", "market", "day", null);
                                     logger.info("{} 💰 PHASE 3 - Trailing partial exit: {} ({:.0f}%)", 
                                         profilePrefix, symbol, partialExit);
@@ -1257,13 +1283,15 @@ public class ProfileManager implements Runnable {
                             // ========== PHASE 3: TIME-DECAY EXITS ==========
                             if (config.isTimeDecayExits() && timeDecayExitManager.shouldExit(position, currentPrice)) {
                                 String reason = timeDecayExitManager.getExitReason(position, currentPrice);
-                                logger.info("{} ⏰ PHASE 3 - Time-decay exit: {} - {}", 
+                                logger.info("{} ⏰ PHASE 3 - Time-decay exit: {} - {}",
                                     profilePrefix, symbol, reason);
+                                cancelExistingOrders(profilePrefix, symbol);
                                 client.placeOrder(symbol, qty, "sell", "market", "day", null);
+                                portfolio.setPosition(symbol, Optional.empty());
                                 trailingTargetManager.removePosition(symbol);
                                 continue;
                             }
-                            
+
                             // ========== PHASE 3: MOMENTUM ACCELERATION EXITS ==========
                             if (config.isMomentumAccelerationExits()) {
                                 try {
@@ -1271,6 +1299,7 @@ public class ProfileManager implements Runnable {
                                     double exitPercent = momentumDetector.checkAcceleration(symbol, bars);
                                     if (exitPercent > 0) {
                                         double exitQty = qty * (exitPercent / 100.0);
+                                        cancelExistingOrders(profilePrefix, symbol);
                                         client.placeOrder(symbol, exitQty, "sell", "market", "day", null);
                                         logger.info("{} 🚀 PHASE 3 - Momentum spike exit: {} ({:.0f}%)", 
                                             profilePrefix, symbol, exitPercent);
@@ -1294,9 +1323,11 @@ public class ProfileManager implements Runnable {
                                     double healthScore = healthScorer.scorePosition(position, currentPrice, momentum);
                                     
                                     if (healthScorer.shouldCloseUnhealthy(healthScore)) {
-                                        logger.warn("{} ⚠️ PHASE 3 - Unhealthy position: {} (score: {:.0f}), closing", 
+                                        logger.warn("{} ⚠️ PHASE 3 - Unhealthy position: {} (score: {:.0f}), closing",
                                             profilePrefix, symbol, healthScore);
+                                        cancelExistingOrders(profilePrefix, symbol);
                                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
+                                        portfolio.setPosition(symbol, Optional.empty());
                                         trailingTargetManager.removePosition(symbol);
                                         continue;
                                     }
@@ -1318,12 +1349,14 @@ public class ProfileManager implements Runnable {
                 double lossPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
                 
                 if (lossPercent <= -config.getMaxLossPercent()) {
-                    logger.warn("{} ⚠️ MAX LOSS EXIT (untracked): {} down {:.2f}% (limit: -{:.1f}%)", 
+                    logger.warn("{} ⚠️ MAX LOSS EXIT (untracked): {} down {:.2f}% (limit: -{:.1f}%)",
                         profilePrefix, symbol, Math.abs(lossPercent), config.getMaxLossPercent());
-                    
+
                     try {
+                        cancelExistingOrders(profilePrefix, symbol);
                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                        logger.info("{} ✅ Max loss exit order placed for untracked position {}", 
+                        portfolio.setPosition(symbol, Optional.empty());
+                        logger.info("{} ✅ Max loss exit order placed for untracked position {}",
                             profilePrefix, symbol);
                         
                         TradingWebSocketHandler.broadcastActivity(
@@ -1354,6 +1387,81 @@ public class ProfileManager implements Runnable {
                 portfolio.getActivePositionCount()),
             "INFO"
         );
+    }
+
+    /**
+     * Cancel all existing orders for a symbol to free up held shares before placing a new sell order.
+     */
+    private void cancelExistingOrders(String profilePrefix, String symbol) {
+        try {
+            var openOrders = client.getOpenOrders(symbol);
+            if (openOrders.isArray()) {
+                for (var order : openOrders) {
+                    String orderId = order.get("id").asText();
+                    client.cancelOrder(orderId);
+                    logger.info("{} Canceled existing order {} for {} before exit", profilePrefix, orderId, symbol);
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("{} Could not cancel existing orders for {}: {}", profilePrefix, symbol, e.getMessage());
+        }
+    }
+
+    /**
+     * Remove expired entries from stopLossCooldowns map to prevent memory leak.
+     * Called at the start of each trading cycle.
+     */
+    private void cleanupExpiredCooldowns() {
+        long now = System.currentTimeMillis();
+        stopLossCooldowns.entrySet().removeIf(entry -> entry.getValue() < now);
+    }
+
+    /**
+     * Reconcile internal portfolio state with actual Alpaca positions.
+     * Removes any internal positions that no longer exist on Alpaca.
+     * This prevents stale state from blocking new entries after external sells,
+     * stop-loss fills, or other exit paths that may miss portfolio cleanup.
+     */
+    private void reconcilePortfolioWithAlpaca(String profilePrefix) {
+        try {
+            var alpacaPositions = client.getPositions();
+            var alpacaSymbols = new java.util.HashSet<String>();
+            for (var pos : alpacaPositions) {
+                alpacaSymbols.add(pos.symbol());
+            }
+
+            var internalSymbols = portfolio.getActiveStoredSymbols();
+            int removed = 0;
+            for (String symbol : internalSymbols) {
+                if (!alpacaSymbols.contains(symbol)) {
+                    portfolio.setPosition(symbol, Optional.empty());
+                    removed++;
+                    logger.info("{} Reconciliation: removed stale position {} (not found on Alpaca)",
+                        profilePrefix, symbol);
+                }
+            }
+            if (removed > 0) {
+                logger.warn("{} Reconciliation: removed {} stale position(s), active count now {}",
+                    profilePrefix, removed, portfolio.getActivePositionCount());
+            }
+
+            // Clean up pending exit orders for positions that have been filled (no longer on Alpaca)
+            int clearedExits = 0;
+            for (String symbol : pendingExitOrders.keySet()) {
+                if (!alpacaSymbols.contains(symbol)) {
+                    pendingExitOrders.remove(symbol);
+                    clearedExits++;
+                    logger.info("{} Pending exit cleared: {} (position filled/gone from Alpaca)",
+                        profilePrefix, symbol);
+                }
+            }
+            if (clearedExits > 0) {
+                logger.info("{} Cleared {} pending exit order(s) after fill confirmation",
+                    profilePrefix, clearedExits);
+            }
+        } catch (Exception e) {
+            logger.debug("{} Reconciliation check failed: {}", profilePrefix, e.getMessage());
+        }
     }
 
     /**
@@ -1570,15 +1678,23 @@ public class ProfileManager implements Runnable {
             String symbol = pos.symbol();
             double qty = pos.quantity();
             double pnl = pos.unrealizedPL();
+
+            // Guard against zero quantity
+            if (qty == 0) {
+                logger.debug("{} Skipping zero-quantity position during cleanup: {}", profilePrefix, symbol);
+                continue;
+            }
             
             logger.info("{} 🧹 Closing weakest position: {} (P&L: ${})", 
                 profilePrefix, symbol, String.format("%.2f", pnl));
             
             try {
+                cancelExistingOrders(profilePrefix, symbol);
                 client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                
+                portfolio.setPosition(symbol, Optional.empty());
+
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] 🧹 CLEANUP: Closed %s (P&L: $%.2f) - reducing to %d positions", 
+                    String.format("[%s] 🧹 CLEANUP: Closed %s (P&L: $%.2f) - reducing to %d positions",
                         profile.name(), symbol, pnl, maxPositions),
                     "INFO"
                 );
@@ -1625,9 +1741,29 @@ public class ProfileManager implements Runnable {
                 double marketValue = alpacaPos.marketValue();
                 double entryPrice = alpacaPos.avgEntryPrice();
 
+                // Guard against division by zero
+                if (qty == 0) {
+                    logger.debug("{} Skipping zero-quantity position: {}", profilePrefix, symbol);
+                    continue;
+                }
+
+                if (entryPrice == 0) {
+                    logger.warn("{} Skipping position with zero entry price: {}", profilePrefix, symbol);
+                    continue;
+                }
+
                 // Skip dust positions (< $1 market value) to prevent order spam
                 if (Math.abs(marketValue) < 1.0) {
                     logger.debug("{} Skipping dust position: {} (value=${})", profilePrefix, symbol, String.format("%.2f", marketValue));
+                    continue;
+                }
+
+                // Skip symbols with pending exit orders to prevent duplicate sell/closeTrade calls
+                // This fixes the bug where 49+ duplicate trade records were created for one position
+                if (pendingExitOrders.containsKey(symbol)) {
+                    logger.info("{} {} has pending exit order (placed at {}), skipping duplicate check",
+                        profilePrefix, symbol,
+                        java.time.Instant.ofEpochMilli(pendingExitOrders.get(symbol)));
                     continue;
                 }
                 
@@ -1643,7 +1779,7 @@ public class ProfileManager implements Runnable {
             // ========== PHASE 2 EXIT STRATEGIES ==========
             // Create temporary position for Phase 2 exit evaluation
             // Use RiskManager to get configured stop/target values
-            var riskManager = new RiskManager(100000); // Use current equity if available
+            var riskManager = new RiskManager(latestEquity > 0 ? latestEquity : capital);
             var tempPosition = new TradePosition(
                 symbol,
                 entryPrice,
@@ -1660,10 +1796,15 @@ public class ProfileManager implements Runnable {
                 
                 try {
                     double exitQty = eodDecision.isPartial() ? eodDecision.quantity() : qty;
+                    cancelExistingOrders(profilePrefix, symbol);
                     client.placeOrder(symbol, exitQty, "sell", "market", "day", null);
-                    
+
                     double pnlDollars = (currentPrice - entryPrice) * exitQty;
                     database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
+                    if (!eodDecision.isPartial()) {
+                        portfolio.setPosition(symbol, Optional.empty());
+                        pendingExitOrders.put(symbol, System.currentTimeMillis());
+                    }
                     
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] 🔒 EOD PROFIT LOCK: %s sold @ $%.2f (+%.2f%%, $%.2f)", 
@@ -1729,13 +1870,20 @@ public class ProfileManager implements Runnable {
                         
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
-                        
+                        portfolio.setPosition(symbol, Optional.empty());
+
+                        // Mark as pending exit to prevent duplicate sell on next cycle
+                        pendingExitOrders.put(symbol, System.currentTimeMillis());
+
                         TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ✅ TAKE PROFIT: %s sold @ $%.2f (+%.2f%%, $%.2f profit)", 
+                            String.format("[%s] ✅ TAKE PROFIT: %s sold @ $%.2f (+%.2f%%, $%.2f profit)",
                                 profile.name(), symbol, currentPrice, pnlPercent, pnlDollars),
                             "SUCCESS"
                         );
-                        
+
+                        // Reset consecutive SL counter on successful take-profit
+                        consecutiveStopLosses.remove(symbol);
+
                         logger.info("{} ✅ Take profit exit order placed for {}", profilePrefix, symbol);
                     } catch (Exception e) {
                         logger.error("{} ❌ FAILED to place take profit exit for {} - Exception: {}", 
@@ -1748,10 +1896,13 @@ public class ProfileManager implements Runnable {
                 // Check for stop-loss trigger
                 else if (pnlPercent <= -stopLossPercent) {
                     logger.warn("{} {} STOP LOSS HIT: Entry=${}, Current=${}, P&L={}% (stop: -{}%)",
-                        profilePrefix, symbol, entryPrice, currentPrice, 
+                        profilePrefix, symbol, entryPrice, currentPrice,
                         String.format("%.2f", pnlPercent), String.format("%.1f", stopLossPercent));
-                    
+
                     try {
+                        // Cancel any existing orders first to free up held shares
+                        cancelExistingOrders(profilePrefix, symbol);
+
                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
                         broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
                         
@@ -1760,16 +1911,37 @@ public class ProfileManager implements Runnable {
                         
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
-                        
+                        portfolio.setPosition(symbol, Optional.empty());
+
+                        // Mark as pending exit to prevent duplicate sell on next cycle
+                        pendingExitOrders.put(symbol, System.currentTimeMillis());
+
                         TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ⚠️ STOP LOSS: %s sold @ $%.2f (%.2f%%, $%.2f loss)", 
+                            String.format("[%s] ⚠️ STOP LOSS: %s sold @ $%.2f (%.2f%%, $%.2f loss)",
                                 profile.name(), symbol, currentPrice, pnlPercent, pnlDollars),
                             "WARN"
                         );
-                        
+
                         // ========== SET RE-ENTRY COOLDOWN ==========
                         // Prevent immediate re-buy after stop loss (was causing repeated losses)
+                        // Track consecutive stop-losses per symbol for extended cooldown
+                        int slCount = consecutiveStopLosses.merge(symbol, 1, Integer::sum);
                         long cooldownMs = config.getStopLossCooldownMs();
+
+                        // Extended cooldown after repeated stop-losses on same symbol
+                        if (slCount >= MAX_CONSECUTIVE_SL_BEFORE_EXTENDED_COOLDOWN) {
+                            // 4-hour cooldown after 2+ consecutive SLs (prevents MACD churn)
+                            cooldownMs = Math.max(cooldownMs, 4 * 60 * 60 * 1000L);
+                            logger.warn("{} {} has {} consecutive stop-losses! Extended cooldown: {} hours",
+                                profilePrefix, symbol, slCount, cooldownMs / 3600000);
+
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] ⚠️ %s: %d consecutive stop-losses - extended %d-hour cooldown",
+                                    profile.name(), symbol, slCount, cooldownMs / 3600000),
+                                "WARN"
+                            );
+                        }
+
                         stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
                         logger.warn("{} {} placed on {}-minute COOLDOWN after stop loss - no re-entry until {}", 
                             profilePrefix, symbol, cooldownMs / 60000,
@@ -1827,7 +1999,14 @@ public class ProfileManager implements Runnable {
                     double qty = Math.abs(position.quantity());
                     double marketValue = position.marketValue();
                     double entryPrice = position.avgEntryPrice();
-                    
+
+                    // Guard against division by zero
+                    if (qty == 0 || entryPrice == 0) {
+                        logger.debug("{} Skipping invalid position during EOD exit: {} (qty={}, entry={})",
+                            profilePrefix, symbol, qty, entryPrice);
+                        continue;
+                    }
+
                     // Calculate current price from market value
                     double currentPrice = Math.abs(marketValue / qty);
                     double pnl = (currentPrice - entryPrice) * qty;
@@ -1850,7 +2029,8 @@ public class ProfileManager implements Runnable {
                         logger.warn("{} 🔴 EOD SELL: {} - {} shares @ market", profilePrefix, symbol, qty);
                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
                         broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
-                        
+                        portfolio.setPosition(symbol, Optional.empty());
+
                         // Broadcast to UI
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] EOD EXIT: %s - Closed %.3f shares | P&L: $%.2f (%.2f%%)",

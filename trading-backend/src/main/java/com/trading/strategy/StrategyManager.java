@@ -61,42 +61,60 @@ public final class StrategyManager {
     /**
      * Evaluate trading signal using regime-based strategy selection.
      */
-    public TradingSignal evaluate(String symbol, double currentPrice, double positionQty, 
+    public TradingSignal evaluate(String symbol, double currentPrice, double positionQty,
                                  MarketRegime regime) {
         try {
             var bars = client.getMarketHistory(symbol, 100);
             var closes = bars.stream().map(Bar::close).toList();
-            
+
             if (closes.size() < 50) {
                 logger.warn("Insufficient history: {} bars (need 50+)", closes.size());
                 return new TradingSignal.Hold("Insufficient history");
             }
-            
+
             // Check multi-timeframe alignment if enabled
             if (multiTimeframeAnalyzer != null) {
                 MultiTimeframeAnalysis mtfAnalysis = multiTimeframeAnalyzer.analyze(symbol);
-                
+
                 logger.debug("Multi-timeframe: {}", mtfAnalysis.getSummary());
-                
+
                 // If timeframes are not aligned and alignment is required, hold
                 if (!mtfAnalysis.aligned() && mtfAnalysis.confidence() < 0.6) {
-                    logger.info("{}: Timeframes not aligned ({}), holding", 
+                    logger.info("{}: Timeframes not aligned ({}), holding",
                         symbol, mtfAnalysis.getAlignedCount() + "/" + mtfAnalysis.signals().size());
                     return new TradingSignal.Hold("Timeframes not aligned");
                 }
-                
+
                 // Use multi-timeframe recommendation if confidence is high
                 if (mtfAnalysis.confidence() > 0.7) {
-                    return switch (mtfAnalysis.recommendation()) {
+                    var mtfSignal = switch (mtfAnalysis.recommendation()) {
                         case BUY -> new TradingSignal.Buy("Multi-timeframe BUY signal");
                         case SELL -> new TradingSignal.Sell("Multi-timeframe SELL signal");
                         case HOLD -> new TradingSignal.Hold("Multi-timeframe HOLD");
                     };
+
+                    // Block BUY signals when short-term price trend is bearish
+                    if (mtfSignal instanceof TradingSignal.Buy && isShortTermDowntrend(closes)) {
+                        logger.info("{}: Blocked MTF BUY signal - short-term downtrend detected " +
+                            "(price below declining 10-bar SMA)", symbol);
+                        return new TradingSignal.Hold("Short-term downtrend - blocking BUY");
+                    }
+
+                    return mtfSignal;
                 }
             }
-            
-            return evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime);
-            
+
+            var signal = evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime);
+
+            // Block BUY signals from individual strategies when short-term trend is bearish
+            if (signal instanceof TradingSignal.Buy && isShortTermDowntrend(closes)) {
+                logger.info("{}: Blocked {} BUY signal - short-term downtrend detected",
+                    symbol, activeStrategy);
+                return new TradingSignal.Hold("Short-term downtrend - blocking BUY");
+            }
+
+            return signal;
+
         } catch (Exception e) {
             logger.error("Error evaluating strategy", e);
             return new TradingSignal.Hold("Error: " + e.getMessage());
@@ -196,6 +214,52 @@ public final class StrategyManager {
 
     public String getActiveStrategy() {
         return activeStrategy;
+    }
+
+    /**
+     * Detect short-term downtrend to block BUY signals on falling stocks.
+     * Returns true when:
+     *  1. Current price is below the 10-bar SMA, AND
+     *  2. The 10-bar SMA itself is declining (current SMA10 < previous SMA10)
+     *
+     * This catches cases where longer-term indicators (MACD, SMA20/50) still
+     * appear bullish due to lag, but the stock is actively falling.
+     */
+    private boolean isShortTermDowntrend(List<Double> closes) {
+        if (closes.size() < 12) {
+            return false; // Not enough data
+        }
+
+        int size = closes.size();
+
+        // Current 10-bar SMA (bars [size-10] to [size-1])
+        double sma10Current = 0;
+        for (int i = size - 10; i < size; i++) {
+            sma10Current += closes.get(i);
+        }
+        sma10Current /= 10.0;
+
+        // Previous 10-bar SMA (bars [size-11] to [size-2])
+        double sma10Previous = 0;
+        for (int i = size - 11; i < size - 1; i++) {
+            sma10Previous += closes.get(i);
+        }
+        sma10Previous /= 10.0;
+
+        double currentPrice = closes.get(size - 1);
+        boolean priceBelowSma = currentPrice < sma10Current;
+        boolean smaDeclining = sma10Current < sma10Previous;
+
+        if (priceBelowSma && smaDeclining) {
+            double pctBelowSma = ((sma10Current - currentPrice) / sma10Current) * 100;
+            logger.debug("Short-term downtrend: price ${} is {:.2f}% below declining 10-SMA ${}",
+                String.format("%.2f", currentPrice),
+                pctBelowSma,
+                String.format("%.2f", sma10Current));
+            return true;
+        }
+
+        return false;
     }
 
     private double calculateSMA(List<Double> prices) {

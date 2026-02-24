@@ -149,6 +149,23 @@ public final class DashboardController {
             double pnlDollars = (currentPrice - entryPrice) * qty;
             double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100.0;
             
+            // Cancel any existing orders first to free up held shares
+            try {
+                var openOrders = client.getOpenOrders(symbol);
+                if (openOrders.isArray()) {
+                    for (var order : openOrders) {
+                        String orderId = order.get("id").asText();
+                        client.cancelOrder(orderId);
+                        logger.info("Canceled existing order {} for {} before manual close", orderId, symbol);
+                    }
+                    if (openOrders.size() > 0) {
+                        Thread.sleep(500); // Brief delay for order cancellation to settle
+                    }
+                }
+            } catch (Exception cancelEx) {
+                logger.warn("Could not cancel existing orders for {}: {}", symbol, cancelEx.getMessage());
+            }
+
             // Place sell order
             client.placeOrder(symbol, qty, "sell", "market", "day", null);
             

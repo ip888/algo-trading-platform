@@ -15,7 +15,7 @@ import java.util.concurrent.locks.StampedLock;
  * Thread-Safety: Uses StampedLock with optimistic reads for high-throughput read operations
  * and write locks for mutations. This is significantly faster than synchronized methods.
  */
-public final class TradeDatabase {
+public class TradeDatabase {
     private static final Logger logger = LoggerFactory.getLogger(TradeDatabase.class);
     private static final String DB_URL = "jdbc:sqlite:trades.db";
     

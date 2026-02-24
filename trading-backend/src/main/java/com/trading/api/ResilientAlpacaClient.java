@@ -32,7 +32,7 @@ import java.util.function.Supplier;
  * 
  * This is a decorator pattern - wraps the base AlpacaClient with resilience.
  */
-public final class ResilientAlpacaClient {
+public class ResilientAlpacaClient {
     private static final Logger logger = LoggerFactory.getLogger(ResilientAlpacaClient.class);
     
     private final AlpacaClient delegate;

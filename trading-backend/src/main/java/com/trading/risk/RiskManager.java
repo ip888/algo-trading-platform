@@ -195,34 +195,7 @@ public final class RiskManager {
             Instant.now()
         );
     }
-    
-    /**
-     * Create a crypto TradePosition with tighter micro-profit settings.
-     * Optimized for 24/7 crypto trading with quick TP/SL.
-     * Uses: TP 0.75%, SL 0.5%
-     */
-    public TradePosition createCryptoPosition(String symbol, double entryPrice, double quantity) {
-        // Micro-profit crypto settings: tight take-profit and stop-loss
-        double cryptoTpPct = 0.0075;  // 0.75% take-profit
-        double cryptoSlPct = 0.005;   // 0.5% stop-loss
-        
-        double stopLoss = entryPrice * (1.0 - cryptoSlPct);
-        double takeProfit = entryPrice * (1.0 + cryptoTpPct);
-        
-        logger.info("🦑 Crypto position created: {} @ ${} | TP=${} (+0.75%) | SL=${} (-0.5%)",
-            symbol, String.format("%.4f", entryPrice), 
-            String.format("%.4f", takeProfit), String.format("%.4f", stopLoss));
-        
-        return new TradePosition(
-            symbol,
-            entryPrice,
-            quantity,
-            stopLoss,
-            takeProfit,
-            Instant.now()
-        );
-    }
-    
+
     /**
      * Check if trading should be halted due to excessive drawdown.
      *

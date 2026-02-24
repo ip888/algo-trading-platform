@@ -17,7 +17,7 @@ import java.util.Properties;
  * Configuration manager for Alpaca API credentials and bot settings.
  * Loads from environment variables or config.properties file.
  */
-public final class Config {
+public class Config {
     private static final Logger logger = LoggerFactory.getLogger(Config.class);
     private static final String CONFIG_FILE = "config.properties";
     private static final String DEFAULT_BASE_URL = "https://paper-api.alpaca.markets";
@@ -151,22 +151,7 @@ public final class Config {
     public String getEmailSmtpPort() {
         return getProperty("EMAIL_SMTP_PORT");
     }
-    
-    /**
-     * Check if Alpaca Crypto trading is enabled (default true)
-     */
-    public boolean isAlpacaCryptoEnabled() {
-        return getBooleanProperty("ALPACA_CRYPTO_ENABLED", true);
-    }
-    
-    /**
-     * Get Alpaca Crypto symbols (e.g., BTC/USD, ETH/USD, SOL/USD)
-     */
-    public String[] getAlpacaCryptoSymbols() {
-        String symbols = getProperty("ALPACA_CRYPTO_SYMBOLS", "BTC/USD,ETH/USD,SOL/USD");
-        return symbols.split(",");
-    }
-    
+
     // ==================== Platform Configuration ====================
     
     /**
@@ -281,13 +266,6 @@ public final class Config {
         return java.util.Arrays.asList(symbols.split(","));
     }
     
-    /**
-     * Get crypto symbols for Alpaca crypto trading.
-     */
-    public java.util.List<String> getCryptoSymbols() {
-        String symbols = getProperty("CRYPTO_SYMBOLS", "BTC/USD,ETH/USD,SOL/USD");
-        return java.util.Arrays.asList(symbols.split(","));
-    }
 
     /**
      * Get VIX threshold for switching to bearish mode.

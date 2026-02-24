@@ -213,20 +213,6 @@ class RiskManagerTest {
             double expectedTakeProfit = entryPrice * (1.0 + TEST_TAKE_PROFIT_PCT / 100.0);
             assertEquals(expectedTakeProfit, position.takeProfit(), DELTA, "Take-profit should be 0.75% above entry");
         }
-
-        @Test
-        @DisplayName("Should create crypto position with tighter settings")
-        void testCreateCryptoPosition() {
-            var position = riskManager.createCryptoPosition("BTC-USD", 50000.0, 0.001);
-
-            assertNotNull(position);
-            assertEquals("BTC-USD", position.symbol());
-            // Crypto uses 0.5% SL and 0.75% TP (hardcoded in method)
-            double expectedSL = 50000.0 * (1.0 - 0.005);
-            double expectedTP = 50000.0 * (1.0 + 0.0075);
-            assertEquals(expectedSL, position.stopLoss(), 1.0);
-            assertEquals(expectedTP, position.takeProfit(), 1.0);
-        }
     }
 
     // ========================================================================

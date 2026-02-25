@@ -25,6 +25,7 @@ public final class PDTProtection {
     private final TradeDatabase database;
     private final boolean enabled;
     private final Map<String, Integer> dayTradeCountCache = new HashMap<>();
+    private volatile int alpacaDayTradeCount = -1; // -1 = not synced yet
     
     public PDTProtection(TradeDatabase database, boolean enabled) {
         this.database = database;
@@ -90,7 +91,22 @@ public final class PDTProtection {
     }
     
     /**
+     * Sync day trade count from Alpaca's /v2/account endpoint.
+     * This ensures our local tracking doesn't diverge from the broker's count.
+     */
+    public void syncWithAlpaca(int alpacaCount) {
+        this.alpacaDayTradeCount = alpacaCount;
+        int localCount = database.getDayTradesInLastNBusinessDays(BUSINESS_DAYS_WINDOW);
+        if (alpacaCount != localCount) {
+            logger.warn("PDT count mismatch: Alpaca={}, Local DB={}. Using higher value.",
+                alpacaCount, localCount);
+        }
+        dayTradeCountCache.clear(); // Invalidate cache after sync
+    }
+
+    /**
      * Get the count of day trades in the last 5 business days.
+     * Uses the higher of Alpaca's server count and local database count.
      */
     public int getDayTradeCount() {
         // Check cache first
@@ -98,14 +114,17 @@ public final class PDTProtection {
         if (dayTradeCountCache.containsKey(cacheKey)) {
             return dayTradeCountCache.get(cacheKey);
         }
-        
-        // Calculate day trades
-        int count = database.getDayTradesInLastNBusinessDays(BUSINESS_DAYS_WINDOW);
-        
+
+        // Calculate day trades from local DB
+        int localCount = database.getDayTradesInLastNBusinessDays(BUSINESS_DAYS_WINDOW);
+
+        // Use higher of Alpaca and local to be safe
+        int count = alpacaDayTradeCount >= 0 ? Math.max(localCount, alpacaDayTradeCount) : localCount;
+
         // Cache the result
         dayTradeCountCache.clear(); // Clear old cache
         dayTradeCountCache.put(cacheKey, count);
-        
+
         return count;
     }
     

@@ -304,11 +304,11 @@ public class Config {
     }
 
     public double getMainTakeProfitPercent() {
-        return getDoubleProperty("MAIN_TAKE_PROFIT_PERCENT", 0.001); // 🚨 PANIC SELL: 0.001%
+        return getDoubleProperty("MAIN_TAKE_PROFIT_PERCENT", 2.0);
     }
 
     public double getMainStopLossPercent() {
-        return getDoubleProperty("MAIN_STOP_LOSS_PERCENT", 0.001);   // 🚨 PANIC SELL: 0.001%
+        return getDoubleProperty("MAIN_STOP_LOSS_PERCENT", 1.0);
     }
 
     public double getMainTrailingStopPercent() {

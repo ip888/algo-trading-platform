@@ -85,8 +85,8 @@ public final class CapitalTierManager {
                 0.005,          // 0.5% risk per trade (ultra-conservative)
                 2,              // Max 2 positions
                 5.0,            // Min $5 position
-                0.5,            // Tighter TP (50% of config)
-                1.5,            // Wider SL (150% of config) - more breathing room
+                1.0,            // Use config TP as-is (risk managed by position sizing)
+                1.0,            // Use config SL as-is (don't invert R:R ratio)
                 true,           // Prefer whole shares
                 "⚠️ MICRO account (<$500): Very limited trading. Consider adding capital for better protection."
             );
@@ -97,8 +97,8 @@ public final class CapitalTierManager {
                 0.01,           // 1% risk per trade
                 3,              // Max 3 positions
                 10.0,           // Min $10 position
-                0.75,           // 75% of config TP
-                1.25,           // 125% of config SL
+                1.0,            // Use config TP as-is (preserves R:R ratio)
+                1.0,            // Use config SL as-is (preserves R:R ratio)
                 true,           // Prefer whole shares for bracket protection
                 "📊 SMALL account ($500-$2K): Conservative mode. " +
                 "Fractional shares may not have bracket protection."

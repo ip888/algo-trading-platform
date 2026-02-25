@@ -115,6 +115,9 @@ public class ProfileManager implements Runnable {
     private volatile MarketRegime latestRegime = MarketRegime.RANGE_BOUND;
     private volatile double latestEquity = 0.0;
 
+    // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
+    private volatile long pdtBlockedUntil = 0;
+
     private volatile boolean running = true;
     
     public ProfileManager(
@@ -282,6 +285,11 @@ public class ProfileManager implements Runnable {
         var account = client.getAccount();
         var accountEquity = account.get("equity").asDouble();
         var buyingPower = account.get("buying_power").asDouble();
+
+        // Sync PDT day trade count from Alpaca server to prevent local DB divergence
+        if (account.has("daytrade_count")) {
+            pdtProtection.syncWithAlpaca(account.get("daytrade_count").asInt(0));
+        }
         
         // Use actual equity for P&L calculation, capped at configured capital for position sizing
         var equity = Math.min(accountEquity, capital);
@@ -1199,9 +1207,16 @@ public class ProfileManager implements Runnable {
         if (!profile.name().equals("MAIN")) {
             return;
         }
-        
+
         if (!config.isMaxLossExitEnabled()) {
             return; // Feature disabled
+        }
+
+        // PDT circuit breaker: skip sell attempts if Alpaca recently rejected with 403 PDT
+        if (System.currentTimeMillis() < pdtBlockedUntil) {
+            logger.debug("{} Skipping risk exits — PDT blocked for {} more seconds",
+                profilePrefix, (pdtBlockedUntil - System.currentTimeMillis()) / 1000);
+            return;
         }
         
         try {
@@ -1356,7 +1371,13 @@ public class ProfileManager implements Runnable {
                             
                             continue;
                         } catch (Exception e) {
-                            logger.error("{} Failed to place enhanced exit order for {}", 
+                            if (e.getMessage() != null && e.getMessage().contains("pattern day trading")) {
+                                pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L; // Block for 10 minutes
+                                logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                                    profilePrefix, symbol);
+                                return;
+                            }
+                            logger.error("{} Failed to place enhanced exit order for {}",
                                 profilePrefix, symbol, e);
                         }
                     }
@@ -1383,7 +1404,13 @@ public class ProfileManager implements Runnable {
                             "WARN"
                         );
                     } catch (Exception e) {
-                        logger.error("{} Failed to place max loss exit order for {}", 
+                        if (e.getMessage() != null && e.getMessage().contains("pattern day trading")) {
+                            pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
+                            logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                                profilePrefix, symbol);
+                            return;
+                        }
+                        logger.error("{} Failed to place max loss exit order for {}",
                             profilePrefix, symbol, e);
                     }
                 }
@@ -1748,6 +1775,13 @@ public class ProfileManager implements Runnable {
         if (!profile.name().equals("MAIN")) {
             return;
         }
+
+        // PDT circuit breaker: skip sell attempts if Alpaca recently rejected with 403 PDT
+        if (System.currentTimeMillis() < pdtBlockedUntil) {
+            logger.debug("{} Skipping profit target checks — PDT blocked for {} more seconds",
+                profilePrefix, (pdtBlockedUntil - System.currentTimeMillis()) / 1000);
+            return;
+        }
         
         try {
             var alpacaPositions = client.getPositions();
@@ -1904,7 +1938,13 @@ public class ProfileManager implements Runnable {
 
                         logger.info("{} ✅ Take profit exit order placed for {}", profilePrefix, symbol);
                     } catch (Exception e) {
-                        logger.error("{} ❌ FAILED to place take profit exit for {} - Exception: {}", 
+                        if (e.getMessage() != null && e.getMessage().contains("pattern day trading")) {
+                            pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
+                            logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                                profilePrefix, symbol);
+                            return;
+                        }
+                        logger.error("{} ❌ FAILED to place take profit exit for {} - Exception: {}",
                             profilePrefix, symbol, e.getClass().getName(), e);
                         logger.error("{} Error message: {}", profilePrefix, e.getMessage());
                         // Stack trace logged at debug level to avoid log noise
@@ -1967,6 +2007,12 @@ public class ProfileManager implements Runnable {
                         
                         logger.info("{} ✅ Stop loss exit order placed for {}", profilePrefix, symbol);
                     } catch (Exception e) {
+                        if (e.getMessage() != null && e.getMessage().contains("pattern day trading")) {
+                            pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
+                            logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                                profilePrefix, symbol);
+                            return;
+                        }
                         logger.error("{} Failed to place stop loss exit for {}", profilePrefix, symbol, e);
                     }
                 }

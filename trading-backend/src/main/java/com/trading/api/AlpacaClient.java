@@ -533,6 +533,9 @@ public final class AlpacaClient {
             var errorMsg = String.format("API Request failed: %d - %s", response.statusCode(), response.body());
             if (response.statusCode() == 404) {
                 logger.debug(errorMsg);
+            } else if (response.statusCode() == 403 && response.body() != null
+                       && response.body().contains("pattern day trading")) {
+                logger.warn("PDT REJECTED: {}", errorMsg);
             } else {
                 logger.error(errorMsg);
             }

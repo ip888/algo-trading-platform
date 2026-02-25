@@ -294,12 +294,12 @@ public class Config {
     }
 
     public List<String> getMainBullishSymbols() {
-        String symbols = getProperty("MAIN_BULLISH_SYMBOLS", "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,XLI,XLP");
+        String symbols = getProperty("MAIN_BULLISH_SYMBOLS", "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,XLI,XLP,XOP,XLU,URA,GRID");
         return java.util.Arrays.asList(symbols.split(","));
     }
 
     public List<String> getMainBearishSymbols() {
-        String symbols = getProperty("MAIN_BEARISH_SYMBOLS", "SH,PSQ,RWM,DOG,SEF,ERY,REK,RXD,SIJ,SZK");
+        String symbols = getProperty("MAIN_BEARISH_SYMBOLS", "SH,PSQ,RWM,DOG,SEF,ERY,REK,RXD,SIJ,SZK,DUG,SCO");
         return java.util.Arrays.asList(symbols.split(","));
     }
 
@@ -313,6 +313,15 @@ public class Config {
 
     public double getMainTrailingStopPercent() {
         return getDoubleProperty("MAIN_TRAILING_STOP_PERCENT", 1.5);
+    }
+
+    /**
+     * Emergency stop-loss percent that bypasses hold-time restrictions.
+     * If a position loses more than this %, sell immediately regardless of PDT hold time.
+     * Default: 3.0%
+     */
+    public double getEmergencyStopLossPercent() {
+        return getDoubleProperty("EMERGENCY_STOP_LOSS_PERCENT", 3.0);
     }
 
     // Experimental Profile Settings
@@ -356,12 +365,12 @@ public class Config {
     }
 
     public List<String> getExperimentalBullishSymbols() {
-        String symbols = getProperty("EXPERIMENTAL_BULLISH_SYMBOLS", "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,GLD,SLV,TLT,XLU");
+        String symbols = getProperty("EXPERIMENTAL_BULLISH_SYMBOLS", "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,GLD,SLV,TLT,XLU,XOP,URA,GRID");
         return java.util.Arrays.asList(symbols.split(","));
     }
 
     public List<String> getExperimentalBearishSymbols() {
-        String symbols = getProperty("EXPERIMENTAL_BEARISH_SYMBOLS", "SH,PSQ,RWM,DOG,SEF,ERY,REK,RXD,GLL,ZSL,TBT,SDP");
+        String symbols = getProperty("EXPERIMENTAL_BEARISH_SYMBOLS", "SH,PSQ,RWM,DOG,SEF,ERY,REK,RXD,GLL,ZSL,TBT,SDP,DUG,SCO");
         return java.util.Arrays.asList(symbols.split(","));
     }
 

@@ -297,41 +297,43 @@ public class ProfileManager implements Runnable {
             String.format("%.2f", buyingPower), 
             String.format("%.2f", equity));
         
+        // ========== CHECK ALL ALPACA POSITIONS FOR RISK EXITS ==========
+        // CRITICAL: Run BEFORE portfolio halt so individual stop-losses still fire
+        // even when the portfolio-level stop loss has been triggered
+        checkAllPositionsForRiskExits(profilePrefix);
+
+        // ========== CHECK ALL POSITIONS FOR PROFIT TARGETS ==========
+        // CRITICAL: Check ALL positions for take-profit/stop-loss, not just current targets
+        // This ensures positions from previous regimes are still monitored for exits
+        // Runs before portfolio halt to guarantee protective exits always execute
+        checkAllPositionsForProfitTargets(profilePrefix);
+
         // ========== PORTFOLIO-LEVEL STOP LOSS CHECK ==========
+        // Halts NEW entries only — protective exits above have already run
         if (portfolioRiskManager.shouldHaltTrading(accountEquity)) {
-            logger.error("{} 🛑 PORTFOLIO STOP LOSS - Halting all trading", profilePrefix);
-            
+            logger.error("{} 🛑 PORTFOLIO STOP LOSS - Halting new entries (protective exits already checked)", profilePrefix);
+
             // Assess and log portfolio risk
             var risk = portfolioRiskManager.assessRisk(client.getDelegate(), accountEquity);
             logger.error("{} {}", profilePrefix, risk.getSummary());
-            
+
             TradingWebSocketHandler.broadcastActivity(
-                String.format("[%s] PORTFOLIO STOP LOSS HIT - Trading halted", profile.name()),
+                String.format("[%s] PORTFOLIO STOP LOSS HIT - New entries halted", profile.name()),
                 "ERROR"
             );
-            
-            return; // Skip trading cycle
+
+            return; // Skip new entries only
         }
-        
-        // ========== CHECK ALL ALPACA POSITIONS FOR RISK EXITS ==========
-        // This checks ALL positions in the account, including those not in current target symbols
-        // (e.g., positions from previous market regimes that are no longer being tracked)
-        checkAllPositionsForRiskExits(profilePrefix);
-        
+
         // ========== CLEANUP EXCESS POSITIONS ==========
         // Auto-close worst positions if over limit
         cleanupExcessPositions(profilePrefix);
-        
+
         // ========== END OF DAY EXIT (3:30 PM) ==========
         // Close all positions before market close to avoid overnight risk
         if (config.isEodExitEnabled()) {
             checkAndExecuteEodExit(profilePrefix);
         }
-        
-        // ========== CHECK ALL POSITIONS FOR PROFIT TARGETS ==========
-        // CRITICAL: Check ALL positions for take-profit/stop-loss, not just current targets
-        // This ensures positions from previous regimes are still monitored for exits
-        checkAllPositionsForProfitTargets(profilePrefix);
 
         // Check market hours
         boolean isMarketOpen = marketHoursFilter.isMarketOpen();
@@ -641,9 +643,25 @@ public class ProfileManager implements Runnable {
             }
         } else if (signal instanceof TradingSignal.Sell sell) {
             if (qty > 0) {
+                TradePosition position = currentPosition.get();
+                double lossPercent = position.getLossPercent(currentPrice);
+                double emergencyThreshold = config.getEmergencyStopLossPercent();
+
+                // EMERGENCY STOP-LOSS: bypass hold-time and PDT if loss exceeds emergency threshold
+                if (lossPercent <= -emergencyThreshold) {
+                    logger.warn("{} {} EMERGENCY STOP-LOSS: loss {:.2f}% exceeds -{:.1f}% threshold — bypassing hold-time restriction",
+                        profilePrefix, symbol, lossPercent, emergencyThreshold);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] 🚨 EMERGENCY SELL: %s loss %.2f%% exceeds -%.1f%% threshold",
+                            profile.name(), symbol, lossPercent, emergencyThreshold),
+                        "ERROR"
+                    );
+                    handleSell(symbol, currentPrice, position, profilePrefix);
+                    return;
+                }
+
                 // Check if position has been held long enough (PDT compliance)
                 int minHoldHours = config.getMinHoldTimeHours();
-                TradePosition position = currentPosition.get();
                 if (!position.canSell(minHoldHours)) {
                     long hoursHeld = position.getHoursHeld();
                     logger.info("{} {}: Cannot sell yet - held {} hours (min: {} hours)",
@@ -652,10 +670,10 @@ public class ProfileManager implements Runnable {
                         profilePrefix, symbol, minHoldHours - hoursHeld);
                     return; // Keep position, don't sell yet
                 }
-                
+
                 logger.info("{} {}: SELL signal - {} (held {} hours)",
                     profilePrefix, symbol, sell.reason(), position.getHoursHeld());
-                
+
                 // Check PDT protection
                 // Assuming 'pdtProtection' is a member variable of the class
                 if (!pdtProtection.canTrade(symbol, true, equity)) {

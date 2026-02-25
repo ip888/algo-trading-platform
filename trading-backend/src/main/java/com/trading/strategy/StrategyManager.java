@@ -19,11 +19,13 @@ public final class StrategyManager {
     private static final Logger logger = LoggerFactory.getLogger(StrategyManager.class);
     private static final double VOLATILITY_THRESHOLD = 0.015; // 1.5%
     
-    // Momentum assets that perform well in uptrends (Gold, safe havens, tech leaders)
+    // Momentum assets that perform well in uptrends (Gold, safe havens, tech leaders, energy, power)
     private static final java.util.Set<String> MOMENTUM_ASSETS = java.util.Set.of(
-        "GLD", "SLV", "TLT", "XLU",  // Safe havens
+        "GLD", "SLV", "TLT", "XLU",  // Safe havens / utilities
         "NVDA", "TSLA", "META",       // Momentum tech
-        "XLE", "XLK"                  // Sector leaders
+        "XLE", "XLK",                 // Sector leaders
+        "XOP",                        // Oil & Gas energy
+        "URA", "GRID"                 // Nuclear, grid infrastructure
     );
     
     private final AlpacaClient client;

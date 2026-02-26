@@ -4,38 +4,33 @@ import com.trading.persistence.TradeDatabase;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.LocalDate;
-import java.time.ZoneId;
-import java.util.HashMap;
-import java.util.Map;
-
 /**
  * Pattern Day Trader (PDT) Protection.
  * Prevents account from being flagged as a PDT by tracking and limiting day trades.
- * 
+ *
  * PDT Rule: 4+ day trades in 5 business days = PDT flag (requires $25,000 equity)
- * 
- * This class helps accounts with < $25,000 avoid PDT restrictions.
+ *
+ * Uses Alpaca's daytrade_count from /v2/account as the sole source of truth.
+ * Local SQLite DB is unreliable on ephemeral containers (Fly.io wipes it on deploy).
  */
 public final class PDTProtection {
     private static final Logger logger = LoggerFactory.getLogger(PDTProtection.class);
     private static final int MAX_DAY_TRADES = 3; // Stay under 4 to avoid PDT flag
-    private static final int BUSINESS_DAYS_WINDOW = 5;
-    
+
     private final TradeDatabase database;
     private final boolean enabled;
-    private final Map<String, Integer> dayTradeCountCache = new HashMap<>();
-    private volatile int alpacaDayTradeCount = -1; // -1 = not synced yet
-    
+    private volatile int alpacaDayTradeCount = 0;
+    private volatile boolean synced = false;
+
     public PDTProtection(TradeDatabase database, boolean enabled) {
         this.database = database;
         this.enabled = enabled;
-        logger.info("PDT Protection initialized - Enabled: {}", enabled);
+        logger.info("PDT Protection initialized - Enabled: {} (using Alpaca as source of truth)", enabled);
     }
-    
+
     /**
      * Check if a trade would violate PDT rules.
-     * 
+     *
      * @param symbol Stock symbol
      * @param isSell True if this is a sell order
      * @param accountEquity Current account equity
@@ -45,97 +40,71 @@ public final class PDTProtection {
         if (!enabled) {
             return true; // PDT protection disabled
         }
-        
+
         // PDT rules don't apply to accounts with $25,000+
         if (accountEquity >= 25000) {
-            logger.debug("Account equity ${} >= $25,000 - PDT rules don't apply", 
+            logger.debug("Account equity ${} >= $25,000 - PDT rules don't apply",
                         String.format("%.2f", accountEquity));
             return true;
         }
-        
+
         // Only check on sell orders (closing a position same day = day trade)
         if (!isSell) {
             return true; // Buy orders are always allowed
         }
-        
-        // Check if this would be a day trade
-        if (!wouldBeDayTrade(symbol)) {
-            return true; // Not a day trade, allowed
-        }
-        
-        // Count day trades in last 5 business days
-        int dayTradeCount = getDayTradeCount();
-        
-        // Log warnings
-        if (dayTradeCount == 2) {
-            logger.warn("⚠️ PDT WARNING: This is your 3rd day trade in 5 days. One more will flag your account!");
-        } else if (dayTradeCount >= MAX_DAY_TRADES) {
-            logger.error("🚫 PDT PROTECTION: Blocking 4th day trade to prevent PDT flag");
-            logger.error("   Current day trades: {} (max: {})", dayTradeCount, MAX_DAY_TRADES);
-            logger.error("   Wait {} business days or increase equity to $25,000+", 
-                        BUSINESS_DAYS_WINDOW - dayTradeCount);
+
+        // If not yet synced with Alpaca, block day trades to be safe
+        if (!synced) {
+            logger.warn("PDT count not yet synced with Alpaca — blocking sell to be safe");
             return false;
         }
-        
-        logger.info("Day trade allowed - Count: {}/{}", dayTradeCount + 1, MAX_DAY_TRADES);
+
+        int dayTradeCount = getDayTradeCount();
+
+        if (dayTradeCount >= MAX_DAY_TRADES) {
+            logger.warn("PDT PROTECTION: Blocking trade — {}/{} day trades used (Alpaca count)",
+                dayTradeCount, MAX_DAY_TRADES);
+            return false;
+        }
+
+        if (dayTradeCount == MAX_DAY_TRADES - 1) {
+            logger.warn("PDT WARNING: This would be day trade {}/{} — last one available!",
+                dayTradeCount + 1, MAX_DAY_TRADES);
+        }
+
+        logger.info("Day trade allowed - Count: {}/{} (Alpaca source)", dayTradeCount + 1, MAX_DAY_TRADES);
         return true;
     }
-    
-    /**
-     * Check if selling this symbol would be a day trade.
-     * A day trade is buying and selling the same symbol on the same day.
-     */
-    private boolean wouldBeDayTrade(String symbol) {
-        LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
-        return database.hasBuyToday(symbol, today);
-    }
-    
+
     /**
      * Sync day trade count from Alpaca's /v2/account endpoint.
-     * This ensures our local tracking doesn't diverge from the broker's count.
+     * This is the sole source of truth for PDT decisions.
      */
     public void syncWithAlpaca(int alpacaCount) {
-        this.alpacaDayTradeCount = alpacaCount;
-        int localCount = database.getDayTradesInLastNBusinessDays(BUSINESS_DAYS_WINDOW);
-        if (alpacaCount != localCount) {
-            logger.warn("PDT count mismatch: Alpaca={}, Local DB={}. Using higher value.",
-                alpacaCount, localCount);
+        if (!synced) {
+            logger.info("PDT synced with Alpaca: daytrade_count={}", alpacaCount);
+        } else if (alpacaCount != this.alpacaDayTradeCount) {
+            logger.info("PDT count updated from Alpaca: {} → {}", this.alpacaDayTradeCount, alpacaCount);
         }
-        dayTradeCountCache.clear(); // Invalidate cache after sync
+        this.alpacaDayTradeCount = alpacaCount;
+        this.synced = true;
     }
 
     /**
      * Get the count of day trades in the last 5 business days.
-     * Uses the higher of Alpaca's server count and local database count.
+     * Uses Alpaca's server count as the sole source of truth.
      */
     public int getDayTradeCount() {
-        // Check cache first
-        String cacheKey = LocalDate.now(ZoneId.of("America/New_York")).toString();
-        if (dayTradeCountCache.containsKey(cacheKey)) {
-            return dayTradeCountCache.get(cacheKey);
-        }
-
-        // Calculate day trades from local DB
-        int localCount = database.getDayTradesInLastNBusinessDays(BUSINESS_DAYS_WINDOW);
-
-        // Use higher of Alpaca and local to be safe
-        int count = alpacaDayTradeCount >= 0 ? Math.max(localCount, alpacaDayTradeCount) : localCount;
-
-        // Cache the result
-        dayTradeCountCache.clear(); // Clear old cache
-        dayTradeCountCache.put(cacheKey, count);
-
-        return count;
+        return alpacaDayTradeCount;
     }
-    
+
     /**
-     * Record a day trade for tracking purposes.
+     * Record a day trade for tracking purposes (local logging only).
      */
     public void recordDayTrade(String symbol) {
-        logger.info("📊 Day trade recorded for {}", symbol);
-        dayTradeCountCache.clear(); // Invalidate cache
+        logger.info("Day trade recorded for {} (Alpaca count: {})", symbol, alpacaDayTradeCount);
     }
-    
+
     /**
      * Get PDT status summary for dashboard.
      */
@@ -143,22 +112,26 @@ public final class PDTProtection {
         if (!enabled) {
             return "PDT Protection: Disabled";
         }
-        
+
         if (accountEquity >= 25000) {
             return "PDT Protection: Not Applicable (Equity >= $25,000)";
         }
-        
+
+        if (!synced) {
+            return "PDT Protection: Waiting for Alpaca sync...";
+        }
+
         int count = getDayTradeCount();
         int remaining = MAX_DAY_TRADES - count;
-        
+
         if (remaining <= 0) {
-            return String.format("PDT Protection: ACTIVE - No day trades available (used %d/%d)", 
+            return String.format("PDT Protection: ACTIVE - No day trades available (used %d/%d)",
                                count, MAX_DAY_TRADES);
         } else if (remaining == 1) {
-            return String.format("⚠️ PDT Warning: %d day trade remaining (used %d/%d)", 
+            return String.format("⚠️ PDT Warning: %d day trade remaining (used %d/%d)",
                                remaining, count, MAX_DAY_TRADES);
         } else {
-            return String.format("PDT Protection: OK - %d day trades available (used %d/%d)", 
+            return String.format("PDT Protection: OK - %d day trades available (used %d/%d)",
                                remaining, count, MAX_DAY_TRADES);
         }
     }

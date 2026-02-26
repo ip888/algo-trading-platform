@@ -47,12 +47,14 @@ public class ResilientAlpacaClient {
         
         // Circuit Breaker: Open after 50% failures in 10 requests
         // AUTO-RECOVERY: Wait only 15 seconds before trying again (faster for trading)
+        // PDTRejectedException is a business-logic rejection, NOT an infrastructure failure
         var cbConfig = CircuitBreakerConfig.custom()
             .failureRateThreshold(50)
             .waitDurationInOpenState(Duration.ofSeconds(15))  // Faster recovery for trading
             .slidingWindowSize(10)
             .permittedNumberOfCallsInHalfOpenState(5)  // More test calls in half-open
             .automaticTransitionFromOpenToHalfOpenEnabled(true)  // Auto-transition!
+            .ignoreExceptions(PDTRejectedException.class)  // PDT is not an infra failure
             .build();
         this.circuitBreaker = CircuitBreaker.of("alpaca-api", cbConfig);
         
@@ -66,10 +68,12 @@ public class ResilientAlpacaClient {
         this.rateLimiter = RateLimiter.of("alpaca-api", rlConfig);
         
         // Retry: 3 attempts with exponential backoff
+        // Don't retry PDT rejections (business logic, retrying won't help)
         var retryConfig = RetryConfig.custom()
             .maxAttempts(3)
             .waitDuration(Duration.ofMillis(500))
             .retryExceptions(Exception.class)
+            .ignoreExceptions(PDTRejectedException.class)
             .build();
         this.retry = Retry.of("alpaca-api", retryConfig);
         
@@ -167,11 +171,23 @@ public class ResilientAlpacaClient {
                 return result;
                 
             } catch (Exception e) {
+                // Let PDTRejectedException propagate directly (not an infra failure)
+                if (e instanceof PDTRejectedException) {
+                    throw e;
+                }
+                Throwable cause = e.getCause();
+                while (cause != null) {
+                    if (cause instanceof PDTRejectedException) {
+                        throw (PDTRejectedException) cause;
+                    }
+                    cause = cause.getCause();
+                }
+
                 // Record failure
                 meterRegistry.counter("alpaca.api.failure",
                     "operation", operation,
                     "error", e.getClass().getSimpleName()).increment();
-                
+
                 logger.error("API call failed after retries: {}", operation, e);
                 throw new RuntimeException("Alpaca API call failed: " + operation, e);
             }
@@ -210,12 +226,14 @@ public class ResilientAlpacaClient {
         });
     }
     
-    public void placeOrder(String symbol, double qty, String side, String type, 
+    public void placeOrder(String symbol, double qty, String side, String type,
                           String timeInForce, Double limitPrice) {
         executeResilient("placeOrder", () -> {
             try {
                 delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
                 return null;
+            } catch (PDTRejectedException e) {
+                throw e; // Propagate directly — not an infra failure
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -280,6 +298,18 @@ public class ResilientAlpacaClient {
             delegate.cancelOrder(orderId);
             return null;
         });
+    }
+
+    /**
+     * Place a sell order bypassing the circuit breaker.
+     * Used for critical protective exits (stop-loss, emergency) that must execute
+     * even when the circuit breaker is open due to other failures.
+     * Still respects rate limiting.
+     */
+    public void placeOrderDirect(String symbol, double qty, String side, String type,
+                                 String timeInForce, Double limitPrice) {
+        logger.info("DIRECT ORDER (bypass circuit breaker): {} {} {} qty={}", side, type, symbol, qty);
+        delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
     }
     
     /**

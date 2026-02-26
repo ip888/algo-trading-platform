@@ -536,6 +536,7 @@ public final class AlpacaClient {
             } else if (response.statusCode() == 403 && response.body() != null
                        && response.body().contains("pattern day trading")) {
                 logger.warn("PDT REJECTED: {}", errorMsg);
+                throw new PDTRejectedException(errorMsg);
             } else {
                 logger.error(errorMsg);
             }

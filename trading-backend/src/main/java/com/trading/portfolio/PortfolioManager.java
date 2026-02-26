@@ -106,60 +106,59 @@ public final class PortfolioManager {
     
     
     /**
-     * Sync portfolio with Alpaca positions.
-     * Only loads positions that match this portfolio's target symbols.
-     */
-    /**
-     * Sync portfolio with Alpaca positions.
-     * Only loads positions that match this portfolio's target symbols.
-     * 
+     * Sync portfolio with ALL Alpaca positions on startup.
+     * Tracks every existing position regardless of current target symbol list,
+     * preventing "untracked" positions from being sold on deploy.
+     *
      * @param client AlpacaClient instance
      * @param defaultTpPercent Default Take Profit percent (e.g., 4.0) if not known
      * @param defaultSlPercent Default Stop Loss percent (e.g., 2.0) if not known
      */
     public void syncWithAlpaca(com.trading.api.AlpacaClient client, double defaultTpPercent, double defaultSlPercent) {
         try {
-            logger.info("Syncing portfolio with Alpaca positions (Default TP: {}%, SL: {}%)", defaultTpPercent, defaultSlPercent);
+            logger.info("Syncing portfolio with ALL Alpaca positions (Default TP: {}%, SL: {}%)", defaultTpPercent, defaultSlPercent);
             var accountPositions = client.getPositions();
-            int totalAlpacaPositions = accountPositions.size();
-            
+
             int syncedCount = 0;
             for (var pos : accountPositions) {
                 String symbol = pos.symbol();
-                
-                // Only sync positions for symbols in our target list
-                if (!symbols.contains(symbol)) {
-                    logger.debug("Skipping position {} - not in target symbols", symbol);
-                    continue;
-                }
-                
                 double entryPrice = pos.avgEntryPrice();
                 double qty = pos.quantity();
-                
+
+                if (entryPrice <= 0 || qty <= 0) {
+                    logger.debug("Skipping invalid position: {} (entry={}, qty={})", symbol, entryPrice, qty);
+                    continue;
+                }
+
                 // Use configured percentages for initial targets
                 double estimatedTP = entryPrice * (1.0 + (defaultTpPercent / 100.0));
                 double estimatedSL = entryPrice * (1.0 - (defaultSlPercent / 100.0));
-                
+
+                // Use a past entry time so hold-time restrictions don't block sells
+                // Existing positions have already been held; use 24h ago as safe default
+                var estimatedEntryTime = java.time.Instant.now().minus(java.time.Duration.ofHours(24));
+
                 var tradePos = new TradePosition(
                     symbol,
                     entryPrice,
                     qty,
                     estimatedSL,
                     estimatedTP,
-                    java.time.Instant.now()
+                    estimatedEntryTime
                 );
-                
+
                 positions.put(symbol, tradePos);
                 syncedCount++;
-                
-                logger.info("Synced position: {} - {} shares @ ${} (Target: ${}, Stop: ${})", 
-                    symbol, qty, String.format("%.2f", entryPrice), 
-                    String.format("%.2f", estimatedTP), String.format("%.2f", estimatedSL));
+
+                boolean inTargetList = symbols.contains(symbol);
+                logger.info("Synced position: {} - {} shares @ ${} (TP: ${}, SL: ${}){}",
+                    symbol, qty, String.format("%.2f", entryPrice),
+                    String.format("%.2f", estimatedTP), String.format("%.2f", estimatedSL),
+                    inTargetList ? "" : " [NOT in current target symbols]");
             }
-            
-            logger.info("Portfolio sync complete: {} positions loaded (filtered from {} total)", 
-                syncedCount, totalAlpacaPositions);
-            
+
+            logger.info("Portfolio sync complete: {} positions loaded from Alpaca", syncedCount);
+
         } catch (Exception e) {
             logger.error("Failed to sync portfolio with Alpaca", e);
         }

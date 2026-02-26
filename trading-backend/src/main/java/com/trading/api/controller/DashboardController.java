@@ -116,6 +116,10 @@ public final class DashboardController {
         app.get("/api/trades/export/json", this::exportTradesJson);
         app.get("/api/trades/export/csv", this::exportTradesCsv);
 
+        // Diagnostic: Alpaca order history (bypasses local DB)
+        app.get("/api/orders/history", this::getOrderHistory);
+        app.get("/api/orders/fills", this::getOrderFills);
+
         // Backtesting endpoint
         app.get("/api/backtest", this::runBacktest);
     }
@@ -936,6 +940,37 @@ public final class DashboardController {
         ctx.header("Content-Type", "text/csv");
         ctx.header("Content-Disposition", "attachment; filename=\"trades.csv\"");
         ctx.result(csv);
+    }
+
+    /**
+     * GET /api/orders/history?symbol=GOOGL&limit=50
+     * Returns Alpaca order history directly (bypasses local DB).
+     */
+    private void getOrderHistory(Context ctx) {
+        String symbol = ctx.queryParam("symbol");
+        int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
+        try {
+            var client = new com.trading.api.AlpacaClient(config);
+            var orders = client.getOrderHistory(symbol, limit);
+            ctx.json(orders);
+        } catch (Exception e) {
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/orders/fills?limit=50
+     * Returns recent fill activities from Alpaca.
+     */
+    private void getOrderFills(Context ctx) {
+        int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
+        try {
+            var client = new com.trading.api.AlpacaClient(config);
+            var fills = client.getAccountActivities("FILL", limit);
+            ctx.json(fills);
+        } catch (Exception e) {
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
     }
 
     /**

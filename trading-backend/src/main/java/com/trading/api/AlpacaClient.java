@@ -195,6 +195,38 @@ public final class AlpacaClient {
         }
     }
 
+    /**
+     * Get order history for diagnostics. Returns up to 50 recent orders for a symbol,
+     * or all symbols if symbol is null.
+     */
+    public JsonNode getOrderHistory(String symbol, int limit) {
+        try {
+            var url = config.baseUrl() + "/v2/orders?status=all&limit=" + limit + "&direction=desc";
+            if (symbol != null && !symbol.isEmpty()) {
+                url += "&symbols=" + symbol;
+            }
+            var response = sendRequest(url, "GET");
+            return objectMapper.readTree(response);
+        } catch (Exception e) {
+            logger.error("Failed to get order history", e);
+            return objectMapper.createArrayNode();
+        }
+    }
+
+    /**
+     * Get account activities (fills, dividends, etc.) for diagnostics.
+     */
+    public JsonNode getAccountActivities(String activityType, int limit) {
+        try {
+            var url = config.baseUrl() + "/v2/account/activities/" + activityType + "?direction=desc&page_size=" + limit;
+            var response = sendRequest(url, "GET");
+            return objectMapper.readTree(response);
+        } catch (Exception e) {
+            logger.error("Failed to get account activities", e);
+            return objectMapper.createArrayNode();
+        }
+    }
+
     public void cancelOrder(String orderId) {
         try {
             logger.info("Canceling order {}", orderId);

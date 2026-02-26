@@ -96,7 +96,8 @@ public class ProfileManager implements Runnable {
     private double todayPnL = 0.0;
     private java.time.LocalDate lastResetDate = java.time.LocalDate.now();
     
-    // Re-entry cooldown after stop loss (prevent immediate re-buy after SL)
+    // Re-entry cooldown after ANY sell (stop loss, take profit, risk exit, etc.)
+    // Prevents the buy-sell-buy churn pattern after deploys and signal flips
     // Key = symbol, Value = timestamp when cooldown expires
     private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -309,13 +310,18 @@ public class ProfileManager implements Runnable {
         // ========== CHECK ALL ALPACA POSITIONS FOR RISK EXITS ==========
         // CRITICAL: Run BEFORE portfolio halt so individual stop-losses still fire
         // even when the portfolio-level stop loss has been triggered
-        checkAllPositionsForRiskExits(profilePrefix);
+        // Only run during market hours — orders with extended_hours=false can't fill pre-market
+        if (marketHoursFilter.isMarketOpen()) {
+            checkAllPositionsForRiskExits(profilePrefix);
 
-        // ========== CHECK ALL POSITIONS FOR PROFIT TARGETS ==========
-        // CRITICAL: Check ALL positions for take-profit/stop-loss, not just current targets
-        // This ensures positions from previous regimes are still monitored for exits
-        // Runs before portfolio halt to guarantee protective exits always execute
-        checkAllPositionsForProfitTargets(profilePrefix);
+            // ========== CHECK ALL POSITIONS FOR PROFIT TARGETS ==========
+            // CRITICAL: Check ALL positions for take-profit/stop-loss, not just current targets
+            // This ensures positions from previous regimes are still monitored for exits
+            // Runs before portfolio halt to guarantee protective exits always execute
+            checkAllPositionsForProfitTargets(profilePrefix);
+        } else {
+            logger.debug("{} Skipping risk/profit checks — market closed (orders can't fill)", profilePrefix);
+        }
 
         // ========== PORTFOLIO-LEVEL STOP LOSS CHECK ==========
         // Halts NEW entries only — protective exits above have already run
@@ -1170,7 +1176,12 @@ public class ProfileManager implements Runnable {
         
         // Update portfolio
         portfolio.setPosition(symbol, Optional.empty());
-        
+
+        // Set re-entry cooldown to prevent immediate re-buy (30 minutes)
+        long cooldownMs = 30 * 60 * 1000L;
+        stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
+        logger.info("{} {} placed on 30-minute re-entry cooldown after sell", profilePrefix, symbol);
+
         // Close trade in database
         database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl);
         
@@ -1282,6 +1293,8 @@ public class ProfileManager implements Runnable {
                             } else {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
                                 portfolio.setPosition(symbol, Optional.empty());
+                                // Set re-entry cooldown after full exit
+                                stopLossCooldowns.put(symbol, System.currentTimeMillis() + 30 * 60 * 1000L);
                             }
                             
                             TradingWebSocketHandler.broadcastActivity(
@@ -1400,6 +1413,8 @@ public class ProfileManager implements Runnable {
                         // Use direct order for max-loss exit (bypass circuit breaker - critical protective exit)
                         client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                         portfolio.setPosition(symbol, Optional.empty());
+                        // Set re-entry cooldown after max-loss exit
+                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + 30 * 60 * 1000L);
                         logger.info("{} ✅ Max loss exit order placed for untracked position {}",
                             profilePrefix, symbol);
                         
@@ -1936,6 +1951,9 @@ public class ProfileManager implements Runnable {
                                 profile.name(), symbol, currentPrice, pnlPercent, pnlDollars),
                             "SUCCESS"
                         );
+
+                        // Set re-entry cooldown after take-profit exit
+                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + 30 * 60 * 1000L);
 
                         // Reset consecutive SL counter on successful take-profit
                         consecutiveStopLosses.remove(symbol);

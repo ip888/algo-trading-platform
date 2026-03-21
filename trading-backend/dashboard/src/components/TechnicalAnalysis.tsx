@@ -1,36 +1,87 @@
-import { useTradingStore } from '../store/tradingStore';
 import { useEffect, useState } from 'react';
+import { useTradingStore } from '../store/tradingStore';
 import { CONFIG } from '../config';
 
+interface SymbolData {
+  symbol: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  score: number;
+  trend: string;
+  recommendation?: string;
+}
+
 export const TechnicalAnalysis = () => {
-  const store = useTradingStore();
-  const marketData = store.marketData;
-  const systemStatus = store.systemStatus;
-  const [regimeData, setRegimeData] = useState<{ vix: number; regime: string } | null>(null);
+  const [symbols, setSymbols] = useState<SymbolData[]>([]);
+  const [vix, setVix] = useState(0);
+  const [regime, setRegime] = useState('ANALYZING');
+  const [loading, setLoading] = useState(true);
+
+  // Live WS overlay
+  const { marketData, systemStatus } = useTradingStore();
 
   useEffect(() => {
-    const fetchRegime = async () => {
+    const fetchData = async () => {
       try {
-        const res = await fetch(`${CONFIG.API_BASE_URL}/api/market/regime`);
-        if (res.ok) {
-          const data = await res.json();
-          setRegimeData({ vix: data.vix || 0, regime: data.regime || 'NEUTRAL' });
+        const [watchRes, regimeRes] = await Promise.all([
+          fetch(`${CONFIG.API_BASE_URL}/api/watchlist`),
+          fetch(`${CONFIG.API_BASE_URL}/api/market/regime`),
+        ]);
+
+        if (watchRes.ok) {
+          const data = await watchRes.json();
+          const list: SymbolData[] = (data.watchlist || []).map((item: any) => ({
+            symbol: item.symbol,
+            price: item.price || 0,
+            change: item.change || 0,
+            changePercent: item.changePercent || 0,
+            score: item.score || 50,
+            trend: item.trend || 'NEUTRAL',
+            recommendation: undefined,
+          }));
+          setSymbols(list);
+        }
+
+        if (regimeRes.ok) {
+          const r = await regimeRes.json();
+          setVix(r.vix || 0);
+          setRegime(r.regime || r.trend || 'NEUTRAL');
         }
       } catch (e) {
-        console.error('Failed to fetch regime', e);
+        console.error('TechnicalAnalysis fetch failed', e);
+      } finally {
+        setLoading(false);
       }
     };
 
-    fetchRegime();
-    const interval = setInterval(fetchRegime, 30000);
+    fetchData();
+    const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, []);
 
-  const vix = systemStatus?.vix || regimeData?.vix || 0;
-  const marketRegime = systemStatus?.marketTrend || regimeData?.regime || 'ANALYZING';
+  // Prefer live WS data when available
+  const displayVix = systemStatus?.vix || vix;
+  const displayRegime = systemStatus?.marketTrend || regime;
 
-  // Sort: BUY signals first, then SELL, then by score desc.
-  const topSymbols = Object.values(marketData)
+  // Merge live WS prices on top of REST baseline
+  const enriched = symbols.map(s => {
+    const live = marketData[s.symbol];
+    if (live && live.price > 0) {
+      return {
+        ...s,
+        price: live.price,
+        change: live.change,
+        changePercent: live.changePercent,
+        score: live.score || s.score,
+        trend: live.trend || s.trend,
+        recommendation: live.recommendation,
+      };
+    }
+    return s;
+  });
+
+  const topSymbols = [...enriched]
     .sort((a, b) => {
       const sigOrder = (r?: string) => r === 'BUY' ? 0 : r === 'SELL' ? 1 : 2;
       const sigDiff = sigOrder(a.recommendation) - sigOrder(b.recommendation);
@@ -39,8 +90,8 @@ export const TechnicalAnalysis = () => {
     })
     .slice(0, 10);
 
-  const vixColor = vix === 0 ? 'var(--text-dim)' : vix > 30 ? 'var(--neon-red)' : vix > 20 ? 'var(--neon-amber)' : 'var(--neon-green)';
-  const regimeColor = marketRegime.includes('BEAR') ? 'var(--neon-red)' : marketRegime.includes('BULL') ? 'var(--neon-green)' : 'var(--neon-cyan)';
+  const vixColor = displayVix === 0 ? 'var(--text-dim)' : displayVix > 30 ? 'var(--neon-red)' : displayVix > 20 ? 'var(--neon-amber)' : 'var(--neon-green)';
+  const regimeColor = displayRegime.includes('BEAR') ? 'var(--neon-red)' : displayRegime.includes('BULL') ? 'var(--neon-green)' : 'var(--neon-cyan)';
 
   return (
     <div className="panel technical-analysis">
@@ -50,19 +101,21 @@ export const TechnicalAnalysis = () => {
           <div>
             <span style={{ color: 'var(--text-dim)' }}>VIX: </span>
             <span style={{ fontWeight: 800, color: vixColor }}>
-              {vix === 0 ? '--.--' : vix.toFixed(2)}
+              {displayVix === 0 ? '--.--' : displayVix.toFixed(2)}
             </span>
           </div>
           <div>
             <span style={{ color: 'var(--text-dim)' }}>REGIME: </span>
-            <span style={{ fontWeight: 800, color: regimeColor }}>
-              {marketRegime}
-            </span>
+            <span style={{ fontWeight: 800, color: regimeColor }}>{displayRegime}</span>
           </div>
         </div>
       </div>
 
-      {topSymbols.length === 0 ? (
+      {loading ? (
+        <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
+          Loading signal matrix...
+        </div>
+      ) : topSymbols.length === 0 ? (
         <div className="scanning-state" style={{ padding: '30px', textAlign: 'center', color: 'var(--text-dim)', border: '1px dashed var(--text-muted)', borderRadius: 'var(--radius-sm)' }}>
           <p style={{ fontSize: '0.8rem' }}>🛰 SYNCING SIGNAL FEED...</p>
         </div>
@@ -79,19 +132,21 @@ export const TechnicalAnalysis = () => {
               </tr>
             </thead>
             <tbody>
-              {topSymbols.map((tech) => {
-                const chgPct = tech.changePercent ?? 0;
-                const hasPrice = tech.price > 0;
+              {topSymbols.map((s) => {
+                const chgPct = s.changePercent ?? 0;
+                const hasPrice = s.price > 0;
                 return (
-                  <tr key={tech.symbol}>
-                    <td className="font-bold">{tech.symbol}</td>
+                  <tr key={s.symbol}>
+                    <td className="font-bold">{s.symbol}</td>
                     <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
-                      {hasPrice ? `$${tech.price.toFixed(2)}` : <span style={{ color: 'var(--text-dim)' }}>---</span>}
+                      {hasPrice
+                        ? `$${s.price.toFixed(2)}`
+                        : <span style={{ color: 'var(--text-dim)' }}>---</span>}
                     </td>
                     <td style={{ textAlign: 'right' }}>
                       {chgPct !== 0 ? (
-                        <span className={tech.change >= 0 ? 'positive' : 'negative'}>
-                          {tech.change >= 0 ? '▲' : '▼'} {Math.abs(chgPct).toFixed(2)}%
+                        <span className={s.change >= 0 ? 'positive' : 'negative'}>
+                          {s.change >= 0 ? '▲' : '▼'} {Math.abs(chgPct).toFixed(2)}%
                         </span>
                       ) : (
                         <span style={{ color: 'var(--text-dim)' }}>--</span>
@@ -101,19 +156,19 @@ export const TechnicalAnalysis = () => {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <div style={{ flex: 1, minWidth: '50px', height: '3px', background: 'var(--bg-deep)', borderRadius: '10px', overflow: 'hidden' }}>
                           <div style={{
-                            width: `${Math.min(100, Math.max(0, tech.score))}%`,
+                            width: `${Math.min(100, Math.max(0, s.score))}%`,
                             height: '100%',
-                            background: tech.score > 70 ? 'var(--neon-green)' : tech.score < 30 ? 'var(--neon-red)' : 'var(--neon-cyan)'
+                            background: s.score > 70 ? 'var(--neon-green)' : s.score < 30 ? 'var(--neon-red)' : 'var(--neon-cyan)'
                           }} />
                         </div>
-                        <span style={{ fontSize: '9px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-dim)', minWidth: '28px' }}>
-                          {tech.score.toFixed(0)}
+                        <span style={{ fontSize: '9px', fontWeight: 700, color: 'var(--text-dim)', minWidth: '22px' }}>
+                          {s.score.toFixed(0)}
                         </span>
                       </div>
                     </td>
                     <td style={{ textAlign: 'center' }}>
-                      <span className={`status-tag ${tech.recommendation === 'BUY' ? 'status-buy' : (tech.recommendation === 'SELL' ? 'status-sell' : 'status-hold')}`}>
-                        {tech.recommendation || tech.trend || 'HOLD'}
+                      <span className={`status-tag ${s.recommendation === 'BUY' ? 'status-buy' : s.recommendation === 'SELL' ? 'status-sell' : 'status-hold'}`}>
+                        {s.recommendation || s.trend || 'HOLD'}
                       </span>
                     </td>
                   </tr>

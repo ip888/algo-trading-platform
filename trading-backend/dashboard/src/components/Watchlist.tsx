@@ -1,67 +1,75 @@
-import { useTradingStore } from '../store/tradingStore';
 import { useEffect, useState } from 'react';
+import { useTradingStore } from '../store/tradingStore';
 import { CONFIG } from '../config';
 
 interface WatchlistItem {
   symbol: string;
-  price?: number;
-  type?: string;
-  change?: number;
-  changePercent?: number;
-  score?: number;
-  trend?: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  score: number;
+  trend: string;
+  strategy: string;
+  recommendation?: string;
   regime?: string;
 }
 
 export const Watchlist = () => {
-  const { marketData, updateMarketData } = useTradingStore();
+  const [items, setItems] = useState<WatchlistItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Merge live WebSocket market data on top of REST baseline
+  const { marketData } = useTradingStore();
 
   useEffect(() => {
     const fetchWatchlist = async () => {
       try {
         const res = await fetch(`${CONFIG.API_BASE_URL}/api/watchlist`);
-        if (res.ok) {
-          const data = await res.json();
-          data.watchlist?.forEach((item: WatchlistItem) => {
-            // Read live store state at call time (not stale closure) to avoid overwriting WS prices
-            const live = useTradingStore.getState().marketData[item.symbol];
-            if (!live || live.price === 0) {
-              updateMarketData(item.symbol, {
-                symbol: item.symbol,
-                price: item.price || 0,
-                change: item.change || 0,
-                changePercent: item.changePercent || 0,
-                volume: 0,
-                trend: item.trend || 'NEUTRAL',
-                score: item.score || 50,
-                strategy: 'Stock',
-                regime: item.regime,
-              });
-            }
-          });
-        }
-      } catch (e) {
-        console.error('Failed to fetch watchlist', e);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const list: WatchlistItem[] = (data.watchlist || []).map((item: any) => ({
+          symbol: item.symbol,
+          price: item.price || 0,
+          change: item.change || 0,
+          changePercent: item.changePercent || 0,
+          score: item.score || 50,
+          trend: item.trend || 'NEUTRAL',
+          strategy: 'Stock',
+          recommendation: undefined,
+          regime: item.regime,
+        }));
+        setItems(list);
+        setError(null);
+      } catch (e: any) {
+        setError(e.message);
       } finally {
         setLoading(false);
       }
     };
 
     fetchWatchlist();
-    // Refresh symbol list every 60s (won't overwrite live WS prices)
     const interval = setInterval(fetchWatchlist, 60000);
     return () => clearInterval(interval);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
-  const assets = Object.values(marketData || {});
-
-  if (assets.length === 0) {
+  if (loading) {
     return (
       <div className="panel" style={{ marginTop: '15px' }}>
         <h3>🔭 Active Watchlist</h3>
         <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
-          {loading ? 'Loading watchlist...' : 'Waiting for market data...'}
+          Loading watchlist...
+        </div>
+      </div>
+    );
+  }
+
+  if (error || items.length === 0) {
+    return (
+      <div className="panel" style={{ marginTop: '15px' }}>
+        <h3>🔭 Active Watchlist</h3>
+        <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
+          {error ? `⚠ ${error}` : 'No symbols configured'}
         </div>
       </div>
     );
@@ -69,12 +77,29 @@ export const Watchlist = () => {
 
   const pinned = ['SPY', 'QQQ', 'IWM', 'DIA'];
 
-  const sortedAssets = [...assets].sort((a, b) => {
+  // Overlay live WS prices on REST baseline
+  const enriched = items.map(item => {
+    const live = marketData[item.symbol];
+    if (live && live.price > 0) {
+      return {
+        ...item,
+        price: live.price,
+        change: live.change,
+        changePercent: live.changePercent,
+        score: live.score || item.score,
+        trend: live.trend || item.trend,
+        recommendation: live.recommendation,
+        strategy: live.strategy || item.strategy,
+      };
+    }
+    return item;
+  });
+
+  const sorted = [...enriched].sort((a, b) => {
     const aPinned = pinned.includes(a.symbol);
     const bPinned = pinned.includes(b.symbol);
     if (aPinned && !bPinned) return -1;
     if (!aPinned && bPinned) return 1;
-    // BUY signals first, SELL second, HOLD last
     const sigOrder = (r?: string) => r === 'BUY' ? 0 : r === 'SELL' ? 1 : 2;
     const sigDiff = sigOrder(a.recommendation) - sigOrder(b.recommendation);
     if (sigDiff !== 0) return sigDiff;
@@ -83,7 +108,12 @@ export const Watchlist = () => {
 
   return (
     <div className="panel" style={{ marginTop: '15px', border: 'none', boxShadow: 'none' }}>
-      <h3>🔭 Active Watchlist</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+        <h3 style={{ margin: 0 }}>🔭 Active Watchlist</h3>
+        <span style={{ fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
+          {sorted.length} symbols
+        </span>
+      </div>
       <div className="table-container" style={{ maxHeight: '300px', overflowY: 'auto' }}>
         <table className="watchlist-table" style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
           <thead>
@@ -96,14 +126,16 @@ export const Watchlist = () => {
             </tr>
           </thead>
           <tbody>
-            {sortedAssets.map((data) => {
-              const hasLivePrice = data.price > 0;
-              const chgPct = data.changePercent ?? 0;
+            {sorted.map((item) => {
+              const hasLivePrice = item.price > 0;
+              const chgPct = item.changePercent ?? 0;
               return (
-                <tr key={data.symbol} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <td style={{ padding: '8px', fontWeight: 600 }}>{data.symbol}</td>
+                <tr key={item.symbol} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                  <td style={{ padding: '8px', fontWeight: 600 }}>{item.symbol}</td>
                   <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'monospace' }}>
-                    {hasLivePrice ? `$${data.price.toFixed(2)}` : <span style={{ color: 'var(--text-dim)' }}>---</span>}
+                    {hasLivePrice
+                      ? `$${item.price.toFixed(2)}`
+                      : <span style={{ color: 'var(--text-dim)' }}>---</span>}
                   </td>
                   <td style={{ padding: '8px', textAlign: 'right' }}>
                     {chgPct !== 0 ? (
@@ -115,12 +147,12 @@ export const Watchlist = () => {
                     )}
                   </td>
                   <td style={{ padding: '8px' }}>
-                    <span className={`status-tag ${data.recommendation === 'BUY' ? 'status-buy' : (data.recommendation === 'SELL' ? 'status-sell' : 'status-hold')}`}>
-                      {data.recommendation || 'HOLD'}
+                    <span className={`status-tag ${item.recommendation === 'BUY' ? 'status-buy' : item.recommendation === 'SELL' ? 'status-sell' : 'status-hold'}`}>
+                      {item.recommendation || 'HOLD'}
                     </span>
                   </td>
                   <td style={{ padding: '8px', color: 'var(--text-dim)', fontSize: '11px' }}>
-                    {data.strategy || 'Scanning'}
+                    {item.strategy || 'Scanning'}
                   </td>
                 </tr>
               );

@@ -1087,7 +1087,7 @@ public final class DashboardController {
             long winRatePct = recentTrades.isEmpty() ? 0 : (wins * 100) / recentTrades.size();
             checks.add(Map.of(
                 "name", "Recent Win Rate",
-                "status", recentTrades.isEmpty() ? "YELLOW" : winRatePct >= 50 ? "GREEN" : winRatePct >= 30 ? "YELLOW" : "RED",
+                "status", recentTrades.isEmpty() ? "GREEN" : winRatePct >= 50 ? "GREEN" : winRatePct >= 30 ? "YELLOW" : "RED",
                 "detail", recentTrades.isEmpty()
                     ? "No completed trades yet"
                     : wins + "W / " + losses + "L in last " + recentTrades.size() + " trades (" + winRatePct + "%)"

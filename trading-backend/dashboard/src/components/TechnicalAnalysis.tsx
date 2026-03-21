@@ -29,9 +29,8 @@ export const TechnicalAnalysis = () => {
   const vix = systemStatus?.vix || regimeData?.vix || 0;
   const marketRegime = systemStatus?.marketTrend || regimeData?.regime || 'ANALYZING';
 
-  // Sort: BUY signals first, then SELL, then by score desc. Filter out zero-price entries.
+  // Sort: BUY signals first, then SELL, then by score desc.
   const topSymbols = Object.values(marketData)
-    .filter(d => d.price > 0 || d.score > 50 || d.recommendation)
     .sort((a, b) => {
       const sigOrder = (r?: string) => r === 'BUY' ? 0 : r === 'SELL' ? 1 : 2;
       const sigDiff = sigOrder(a.recommendation) - sigOrder(b.recommendation);

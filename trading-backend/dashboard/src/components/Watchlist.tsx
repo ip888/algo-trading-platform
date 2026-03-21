@@ -15,19 +15,18 @@ interface WatchlistItem {
 
 export const Watchlist = () => {
   const { marketData, updateMarketData } = useTradingStore();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchWatchlist = async () => {
-      // Only show loading spinner on first load
-      if (Object.keys(marketData).length === 0) setLoading(true);
       try {
         const res = await fetch(`${CONFIG.API_BASE_URL}/api/watchlist`);
         if (res.ok) {
           const data = await res.json();
           data.watchlist?.forEach((item: WatchlistItem) => {
-            // Only populate if no live WS data for this symbol yet
-            if (!marketData[item.symbol] || marketData[item.symbol].price === 0) {
+            // Read live store state at call time (not stale closure) to avoid overwriting WS prices
+            const live = useTradingStore.getState().marketData[item.symbol];
+            if (!live || live.price === 0) {
               updateMarketData(item.symbol, {
                 symbol: item.symbol,
                 price: item.price || 0,
@@ -50,7 +49,7 @@ export const Watchlist = () => {
     };
 
     fetchWatchlist();
-    // Refresh every 60s — but don't put marketData in deps to avoid interval spam
+    // Refresh symbol list every 60s (won't overwrite live WS prices)
     const interval = setInterval(fetchWatchlist, 60000);
     return () => clearInterval(interval);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

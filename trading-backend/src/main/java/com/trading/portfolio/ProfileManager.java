@@ -2240,4 +2240,24 @@ public class ProfileManager implements Runnable {
         // Full implementation requires historical price data API
         return 0.1;
     }
+
+    /**
+     * Returns active cooldowns for the dashboard behavior monitor.
+     * Key = symbol, Value = expiry timestamp (epoch ms).
+     */
+    public static java.util.Map<String, Long> getActiveCooldowns() {
+        long now = System.currentTimeMillis();
+        var result = new java.util.LinkedHashMap<String, Long>();
+        stopLossCooldowns.forEach((symbol, expiresAt) -> {
+            if (expiresAt > now) result.put(symbol, expiresAt);
+        });
+        return result;
+    }
+
+    /**
+     * Returns consecutive stop-loss counts per symbol for the dashboard.
+     */
+    public static java.util.Map<String, Integer> getConsecutiveStopLosses() {
+        return java.util.Collections.unmodifiableMap(consecutiveStopLosses);
+    }
 }

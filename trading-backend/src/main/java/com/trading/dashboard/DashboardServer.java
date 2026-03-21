@@ -36,7 +36,7 @@ public final class DashboardServer {
         var tradeAnalytics = new TradeAnalytics();
         
         this.controller = new DashboardController(database, portfolio, marketAnalyzer,
-            marketHoursFilter, volatilityFilter, config, tradeAnalytics);
+            marketHoursFilter, volatilityFilter, config, tradeAnalytics, alpacaClient);
         
         this.healthCheckService = new HealthCheckService(alpacaClient, database);
         

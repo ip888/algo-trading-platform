@@ -16,6 +16,7 @@ import { PositionsTable } from './components/PositionsTable';
 import { Watchlist } from './components/Watchlist';
 import { SystemStatus } from './components/SystemStatus';
 import { SafetyStatus } from './components/SafetyStatus';
+import { BotBehaviorMonitor } from './components/BotBehaviorMonitor';
 import { BacktestDashboard } from './components/BacktestDashboard';
 import SmartFeaturesPanel from './components/SmartFeaturesPanel';
 import OperationalEventsPanel from './components/OperationalEventsPanel';
@@ -142,6 +143,9 @@ function App() {
             <aside className="control-aside">
               <ComponentErrorBoundary name="Account Overview">
                 <AccountOverview />
+              </ComponentErrorBoundary>
+              <ComponentErrorBoundary name="Bot Behavior">
+                <BotBehaviorMonitor />
               </ComponentErrorBoundary>
               <ComponentErrorBoundary name="Profit Targets">
                 <ProfitTargetsMonitor />

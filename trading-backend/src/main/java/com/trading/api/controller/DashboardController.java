@@ -2,6 +2,7 @@ package com.trading.api.controller;
 
 import com.trading.analysis.MarketAnalyzer;
 import com.trading.analysis.MarketRegimeDetector.MarketRegime;
+import com.trading.api.ResilientAlpacaClient;
 import com.trading.backtest.BacktestEngine;
 import com.trading.config.Config;
 import com.trading.filters.MarketHoursFilter;
@@ -9,6 +10,7 @@ import com.trading.filters.VolatilityFilter;
 import com.trading.persistence.TradeDatabase;
 import com.trading.autonomous.TradeAnalytics;
 import com.trading.portfolio.PortfolioManager;
+import com.trading.portfolio.ProfileManager;
 import com.trading.validation.OrderRequest;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -17,7 +19,9 @@ import jakarta.validation.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -35,11 +39,19 @@ public final class DashboardController {
     private final VolatilityFilter volatilityFilter;
     private final Config config;
     private final TradeAnalytics tradeAnalytics;
-    
+    private final ResilientAlpacaClient alpacaClient;
+
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                               VolatilityFilter volatilityFilter, Config config,
                               TradeAnalytics tradeAnalytics) {
+        this(database, portfolio, marketAnalyzer, marketHoursFilter, volatilityFilter, config, tradeAnalytics, null);
+    }
+
+    public DashboardController(TradeDatabase database, PortfolioManager portfolio,
+                              MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
+                              VolatilityFilter volatilityFilter, Config config,
+                              TradeAnalytics tradeAnalytics, ResilientAlpacaClient alpacaClient) {
         this.database = database;
         this.portfolio = portfolio;
         this.marketAnalyzer = marketAnalyzer;
@@ -47,6 +59,7 @@ public final class DashboardController {
         this.volatilityFilter = volatilityFilter;
         this.config = config;
         this.tradeAnalytics = tradeAnalytics;
+        this.alpacaClient = alpacaClient;
     }
     
     /**
@@ -122,6 +135,9 @@ public final class DashboardController {
 
         // Backtesting endpoint
         app.get("/api/backtest", this::runBacktest);
+
+        // Bot behavior health monitor
+        app.get("/api/bot/behavior", this::getBotBehavior);
     }
     
     /**
@@ -982,6 +998,123 @@ public final class DashboardController {
      * Run a backtest on historical data.
      * GET /api/backtest?symbol=SPY&days=90&capital=1000&regime=RANGE_BOUND
      */
+    /**
+     * GET /api/bot/behavior
+     * Returns traffic-light health indicators for the trading bot.
+     */
+    private void getBotBehavior(Context ctx) {
+        try {
+            var response = new HashMap<String, Object>();
+
+            // --- Circuit Breaker ---
+            String cbState = alpacaClient != null ? alpacaClient.getCircuitBreakerState() : "UNKNOWN";
+            boolean circuitClosed = "CLOSED".equals(cbState);
+            response.put("circuitBreakerState", cbState);
+
+            // --- Active Cooldowns ---
+            var cooldowns = ProfileManager.getActiveCooldowns();
+            List<Map<String, Object>> cooldownList = new ArrayList<>();
+            long now = System.currentTimeMillis();
+            for (var entry : cooldowns.entrySet()) {
+                long remainingMs = entry.getValue() - now;
+                cooldownList.add(Map.of(
+                    "symbol", entry.getKey(),
+                    "expiresAt", entry.getValue(),
+                    "remainingMinutes", Math.max(0, remainingMs / 60000)
+                ));
+            }
+            response.put("activeCooldowns", cooldownList);
+
+            // --- Consecutive Stop Losses ---
+            var consecSL = ProfileManager.getConsecutiveStopLosses();
+            response.put("consecutiveStopLosses", consecSL);
+            int maxConsecSL = consecSL.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+
+            // --- Recent Trades (last 10) ---
+            var recentTrades = database.getRecentTrades(10);
+            long wins = recentTrades.stream()
+                .filter(t -> t.get("pnl") instanceof Number n && n.doubleValue() > 0)
+                .count();
+            long losses = recentTrades.stream()
+                .filter(t -> t.get("pnl") instanceof Number n && n.doubleValue() < 0)
+                .count();
+
+            // Detect churn: same symbol appearing as both buy+sell within last 10 trades repeatedly
+            var symbolCounts = new HashMap<String, Integer>();
+            for (var trade : recentTrades) {
+                String sym = String.valueOf(trade.get("symbol"));
+                symbolCounts.merge(sym, 1, Integer::sum);
+            }
+            boolean churning = symbolCounts.values().stream().anyMatch(count -> count >= 4);
+
+            response.put("recentTradesWins", wins);
+            response.put("recentTradeLosses", losses);
+            response.put("recentTradeSymbolCounts", symbolCounts);
+
+            // --- Health Checks (traffic-light signals) ---
+            var checks = new ArrayList<Map<String, Object>>();
+
+            checks.add(Map.of(
+                "name", "Circuit Breaker",
+                "status", circuitClosed ? "GREEN" : "RED",
+                "detail", circuitClosed ? "API circuit breaker CLOSED (normal)" : "Circuit breaker OPEN — API calls blocked (" + cbState + ")"
+            ));
+
+            checks.add(Map.of(
+                "name", "Stop-Loss Cooldowns",
+                "status", cooldownList.isEmpty() ? "GREEN" : "YELLOW",
+                "detail", cooldownList.isEmpty()
+                    ? "No symbols in cooldown"
+                    : cooldownList.size() + " symbol(s) cooling down: " + cooldownList.stream().map(c -> c.get("symbol")).toList()
+            ));
+
+            checks.add(Map.of(
+                "name", "Consecutive Stop Losses",
+                "status", maxConsecSL == 0 ? "GREEN" : maxConsecSL <= 2 ? "YELLOW" : "RED",
+                "detail", maxConsecSL == 0
+                    ? "No consecutive stop losses"
+                    : "Max consecutive SLs: " + maxConsecSL + " — " + (maxConsecSL > 2 ? "circuit breaker risk!" : "monitor closely")
+            ));
+
+            checks.add(Map.of(
+                "name", "Churn Detection",
+                "status", churning ? "RED" : "GREEN",
+                "detail", churning
+                    ? "Possible churn: " + symbolCounts.entrySet().stream().filter(e -> e.getValue() >= 4).map(Map.Entry::getKey).toList() + " traded 4+ times recently"
+                    : "No churn detected in last 10 trades"
+            ));
+
+            long winRatePct = recentTrades.isEmpty() ? 0 : (wins * 100) / recentTrades.size();
+            checks.add(Map.of(
+                "name", "Recent Win Rate",
+                "status", recentTrades.isEmpty() ? "YELLOW" : winRatePct >= 50 ? "GREEN" : winRatePct >= 30 ? "YELLOW" : "RED",
+                "detail", recentTrades.isEmpty()
+                    ? "No completed trades yet"
+                    : wins + "W / " + losses + "L in last " + recentTrades.size() + " trades (" + winRatePct + "%)"
+            ));
+
+            boolean emergencyActive = com.trading.bot.TradingBot.isEmergencyTriggered();
+            checks.add(Map.of(
+                "name", "Emergency Protocol",
+                "status", emergencyActive ? "RED" : "GREEN",
+                "detail", emergencyActive ? "EMERGENCY STOP ACTIVE — bot halted!" : "Normal — no emergency triggered"
+            ));
+
+            response.put("healthChecks", checks);
+
+            // Overall health summary
+            boolean allGreen = checks.stream().allMatch(c -> "GREEN".equals(c.get("status")));
+            boolean anyRed = checks.stream().anyMatch(c -> "RED".equals(c.get("status")));
+            response.put("overallStatus", allGreen ? "GREEN" : anyRed ? "RED" : "YELLOW");
+            response.put("timestamp", System.currentTimeMillis());
+
+            ctx.json(response);
+        } catch (Exception e) {
+            logger.error("Failed to get bot behavior", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
     private void runBacktest(Context ctx) {
         String symbol = ctx.queryParamAsClass("symbol", String.class).getOrDefault("SPY");
         int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(90);

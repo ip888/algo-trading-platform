@@ -92,15 +92,33 @@ public final class TradingBot {
         // Create trading profiles
         var mainProfile = TradingProfile.main(config);
         var expProfile = TradingProfile.experimental(config);
-        
-        double totalCapital = config.getInitialCapital();
+
+        // Fetch actual account equity from Alpaca instead of using the hardcoded INITIAL_CAPITAL.
+        // This lets the bot adapt to the real balance and scale up automatically as capital grows.
+        double totalCapital;
+        try {
+            var accountInit = client.getAccount();
+            totalCapital = accountInit.get("equity").asDouble();
+            if (totalCapital <= 0) {
+                totalCapital = config.getInitialCapital();
+                logger.warn("Alpaca equity was 0 or negative — using config fallback: ${}", totalCapital);
+            } else {
+                logger.info("✅ Using LIVE Alpaca account equity as initial capital: ${}",
+                    String.format("%.2f", totalCapital));
+            }
+        } catch (Exception e) {
+            totalCapital = config.getInitialCapital();
+            logger.warn("Could not fetch Alpaca equity at startup ({}), using config value: ${}",
+                e.getMessage(), totalCapital);
+        }
+
         double mainCapital = mainProfile.getCapitalAmount(totalCapital);
         double expCapital = expProfile.getCapitalAmount(totalCapital);
-        
-        logger.info("Capital Allocation:");
-        logger.info("  Total: ${}", totalCapital);
-        logger.info("  Main Profile: ${} ({}%)", mainCapital, mainProfile.capitalPercent() * 100);
-        logger.info("  Experimental: ${} ({}%)", expCapital, expProfile.capitalPercent() * 100);
+
+        logger.info("Capital Allocation (based on live account equity):");
+        logger.info("  Total: ${}", String.format("%.2f", totalCapital));
+        logger.info("  Main Profile: ${} ({}%)", String.format("%.2f", mainCapital), mainProfile.capitalPercent() * 100);
+        logger.info("  Experimental: ${} ({}%)", String.format("%.2f", expCapital), expProfile.capitalPercent() * 100);
         logger.info("");
         logger.info("Main Profile: {} bullish + {} bearish symbols",
             mainProfile.bullishSymbols().size(), mainProfile.bearishSymbols().size());

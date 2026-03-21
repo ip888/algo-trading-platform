@@ -292,10 +292,10 @@ class ProfileManagerSellOrderTest {
 
         invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
-        // Verify cancel is called BEFORE placeOrder
+        // Verify cancel is called BEFORE placeOrderDirect (stop-loss bypasses circuit breaker)
         InOrder inOrder = inOrder(mockClient);
         inOrder.verify(mockClient).cancelOrder("order-sl-001");
-        inOrder.verify(mockClient).placeOrder(eq("AAPL"), eq(qty), eq("sell"), eq("market"), eq("day"), isNull());
+        inOrder.verify(mockClient).placeOrderDirect(eq("AAPL"), eq(qty), eq("sell"), eq("market"), eq("day"), isNull());
     }
 
     // ---------- 2. checkAllPositionsForProfitTargets: cancel before sell (take profit) ----------
@@ -354,10 +354,10 @@ class ProfileManagerSellOrderTest {
 
         invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
-        // Verify cancel before sell
+        // Verify cancel before sell (risk exits bypass circuit breaker via placeOrderDirect)
         InOrder inOrder = inOrder(mockClient);
         inOrder.verify(mockClient).cancelOrder("order-risk-001");
-        inOrder.verify(mockClient).placeOrder(eq("SPY"), anyDouble(), eq("sell"), eq("market"), eq("day"), isNull());
+        inOrder.verify(mockClient).placeOrderDirect(eq("SPY"), anyDouble(), eq("sell"), eq("market"), eq("day"), isNull());
     }
 
     // ---------- 4. checkAllPositionsForRiskExits: zero quantity skipped ----------
@@ -537,9 +537,9 @@ class ProfileManagerSellOrderTest {
         when(mockClient.getPositions()).thenReturn(List.of(position));
         when(mockClient.getOpenOrders("AAPL")).thenReturn(emptyOrdersNode());
 
-        // First call: should place sell order
+        // First call: should place sell order (stop-loss uses placeOrderDirect to bypass circuit breaker)
         invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
-        verify(mockClient, times(1)).placeOrder(eq("AAPL"), eq(qty), eq("sell"), anyString(), anyString(), any());
+        verify(mockClient, times(1)).placeOrderDirect(eq("AAPL"), eq(qty), eq("sell"), anyString(), anyString(), any());
 
         // Verify symbol was added to pendingExitOrders
         ConcurrentHashMap<String, Long> pending = getField("pendingExitOrders");
@@ -548,8 +548,8 @@ class ProfileManagerSellOrderTest {
         // Second call: should skip because pending exit exists (even though position still shows on Alpaca)
         invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
-        // placeOrder should still have been called only once total
-        verify(mockClient, times(1)).placeOrder(eq("AAPL"), eq(qty), eq("sell"), anyString(), anyString(), any());
+        // placeOrderDirect should still have been called only once total
+        verify(mockClient, times(1)).placeOrderDirect(eq("AAPL"), eq(qty), eq("sell"), anyString(), anyString(), any());
     }
 
     // ---------- 13. Consecutive stop-loss tracking ----------

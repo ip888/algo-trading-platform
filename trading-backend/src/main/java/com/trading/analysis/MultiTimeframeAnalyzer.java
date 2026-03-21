@@ -193,10 +193,8 @@ public class MultiTimeframeAnalyzer {
             return cached.signal;
         }
         
-        // Fetch bars for this timeframe
-        // Note: Alpaca's getMarketHistory uses daily bars, so we'll need to adapt
-        // For now, we'll use daily bars and simulate other timeframes
-        List<Bar> bars = client.getMarketHistory(symbol, timeframe.barCount);
+        // Fetch bars for this timeframe using the correct Alpaca timeframe format
+        List<Bar> bars = client.getBars(symbol, timeframe.getAlpacaFormat(), timeframe.barCount);
         
         if (bars.size() < 50) {
             throw new Exception("Insufficient bars: " + bars.size());

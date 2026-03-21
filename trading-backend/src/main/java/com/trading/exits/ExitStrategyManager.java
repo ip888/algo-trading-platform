@@ -194,12 +194,14 @@ public class ExitStrategyManager {
         Duration holdTime = Duration.between(position.entryTime(), Instant.now());
         double profitPercent = position.getProfitPercent(currentPrice);
         
-        // Exit losing positions after configured max hold time
+        // Exit PROFITABLE positions after configured max hold time (lock in gains)
+        // Do NOT sell losing positions on time alone — let them recover.
+        // Losers are still protected by stop-loss (emergency at -2.5%) and strategy SELL signals.
         long maxHoldHours = config.getMaxHoldTimeHours();
-        
-        if (holdTime.toHours() >= maxHoldHours && profitPercent < 0) {
+
+        if (holdTime.toHours() >= maxHoldHours && profitPercent > 0.001) {
             return ExitDecision.fullExit(ExitType.TIME_DECAY,
-                String.format("Time decay exit after %d hours (%.1f%% loss)", 
+                String.format("Time decay exit after %d hours (+%.1f%% profit locked)",
                     holdTime.toHours(), profitPercent * 100),
                 currentPrice);
         }

@@ -186,7 +186,7 @@ public class Config {
      * Check if market hours bypass is enabled (for testing/development).
      */
     public boolean isMarketHoursBypassEnabled() {
-        return getBooleanProperty("BYPASS_MARKET_HOURS", true); // 🚨 FORCE BYPASS FOR LIQUIDATION
+        return getBooleanProperty("BYPASS_MARKET_HOURS", false);
     }
     
     /**

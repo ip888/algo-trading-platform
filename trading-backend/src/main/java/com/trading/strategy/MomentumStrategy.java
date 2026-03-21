@@ -195,39 +195,30 @@ public final class MomentumStrategy implements TradingStrategy {
     }
     
     /**
-     * Calculate ATR as percentage of price (volatility measure)
+     * ATR approximation using close-to-close absolute returns.
+     * True ATR needs OHLC data which we don't have in the close-price history.
+     * Close-to-close ATR ≈ avg |return| × 1.25 (empirical scaling factor).
+     * Captures gap risk and sustained volatility far better than the old
+     * hardcoded "2% intraday range" approximation.
      */
     private double calculateATRPercent(List<Double> history, int period, double currentPrice) {
         if (history.size() < period + 1) return 0.0;
-        
-        double sumTR = 0;
-        for (int i = history.size() - period; i < history.size(); i++) {
-            double high = history.get(i);  // Approximation since we don't have OHLC
-            double low = history.get(i) * 0.98;  // Assume 2% intraday range
-            double prevClose = history.get(i - 1);
-            
-            double tr = Math.max(high - low, 
-                        Math.max(Math.abs(high - prevClose), Math.abs(low - prevClose)));
-            sumTR += tr;
+
+        double sumAbsReturn = 0;
+        int start = history.size() - period;
+        for (int i = start; i < history.size(); i++) {
+            double prev = history.get(i - 1);
+            if (prev > 0) sumAbsReturn += Math.abs((history.get(i) - prev) / prev);
         }
-        
-        double atr = sumTR / period;
-        return (atr / currentPrice) * 100;
+
+        double avgAbsReturn = sumAbsReturn / period;
+        // Scale by 1.25 to approximate true ATR from close-to-close returns
+        return avgAbsReturn * 125.0; // as percentage (×100 then ×1.25)
     }
 
+    /** Delegates to RSIStrategy's Wilder-smoothed implementation. */
     private double calculateRSI(List<Double> history, int period) {
-        if (history.size() < period + 1) return 50.0;
-        
-        double gains = 0, losses = 0;
-        for (int i = history.size() - period; i < history.size(); i++) {
-            double change = history.get(i) - history.get(i - 1);
-            if (change > 0) gains += change;
-            else losses -= change;
-        }
-        
-        if (losses == 0) return 100.0;
-        double rs = (gains / period) / (losses / period);
-        return 100.0 - (100.0 / (1.0 + rs));
+        return RSIStrategy.calculateRSI(history, period);
     }
 
     private double calculateMomentum(List<Double> history, int period) {

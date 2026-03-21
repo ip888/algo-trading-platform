@@ -311,6 +311,21 @@ public class ResilientAlpacaClient {
         logger.info("DIRECT ORDER (bypass circuit breaker): {} {} {} qty={}", side, type, symbol, qty);
         delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
     }
+
+    /**
+     * Place a native GTC stop-market sell order for fractional positions.
+     * Goes through the circuit breaker like normal orders.
+     */
+    public void placeNativeStopOrder(String symbol, double qty, double stopPrice) {
+        executeResilient("placeNativeStopOrder", () -> {
+            try {
+                delegate.placeNativeStopOrder(symbol, qty, stopPrice);
+                return null;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
     
     /**
      * Get metrics for monitoring

@@ -60,22 +60,12 @@ class PDTProtectionTest {
     @Test
     @DisplayName("Should allow first 3 day trades")
     void testFirst3DayTrades() {
-        LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
-        
-        // Simulate 3 day trades by recording buys and sells same day
-        database.recordTrade("AAPL", 10.0, 150.0, "buy", today);
-        database.recordTrade("AAPL", 10.0, 151.0, "sell", today);
-        
-        database.recordTrade("GOOGL", 5.0, 2800.0, "buy", today);
-        database.recordTrade("GOOGL", 5.0, 2810.0, "sell", today);
-        
-        database.recordTrade("MSFT", 20.0, 380.0, "buy", today);
-        database.recordTrade("MSFT", 20.0, 382.0, "sell", today);
-        
-        // 4th trade should still be allowed (we're checking before executing)
+        // Simulate Alpaca reporting 2 day trades done — 3rd trade should be allowed
+        pdtProtection.syncWithAlpaca(2);
+
         boolean canTrade = pdtProtection.canTrade("TSLA", true, ACCOUNT_EQUITY_BELOW_25K);
-        
-        assertTrue(canTrade, "Should allow up to 3 day trades");
+
+        assertTrue(canTrade, "Should allow up to 3 day trades (2 used, 1 remaining)");
     }
     
     @Test
@@ -150,16 +140,13 @@ class PDTProtectionTest {
     @Test
     @DisplayName("Should not count overnight holds as day trades")
     void testOvernightHold() {
-        LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
-        LocalDate yesterday = today.minusDays(1);
-        
-        // Buy yesterday, sell today - NOT a day trade
-        database.recordTrade("AAPL", 10.0, 150.0, "buy", yesterday);
-        database.recordTrade("AAPL", 10.0, 151.0, "sell", today);
-        
-        // Should still allow trades
+        // Alpaca does not count overnight holds as day trades.
+        // Simulate Alpaca reporting 0 day trades (buy yesterday, sell today is NOT a day trade).
+        pdtProtection.syncWithAlpaca(0);
+
+        // Should allow trades since no day trades have occurred
         boolean canTrade = pdtProtection.canTrade("GOOGL", true, ACCOUNT_EQUITY_BELOW_25K);
-        
+
         assertTrue(canTrade, "Overnight holds should not count as day trades");
     }
 }

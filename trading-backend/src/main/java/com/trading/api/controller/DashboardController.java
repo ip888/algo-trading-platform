@@ -462,17 +462,22 @@ public final class DashboardController {
                 positionMap.put("platform", "alpaca");
                 
                 // Inject Risk Management Data (TP/SL) from PortfolioManager
+                // Falls back to config-derived values so dashboard always shows protection levels
                 var managedPos = portfolio.getPosition(pos.symbol());
-                if (managedPos.isPresent()) {
-                     positionMap.put("stopLoss", managedPos.get().stopLoss());
-                     positionMap.put("takeProfit", managedPos.get().takeProfit());
-                     // Add snake_case aliases if some clients use them
-                     positionMap.put("stop_loss", managedPos.get().stopLoss());
-                     positionMap.put("take_profit", managedPos.get().takeProfit());
+                double entryPx = pos.avgEntryPrice();
+                double sl, tp;
+                if (managedPos.isPresent() && managedPos.get().stopLoss() > 0) {
+                    sl = managedPos.get().stopLoss();
+                    tp = managedPos.get().takeProfit();
                 } else {
-                     positionMap.put("stopLoss", null);
-                     positionMap.put("takeProfit", null);
+                    // Fallback: compute from MAIN profile config so dashboard is never blank
+                    sl = entryPx * (1.0 - config.getMainStopLossPercent() / 100.0);
+                    tp = entryPx * (1.0 + config.getMainTakeProfitPercent() / 100.0);
                 }
+                positionMap.put("stopLoss", sl);
+                positionMap.put("takeProfit", tp);
+                positionMap.put("stop_loss", sl);
+                positionMap.put("take_profit", tp);
                 result.add(positionMap);
             }
             

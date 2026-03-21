@@ -105,22 +105,32 @@ public final class MACDStrategy implements TradingStrategy {
     }
     
     private double calculateSignalLine(List<Double> prices, int period, int endIndex) {
-        // Calculate MACD line for the last 'period' points
-        double k = 2.0 / (period + 1);
-        double signal = 0;
-        
-        // We need to build up the signal line EMA
-        // This is getting complex to do statelessly. 
-        // Let's use a simpler approximation: Signal Line is just SMA of MACD for now to avoid O(N^2)
-        // Or better, let's just calculate the last few MACDs
-        
-        double sumMacd = 0;
-        for (int i = 0; i < period; i++) {
-            double fast = calculateEMA(prices, FAST_PERIOD, endIndex - i);
-            double slow = calculateEMA(prices, SLOW_PERIOD, endIndex - i);
-            sumMacd += (fast - slow);
+        // Build a MACD history over (period * 2) bars to properly seed the EMA.
+        // Using seed = 2×period gives enough warmup so that the EMA is fully converged
+        // by the time we reach endIndex.
+        int seedBars = period * 2;
+        int startIndex = endIndex - seedBars + 1;
+        if (startIndex < SLOW_PERIOD) {
+            // Not enough history; fall back to SMA of last `period` MACD values
+            double sum = 0;
+            for (int i = 0; i < period; i++) {
+                double fast = calculateEMA(prices, FAST_PERIOD, endIndex - i);
+                double slow = calculateEMA(prices, SLOW_PERIOD, endIndex - i);
+                sum += (fast - slow);
+            }
+            return sum / period;
         }
-        
-        return sumMacd / period; // SMA of MACD as proxy for Signal Line
+
+        // Seed the signal EMA with the first MACD value in the window
+        double signal = calculateEMA(prices, FAST_PERIOD, startIndex)
+                      - calculateEMA(prices, SLOW_PERIOD, startIndex);
+
+        double k = 2.0 / (period + 1);
+        for (int i = startIndex + 1; i <= endIndex; i++) {
+            double macd = calculateEMA(prices, FAST_PERIOD, i)
+                        - calculateEMA(prices, SLOW_PERIOD, i);
+            signal = macd * k + signal * (1 - k);
+        }
+        return signal;
     }
 }

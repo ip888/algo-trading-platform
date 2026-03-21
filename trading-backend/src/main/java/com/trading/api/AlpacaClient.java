@@ -304,6 +304,31 @@ public final class AlpacaClient {
         }
     }
 
+    /**
+     * Place a standalone GTC stop-market sell order.
+     * Used for fractional positions that cannot use bracket orders because Alpaca
+     * does not support bracket orders for fractional shares.
+     * A GTC stop order survives bot restarts and provides crash-safe protection.
+     *
+     * @param symbol  Stock ticker
+     * @param qty     Quantity to sell
+     * @param stopPrice  Price that triggers the market sell
+     */
+    public void placeNativeStopOrder(String symbol, double qty, double stopPrice) throws Exception {
+        var order = objectMapper.createObjectNode()
+            .put("symbol", symbol)
+            .put("qty", String.format("%.9f", qty))
+            .put("side", "sell")
+            .put("type", "stop")
+            .put("time_in_force", "gtc")
+            .put("stop_price", String.format("%.2f", stopPrice));
+
+        var body = objectMapper.writeValueAsString(order);
+        logger.info("Placing native GTC stop-loss order: symbol={} qty={} stopPrice={}",
+            symbol, qty, stopPrice);
+        sendRequest(config.baseUrl() + "/v2/orders", "POST", body);
+    }
+
     public void placeTrailingStopOrder(String symbol, double qty, String side, double trailPercent) {
         try {
             var order = objectMapper.createObjectNode()

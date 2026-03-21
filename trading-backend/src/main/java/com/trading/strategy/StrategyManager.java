@@ -163,9 +163,12 @@ public final class StrategyManager {
                 }
             }
             case WEAK_BEAR -> {
-                // Weak bear → RSI with confirmation
-                activeStrategy = "RSI Confirmation";
-                yield rsiStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                // FIX: RSI mean-reversion on inverse ETFs (SH, PSQ, SQQQ) gives backwards signals.
+                // RSI<30 on SH means the market has been RISING (inverse ETF fell) — wrong time to buy.
+                // Use MACD for all symbols in bear regime: it reads trend direction correctly on both
+                // regular stocks AND inverse ETFs.
+                activeStrategy = "MACD Trend (Weak Bear)";
+                yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }
             case RANGE_BOUND -> {
                 // Sideways market → Mean Reversion
@@ -173,9 +176,14 @@ public final class StrategyManager {
                 yield meanReversionStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }
             case HIGH_VOLATILITY -> {
-                // High volatility → Mean Reversion with tight stops
-                activeStrategy = "Mean Reversion (Defensive)";
-                yield meanReversionStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                // FIX: In high volatility, only manage exits — no new entries.
+                // Mean Reversion on inverse ETFs in volatile bear markets also gives backwards signals.
+                // If holding a position, use MACD to detect exits. Otherwise block new entries.
+                activeStrategy = "MACD Exit Only (HighVol)";
+                if (positionQty > 0) {
+                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                }
+                yield new TradingSignal.Hold("High volatility — no new entries");
             }
         };
 
@@ -219,49 +227,54 @@ public final class StrategyManager {
     }
 
     /**
-     * Detect short-term downtrend to block BUY signals on falling stocks.
-     * Returns true when:
-     *  1. Current price is below the 10-bar SMA, AND
-     *  2. The 10-bar SMA itself is declining (current SMA10 < previous SMA10)
+     * Detect downtrend to block BUY signals on falling stocks.
+     * Returns true when EITHER of:
+     *  - Short-term (10-bar): price below declining 10-SMA
+     *  - Medium-term (20-bar): price below declining 20-SMA
      *
-     * This catches cases where longer-term indicators (MACD, SMA20/50) still
-     * appear bullish due to lag, but the stock is actively falling.
+     * This catches both recent pullbacks AND sustained multi-week downtrends
+     * where lagging indicators (MACD, SMA50) still look bullish.
      */
-    private boolean isShortTermDowntrend(List<Double> closes) {
-        if (closes.size() < 12) {
-            return false; // Not enough data
+    boolean isShortTermDowntrend(List<Double> closes) {
+        if (closes.size() < 22) {
+            return false;
         }
 
         int size = closes.size();
 
-        // Current 10-bar SMA (bars [size-10] to [size-1])
-        double sma10Current = 0;
-        for (int i = size - 10; i < size; i++) {
-            sma10Current += closes.get(i);
-        }
-        sma10Current /= 10.0;
-
-        // Previous 10-bar SMA (bars [size-11] to [size-2])
-        double sma10Previous = 0;
-        for (int i = size - 11; i < size - 1; i++) {
-            sma10Previous += closes.get(i);
-        }
-        sma10Previous /= 10.0;
-
+        // ---- 10-bar SMA check (short-term) ----
+        double sma10Current = smaOf(closes, size - 10, size);
+        double sma10Previous = smaOf(closes, size - 11, size - 1);
         double currentPrice = closes.get(size - 1);
-        boolean priceBelowSma = currentPrice < sma10Current;
-        boolean smaDeclining = sma10Current < sma10Previous;
+        boolean shortTermDown = currentPrice < sma10Current && sma10Current < sma10Previous;
 
-        if (priceBelowSma && smaDeclining) {
-            double pctBelowSma = ((sma10Current - currentPrice) / sma10Current) * 100;
+        if (shortTermDown) {
+            double pct = ((sma10Current - currentPrice) / sma10Current) * 100;
             logger.debug("Short-term downtrend: price ${} is {:.2f}% below declining 10-SMA ${}",
-                String.format("%.2f", currentPrice),
-                pctBelowSma,
-                String.format("%.2f", sma10Current));
+                String.format("%.2f", currentPrice), pct, String.format("%.2f", sma10Current));
+            return true;
+        }
+
+        // ---- 20-bar SMA check (medium-term) ----
+        double sma20Current = smaOf(closes, size - 20, size);
+        double sma20Previous = smaOf(closes, size - 21, size - 1);
+        boolean mediumTermDown = currentPrice < sma20Current && sma20Current < sma20Previous;
+
+        if (mediumTermDown) {
+            double pct = ((sma20Current - currentPrice) / sma20Current) * 100;
+            logger.debug("Medium-term downtrend: price ${} is {:.2f}% below declining 20-SMA ${}",
+                String.format("%.2f", currentPrice), pct, String.format("%.2f", sma20Current));
             return true;
         }
 
         return false;
+    }
+
+    /** Average of closes[from..to) */
+    private double smaOf(List<Double> closes, int from, int to) {
+        double sum = 0;
+        for (int i = from; i < to; i++) sum += closes.get(i);
+        return sum / (to - from);
     }
 
     private double calculateSMA(List<Double> prices) {

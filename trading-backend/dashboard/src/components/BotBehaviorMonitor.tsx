@@ -14,6 +14,7 @@ interface BotBehavior {
   recentTradesWins: number;
   recentTradeLosses: number;
   healthChecks: HealthCheck[];
+  urgentExits: Record<string, string>;
   timestamp: number;
 }
 
@@ -122,6 +123,19 @@ export const BotBehaviorMonitor = () => {
           );
         })}
       </div>
+
+      {/* Urgent exit queue — failed protective sells */}
+      {data.urgentExits && Object.keys(data.urgentExits).length > 0 && (
+        <div style={{ marginTop: '10px', background: '#2a0a0a', borderRadius: '6px', padding: '8px 10px', border: '1px solid #ef444444' }}>
+          <div style={{ fontSize: '11px', color: '#ef4444', fontWeight: 700, marginBottom: '4px' }}>⚠ URGENT EXIT QUEUE — RETRYING</div>
+          {Object.entries(data.urgentExits).map(([symbol, detail]) => (
+            <div key={symbol} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '2px 0' }}>
+              <span style={{ color: '#ef4444', fontWeight: 700 }}>{symbol}</span>
+              <span style={{ color: '#aaa' }}>{detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Active Cooldowns detail */}
       {data.activeCooldowns.length > 0 && (

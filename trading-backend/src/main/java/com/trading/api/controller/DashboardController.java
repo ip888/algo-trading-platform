@@ -1100,7 +1100,18 @@ public final class DashboardController {
                 "detail", emergencyActive ? "EMERGENCY STOP ACTIVE — bot halted!" : "Normal — no emergency triggered"
             ));
 
+            // Urgent exit queue: failed protective sells pending retry
+            var urgentExits = com.trading.portfolio.ProfileManager.getUrgentExitQueue();
+            checks.add(Map.of(
+                "name", "Urgent Exit Queue",
+                "status", urgentExits.isEmpty() ? "GREEN" : "RED",
+                "detail", urgentExits.isEmpty()
+                    ? "No failed exits pending retry"
+                    : urgentExits.size() + " exit(s) failed, retrying: " + String.join(", ", urgentExits.keySet())
+            ));
+
             response.put("healthChecks", checks);
+            response.put("urgentExits", urgentExits);
 
             // Overall health summary
             boolean allGreen = checks.stream().allMatch(c -> "GREEN".equals(c.get("status")));

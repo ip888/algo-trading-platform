@@ -119,6 +119,23 @@ public class ProfileManager implements Runnable {
     private static java.util.concurrent.ConcurrentHashMap<String, Double> lastExitPrices = new java.util.concurrent.ConcurrentHashMap<>();
     private static final double MIN_PRICE_IMPROVEMENT_PERCENT = 1.0;
 
+    // STATIC: Urgent exit queue — symbols whose protective sell failed due to API error.
+    // Retried every cycle (every 10s) until the sell succeeds or the position disappears.
+    // Key = symbol, Value = UrgentExit record
+    private static final java.util.concurrent.ConcurrentHashMap<String, UrgentExit> urgentExitQueue
+        = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private record UrgentExit(String symbol, double quantity, String reason, long firstFailedAt) {}
+
+    public static java.util.Map<String, String> getUrgentExitQueue() {
+        var result = new java.util.LinkedHashMap<String, String>();
+        long now = System.currentTimeMillis();
+        urgentExitQueue.forEach((symbol, exit) ->
+            result.put(symbol, String.format("%s (queued %dm ago)", exit.reason(), (now - exit.firstFailedAt()) / 60000)));
+        return java.util.Collections.unmodifiableMap(result);
+    }
+
+
     // Current market state (updated each cycle, used by profit target checks)
     private volatile double latestVix = 15.0;
     private volatile MarketRegime latestRegime = MarketRegime.RANGE_BOUND;
@@ -270,6 +287,11 @@ public class ProfileManager implements Runnable {
 
         // Reconcile internal portfolio state with Alpaca positions
         reconcilePortfolioWithAlpaca(profilePrefix);
+
+        // Retry any protective exits that failed in a previous cycle (e.g., API down)
+        if (!urgentExitQueue.isEmpty()) {
+            drainUrgentExitQueue(profilePrefix);
+        }
 
         // Get current market regime (uses advanced detection if enabled)
         MarketRegime regime;
@@ -1383,6 +1405,12 @@ public class ProfileManager implements Runnable {
                         } catch (Exception e) {
                             logger.error("{} Failed to place enhanced exit order for {}",
                                 profilePrefix, symbol, e);
+                            urgentExitQueue.put(symbol, new UrgentExit(symbol, qtyToExit, exitDecision.reason(), System.currentTimeMillis()));
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] ⚠️ EXIT FAILED, QUEUED FOR RETRY: %s (%s)",
+                                    profile.name(), symbol, exitDecision.reason()),
+                                "ERROR"
+                            );
                         }
                     }
                     continue; // Position handled by enhanced strategy
@@ -1420,6 +1448,13 @@ public class ProfileManager implements Runnable {
                     } catch (Exception e) {
                         logger.error("{} Failed to place max loss exit order for {}",
                             profilePrefix, symbol, e);
+                        urgentExitQueue.put(symbol, new UrgentExit(symbol, qty,
+                            String.format("max loss (%.1f%%)", Math.abs(lossPercent)), System.currentTimeMillis()));
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] ⚠️ MAX LOSS EXIT FAILED, QUEUED FOR RETRY: %s",
+                                profile.name(), symbol),
+                            "ERROR"
+                        );
                     }
                 }
             }
@@ -1475,6 +1510,61 @@ public class ProfileManager implements Runnable {
      * This prevents stale state from blocking new entries after external sells,
      * stop-loss fills, or other exit paths that may miss portfolio cleanup.
      */
+    /**
+     * Retry protective exits that failed in a previous cycle (e.g., Alpaca API was down).
+     * Called every cycle so failed exits are retried every ~10 seconds until they succeed.
+     * Only MAIN profile drains the queue to avoid duplicate orders.
+     */
+    private void drainUrgentExitQueue(String profilePrefix) {
+        if (!profile.name().equals("MAIN")) return;
+        if (System.currentTimeMillis() < pdtBlockedUntil) return;
+
+        for (String symbol : new java.util.HashSet<>(urgentExitQueue.keySet())) {
+            UrgentExit exit = urgentExitQueue.get(symbol);
+            if (exit == null) continue;
+
+            long minsWaiting = (System.currentTimeMillis() - exit.firstFailedAt()) / 60000;
+            logger.warn("{} 🔄 URGENT EXIT RETRY: {} qty={} reason='{}' ({}m since first fail)",
+                profilePrefix, symbol, String.format("%.4f", exit.quantity()), exit.reason(), minsWaiting);
+
+            try {
+                // Check if position still exists — native stop may have already filled it
+                var positions = client.getPositions();
+                boolean stillHeld = positions.stream().anyMatch(p -> p.symbol().equals(symbol));
+                if (!stillHeld) {
+                    urgentExitQueue.remove(symbol);
+                    logger.info("{} Urgent exit cleared: {} position no longer on Alpaca", profilePrefix, symbol);
+                    continue;
+                }
+
+                cancelExistingOrders(profilePrefix, symbol);
+                client.placeOrderDirect(symbol, exit.quantity(), "sell", "market", "day", null);
+
+                urgentExitQueue.remove(symbol);
+                pendingExitOrders.put(symbol, System.currentTimeMillis());
+
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ✅ URGENT EXIT SUCCEEDED: %s after %dm delay (%s)",
+                        profile.name(), symbol, minsWaiting, exit.reason()),
+                    "WARN"
+                );
+                logger.info("{} ✅ Urgent exit succeeded for {} after {}m", profilePrefix, symbol, minsWaiting);
+
+            } catch (PDTRejectedException e) {
+                pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
+                logger.warn("{} PDT rejected urgent exit for {} — blocking 10 min", profilePrefix, symbol);
+                break;
+            } catch (Exception e) {
+                logger.warn("{} Urgent exit retry still failing for {}: {}", profilePrefix, symbol, e.getMessage());
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⚠️ URGENT EXIT RETRY FAILED: %s (%dm waiting, will retry) — %s",
+                        profile.name(), symbol, minsWaiting, e.getMessage()),
+                    "ERROR"
+                );
+            }
+        }
+    }
+
     private void reconcilePortfolioWithAlpaca(String profilePrefix) {
         try {
             var alpacaPositions = client.getPositions();
@@ -1509,6 +1599,15 @@ public class ProfileManager implements Runnable {
                         profilePrefix, symbol);
                     // Also reset consecutive SL counter here if we see a clean exit
                     // (symbol gone = order filled, we can allow fresh tracking)
+                }
+            }
+
+            // Also clear urgent exit queue for positions that are no longer on Alpaca
+            for (String symbol : new java.util.HashSet<>(urgentExitQueue.keySet())) {
+                if (!alpacaSymbols.contains(symbol)) {
+                    urgentExitQueue.remove(symbol);
+                    logger.info("{} Urgent exit cleared: {} (position filled/gone from Alpaca)",
+                        profilePrefix, symbol);
                 }
             }
             if (clearedExits > 0) {
@@ -2030,6 +2129,13 @@ public class ProfileManager implements Runnable {
                         return;
                     } catch (Exception e) {
                         logger.error("{} Failed to place stop loss exit for {}", profilePrefix, symbol, e);
+                        urgentExitQueue.put(symbol, new UrgentExit(symbol, qty,
+                            String.format("stop loss (%.1f%%)", pnlPercent), System.currentTimeMillis()));
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] ⚠️ STOP LOSS EXIT FAILED, QUEUED FOR RETRY: %s",
+                                profile.name(), symbol),
+                            "ERROR"
+                        );
                     }
                 }
             }

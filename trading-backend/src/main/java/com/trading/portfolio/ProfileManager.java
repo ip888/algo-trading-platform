@@ -424,8 +424,8 @@ public class ProfileManager implements Runnable {
             try {
                 tradeSymbol(symbol, targetSymbols, equity, buyingPower, regime, currentVix, profilePrefix);
             } catch (PDTRejectedException e) {
-                pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
-                logger.warn("{} PDT rejected for {} — blocking sell attempts for 10 minutes", profilePrefix, symbol);
+                pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                logger.warn("{} PDT rejected for {} — blocking sell attempts until market close", profilePrefix, symbol);
             } catch (Exception e) {
                 logger.error("{} Error processing {}", profilePrefix, symbol, e);
                 
@@ -746,6 +746,24 @@ public class ProfileManager implements Runnable {
     private void handleBuy(String symbol, double currentPrice, double equity,
                           double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
         
+        // ========== PDT RESERVATION CHECK ==========
+        // Reserve the last PDT day-trade slot for protective exits (stop-loss/take-profit).
+        // A new buy requires a same-day sell capability — if we're at 2/3 trades, a new
+        // buy could use the last slot, then a stop-loss exit gets PDT-blocked.
+        // Solution: block all new buys when daytrade_count >= 2.
+        int currentDayTrades = pdtProtection.getDayTradeCount();
+        int pdtReserveThreshold = 2; // Block buys at 2/3 to keep slot 3 for exits
+        if (pdtProtection.getDayTradeCount() > 0 && currentDayTrades >= pdtReserveThreshold && equity < 25000) {
+            logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping last slot for exits",
+                profilePrefix, symbol, currentDayTrades, 3);
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] ⛔ BUY BLOCKED: %s — PDT slots reserved for exits (%d/3 used)",
+                    profile.name(), symbol, currentDayTrades),
+                "WARN"
+            );
+            return;
+        }
+
         // ========== STOP LOSS COOLDOWN CHECK ==========
         // Prevent immediate re-entry after stop loss (this was causing repeated losses)
         Long cooldownExpiry = stopLossCooldowns.get(symbol);
@@ -784,6 +802,34 @@ public class ProfileManager implements Runnable {
             lastExitPrices.remove(symbol);
         }
         
+        // ========== GAP-DOWN PROTECTION ==========
+        // Prevent buying into a stock that is already down significantly from yesterday's close.
+        // Strategy signals are based on daily bars (yesterday's data). If the stock gaps down
+        // today, the signal is stale and we'd be buying into weakness.
+        // Threshold = stop_loss * 0.67: block if already 2/3 of the way to stop loss before entry.
+        // MAIN (1.5% SL) → block at ~1.0% | EXPERIMENTAL (1.0% SL) → block at ~0.67%
+        try {
+            var recentBars = client.getMarketHistory(symbol, 2);
+            if (recentBars.size() >= 2) {
+                double prevClose = recentBars.get(0).close();
+                double gapDownPct = (prevClose - currentPrice) / prevClose * 100.0;
+                double gapDownThreshold = profile.stopLossPercent() * 0.67;
+                if (gapDownPct >= gapDownThreshold) {
+                    logger.info("{} {} BUY BLOCKED — gap-down {:.1f}% from yesterday close ${} (threshold {:.1f}%)",
+                        profilePrefix, symbol, gapDownPct,
+                        String.format("%.2f", prevClose), gapDownThreshold);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⛔ BUY BLOCKED: %s gap-down %.1f%% from $%.2f",
+                            profile.name(), symbol, gapDownPct, prevClose),
+                        "WARN"
+                    );
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("{} Could not check gap-down for {}: {}", profilePrefix, symbol, e.getMessage());
+        }
+
         // ========== POSITION LIMIT CHECK ==========
         // Check position limit BEFORE calculating position size or running AI
         if (portfolio.getActivePositionCount() >= config.getMaxPositionsAtOnce()) {
@@ -1398,9 +1444,12 @@ public class ProfileManager implements Runnable {
                             pendingExitOrders.put(symbol, System.currentTimeMillis());
                             continue;
                         } catch (PDTRejectedException e) {
-                            pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
-                            logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
-                                profilePrefix, symbol);
+                            pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                            logger.warn("{} PDT rejected protective exit for {} — blocking until market close ({})",
+                                profilePrefix, symbol, java.time.Instant.ofEpochMilli(pdtBlockedUntil));
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] ⛔ PDT LIMIT HIT: %s exit blocked — all sells paused until 4PM ET. Positions protected by native stops.",
+                                    profile.name(), symbol), "ERROR");
                             return;
                         } catch (Exception e) {
                             logger.error("{} Failed to place enhanced exit order for {}",
@@ -1441,8 +1490,8 @@ public class ProfileManager implements Runnable {
                             "WARN"
                         );
                     } catch (PDTRejectedException e) {
-                        pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
-                        logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                        pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                        logger.warn("{} PDT rejected max-loss exit for {} — blocking until market close",
                             profilePrefix, symbol);
                         return;
                     } catch (Exception e) {
@@ -1551,8 +1600,12 @@ public class ProfileManager implements Runnable {
                 logger.info("{} ✅ Urgent exit succeeded for {} after {}m", profilePrefix, symbol, minsWaiting);
 
             } catch (PDTRejectedException e) {
-                pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
-                logger.warn("{} PDT rejected urgent exit for {} — blocking 10 min", profilePrefix, symbol);
+                pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                logger.warn("{} PDT rejected urgent exit for {} — blocking until market close. Positions protected by native GTC stops.",
+                    profilePrefix, symbol);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⛔ PDT LIMIT: Urgent exit for %s blocked — native stops protecting positions until tomorrow.",
+                        profile.name(), symbol), "ERROR");
                 break;
             } catch (Exception e) {
                 logger.warn("{} Urgent exit retry still failing for {}: {}", profilePrefix, symbol, e.getMessage());
@@ -2052,8 +2105,8 @@ public class ProfileManager implements Runnable {
 
                         logger.info("{} ✅ Take profit exit order placed for {}", profilePrefix, symbol);
                     } catch (PDTRejectedException e) {
-                        pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
-                        logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                        pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                        logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
                         return;
                     } catch (Exception e) {
@@ -2123,8 +2176,8 @@ public class ProfileManager implements Runnable {
                         
                         logger.info("{} ✅ Stop loss exit order placed for {}", profilePrefix, symbol);
                     } catch (PDTRejectedException e) {
-                        pdtBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
-                        logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts for 10 minutes",
+                        pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                        logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
                         return;
                     } catch (Exception e) {
@@ -2365,5 +2418,21 @@ public class ProfileManager implements Runnable {
      */
     public static java.util.Map<String, Integer> getConsecutiveStopLosses() {
         return java.util.Collections.unmodifiableMap(consecutiveStopLosses);
+    }
+
+    /**
+     * Returns milliseconds until 4:00 PM ET today (market close).
+     * Used to set pdtBlockedUntil for the rest of the trading day when PDT limit is hit
+     * on a protective exit — no point retrying every 10 min if Alpaca will keep rejecting.
+     */
+    private long millisUntilMarketClose() {
+        var now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
+        var closeToday = now.toLocalDate().atTime(16, 0)
+            .atZone(java.time.ZoneId.of("America/New_York"));
+        if (now.isAfter(closeToday)) {
+            // Already past close — block until tomorrow's close
+            closeToday = closeToday.plusDays(1);
+        }
+        return java.time.Duration.between(now, closeToday).toMillis();
     }
 }

@@ -203,6 +203,7 @@ interface TradingStore {
   setConnected: (connected: boolean) => void;
   setSystemStatus: (status: SystemStatus) => void;
   updateMarketData: (symbol: string, data: MarketData) => void;
+  mergeMarketData: (symbol: string, partial: Partial<MarketData>) => void;
   setPositions: (positions: TradePosition[]) => void;
   setLastUpdate: (timestamp: number) => void;
   addActivity: (message: string, level: string) => void;
@@ -262,6 +263,13 @@ export const useTradingStore = create<TradingStore>((set) => ({
   updateMarketData: (symbol, data) =>
     set((state) => ({
       marketData: { ...state.marketData, [symbol]: data },
+    })),
+  mergeMarketData: (symbol, partial) =>
+    set((state) => ({
+      marketData: {
+        ...state.marketData,
+        [symbol]: { ...state.marketData[symbol], ...partial },
+      },
     })),
   setPositions: (positions) => set({ positions }),
   setLastUpdate: (timestamp) => set({ lastUpdate: timestamp }),

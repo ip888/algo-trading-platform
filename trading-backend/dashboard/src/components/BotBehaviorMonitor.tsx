@@ -15,6 +15,8 @@ interface BotBehavior {
   recentTradeLosses: number;
   healthChecks: HealthCheck[];
   urgentExits: Record<string, string>;
+  pdtDayTradeCount: number;
+  pdtBlockedUntilMs: number;
   timestamp: number;
 }
 
@@ -123,6 +125,26 @@ export const BotBehaviorMonitor = () => {
           );
         })}
       </div>
+
+      {/* PDT Day Trade Status */}
+      {(() => {
+        const count = data.pdtDayTradeCount ?? 0;
+        const blockedUntil = data.pdtBlockedUntilMs ?? 0;
+        const isBlocked = blockedUntil > Date.now();
+        const minsLeft = isBlocked ? Math.ceil((blockedUntil - Date.now()) / 60000) : 0;
+        if (count === 0 && !isBlocked) return null;
+        const bg = isBlocked ? '#2a0a0a' : count >= 2 ? '#1a1500' : '#0a1a0a';
+        const border = isBlocked ? '#ef444444' : count >= 2 ? '#eab30844' : '#22c55e44';
+        const color = isBlocked ? '#ef4444' : count >= 2 ? '#eab308' : '#22c55e';
+        const label = isBlocked
+          ? `⛔ PDT EXHAUSTED — sells blocked ${minsLeft}m, native stops active`
+          : `⚠ PDT: ${count}/3 day trades used — buys blocked, exit slot reserved`;
+        return (
+          <div style={{ marginTop: '10px', background: bg, borderRadius: '6px', padding: '8px 10px', border: `1px solid ${border}` }}>
+            <div style={{ fontSize: '11px', color, fontWeight: 700 }}>{label}</div>
+          </div>
+        );
+      })()}
 
       {/* Urgent exit queue — failed protective sells */}
       {data.urgentExits && Object.keys(data.urgentExits).length > 0 && (

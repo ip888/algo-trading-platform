@@ -127,6 +127,11 @@ public class ProfileManager implements Runnable {
 
     private record UrgentExit(String symbol, double quantity, String reason, long firstFailedAt) {}
 
+    // STATIC: Track why buys were most recently blocked per symbol (gap-down, price gate, etc.)
+    // Key = symbol, Value = reason string. Cleared when the buy is eventually allowed.
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> blockedBuys
+        = new java.util.concurrent.ConcurrentHashMap<>();
+
     public static java.util.Map<String, String> getUrgentExitQueue() {
         var result = new java.util.LinkedHashMap<String, String>();
         long now = System.currentTimeMillis();
@@ -143,6 +148,10 @@ public class ProfileManager implements Runnable {
 
     // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
     private volatile long pdtBlockedUntil = 0;
+
+    // Static PDT state — exposed to dashboard (account-level, shared across profiles)
+    private static volatile long staticPdtBlockedUntil = 0;
+    private static volatile int staticDayTradeCount = 0;
 
     private volatile boolean running = true;
     
@@ -425,6 +434,7 @@ public class ProfileManager implements Runnable {
                 tradeSymbol(symbol, targetSymbols, equity, buyingPower, regime, currentVix, profilePrefix);
             } catch (PDTRejectedException e) {
                 pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                staticPdtBlockedUntil = pdtBlockedUntil;
                 logger.warn("{} PDT rejected for {} — blocking sell attempts until market close", profilePrefix, symbol);
             } catch (Exception e) {
                 logger.error("{} Error processing {}", profilePrefix, symbol, e);
@@ -526,7 +536,8 @@ public class ProfileManager implements Runnable {
                     score.volume(),
                     score.trend(),
                     score.overallScore(),
-                    score.momentumScore() // This is RSI-based
+                    score.momentumScore(),
+                    score.recommendation()
                 );
             }
         } catch (Exception e) {
@@ -752,6 +763,7 @@ public class ProfileManager implements Runnable {
         // buy could use the last slot, then a stop-loss exit gets PDT-blocked.
         // Solution: block all new buys when daytrade_count >= 2.
         int currentDayTrades = pdtProtection.getDayTradeCount();
+        staticDayTradeCount = currentDayTrades; // sync for dashboard
         int pdtReserveThreshold = 2; // Block buys at 2/3 to keep slot 3 for exits
         if (pdtProtection.getDayTradeCount() > 0 && currentDayTrades >= pdtReserveThreshold && equity < 25000) {
             logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping last slot for exits",
@@ -786,6 +798,7 @@ public class ProfileManager implements Runnable {
         if (lastExit != null) {
             double improvementPercent = ((lastExit - currentPrice) / lastExit) * 100.0;
             if (improvementPercent < MIN_PRICE_IMPROVEMENT_PERCENT) {
+                blockedBuys.put(symbol, String.format("waiting for price: need %.1f%% below $%.2f exit", MIN_PRICE_IMPROVEMENT_PERCENT, lastExit));
                 logger.info("{} {} PRICE IMPROVEMENT CHECK FAILED - last exit=${}, now=${}, need {:.1f}% drop but only {:.2f}%",
                     profilePrefix, symbol, String.format("%.2f", lastExit), String.format("%.2f", currentPrice),
                     MIN_PRICE_IMPROVEMENT_PERCENT, improvementPercent);
@@ -799,6 +812,7 @@ public class ProfileManager implements Runnable {
             // Price has improved enough — clear the gate and allow entry
             logger.info("{} {} PRICE IMPROVED {:.2f}% below last exit ${} — allowing re-entry",
                 profilePrefix, symbol, improvementPercent, String.format("%.2f", lastExit));
+            blockedBuys.remove(symbol);
             lastExitPrices.remove(symbol);
         }
         
@@ -815,6 +829,8 @@ public class ProfileManager implements Runnable {
                 double gapDownPct = (prevClose - currentPrice) / prevClose * 100.0;
                 double gapDownThreshold = profile.stopLossPercent() * 0.67;
                 if (gapDownPct >= gapDownThreshold) {
+                    String reason = String.format("gap-down %.1f%% from $%.2f", gapDownPct, prevClose);
+                    blockedBuys.put(symbol, reason);
                     logger.info("{} {} BUY BLOCKED — gap-down {:.1f}% from yesterday close ${} (threshold {:.1f}%)",
                         profilePrefix, symbol, gapDownPct,
                         String.format("%.2f", prevClose), gapDownThreshold);
@@ -824,6 +840,8 @@ public class ProfileManager implements Runnable {
                         "WARN"
                     );
                     return;
+                } else {
+                    blockedBuys.remove(symbol); // gap resolved — clear block
                 }
             }
         } catch (Exception e) {
@@ -1445,6 +1463,7 @@ public class ProfileManager implements Runnable {
                             continue;
                         } catch (PDTRejectedException e) {
                             pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                staticPdtBlockedUntil = pdtBlockedUntil;
                             logger.warn("{} PDT rejected protective exit for {} — blocking until market close ({})",
                                 profilePrefix, symbol, java.time.Instant.ofEpochMilli(pdtBlockedUntil));
                             TradingWebSocketHandler.broadcastActivity(
@@ -1491,6 +1510,7 @@ public class ProfileManager implements Runnable {
                         );
                     } catch (PDTRejectedException e) {
                         pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                staticPdtBlockedUntil = pdtBlockedUntil;
                         logger.warn("{} PDT rejected max-loss exit for {} — blocking until market close",
                             profilePrefix, symbol);
                         return;
@@ -1601,6 +1621,7 @@ public class ProfileManager implements Runnable {
 
             } catch (PDTRejectedException e) {
                 pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                staticPdtBlockedUntil = pdtBlockedUntil;
                 logger.warn("{} PDT rejected urgent exit for {} — blocking until market close. Positions protected by native GTC stops.",
                     profilePrefix, symbol);
                 TradingWebSocketHandler.broadcastActivity(
@@ -2106,6 +2127,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Take profit exit order placed for {}", profilePrefix, symbol);
                     } catch (PDTRejectedException e) {
                         pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                staticPdtBlockedUntil = pdtBlockedUntil;
                         logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
                         return;
@@ -2177,6 +2199,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Stop loss exit order placed for {}", profilePrefix, symbol);
                     } catch (PDTRejectedException e) {
                         pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                staticPdtBlockedUntil = pdtBlockedUntil;
                         logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
                         return;
@@ -2418,6 +2441,15 @@ public class ProfileManager implements Runnable {
      */
     public static java.util.Map<String, Integer> getConsecutiveStopLosses() {
         return java.util.Collections.unmodifiableMap(consecutiveStopLosses);
+    }
+
+    /** PDT state for dashboard — account-level, updated by the MAIN profile each cycle. */
+    public static long getPdtBlockedUntil() { return staticPdtBlockedUntil; }
+    public static int getPdtDayTradeCount() { return staticDayTradeCount; }
+
+    /** Blocked buy reasons — symbols that failed entry gates (gap-down, price improvement). */
+    public static java.util.Map<String, String> getBlockedBuys() {
+        return java.util.Collections.unmodifiableMap(blockedBuys);
     }
 
     /**

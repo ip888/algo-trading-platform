@@ -136,6 +136,16 @@ function App() {
               <span className="label">ACTIVE POSITIONS</span>
               <div className="value highlight">{store.systemStatus?.activePositions || store.positions?.length || 0}</div>
             </div>
+            <div className="stat-card">
+              <span className="label">TOTAL TRADES</span>
+              <div className="value highlight">{store.systemStatus?.totalTrades ?? '—'}</div>
+            </div>
+            <div className="stat-card">
+              <span className="label">WIN RATE</span>
+              <div className={`value ${(store.systemStatus?.winRate ?? 0) >= 50 ? 'positive' : (store.systemStatus?.winRate ?? 0) >= 30 ? '' : 'negative'}`}>
+                {store.systemStatus?.totalTrades ? `${(store.systemStatus.winRate ?? 0).toFixed(1)}%` : '—'}
+              </div>
+            </div>
           </div>
 
           <div className="layout-columns">

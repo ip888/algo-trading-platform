@@ -516,9 +516,11 @@ public final class TradingBot {
                     "Signal: " + signal.getClass().getSimpleName() + " (" + strategyManager.getActiveStrategy() + ")");
                 
                 // Broadcast individual symbol update
+                String signalRec = signal instanceof TradingSignal.Buy ? "BUY"
+                    : signal instanceof TradingSignal.Sell ? "SELL" : "HOLD";
                 TradingWebSocketHandler.broadcastMarketUpdate(
                     symbol, currentPrice, change, changePercent, bar.get().volume(),
-                    strategyManager.getCurrentRegimeString(), score, score // Using score as RSI placeholder
+                    strategyManager.getCurrentRegimeString(), score, score, signalRec
                 );
 
                 // Execute trades - ALPACA ONLY (stocks)

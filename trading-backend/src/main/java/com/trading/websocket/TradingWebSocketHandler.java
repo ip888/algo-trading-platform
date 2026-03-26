@@ -131,11 +131,12 @@ public final class TradingWebSocketHandler {
     /**
      * Broadcast market update to all connected clients.
      */
-    public static void broadcastMarketUpdate(String symbol, double price, double change, 
-                                            double changePercent, long volume, String trend, double score, double rsi) {
+    public static void broadcastMarketUpdate(String symbol, double price, double change,
+                                            double changePercent, long volume, String trend,
+                                            double score, double rsi, String recommendation) {
         ObjectNode data = mapper.createObjectNode();
         ObjectNode symbolData = mapper.createObjectNode();
-        
+
         symbolData.put("symbol", symbol);
         symbolData.put("price", price);
         symbolData.put("change", change);
@@ -144,10 +145,12 @@ public final class TradingWebSocketHandler {
         symbolData.put("trend", trend);
         symbolData.put("score", score);
         symbolData.put("rsi", rsi);
-        
+        symbolData.put("recommendation", recommendation);
+
         data.set(symbol, symbolData);
-        
-        ObjectNode message = createMessage("MARKET_UPDATE", data);
+
+        // Use lowercase type so frontend switch(message.type) matches 'market_update'
+        ObjectNode message = createMessage("market_update", data);
         broadcast(message);
     }
 

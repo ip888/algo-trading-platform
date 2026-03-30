@@ -235,6 +235,11 @@ public final class StrategyManager {
      * This catches both recent pullbacks AND sustained multi-week downtrends
      * where lagging indicators (MACD, SMA50) still look bullish.
      */
+    /** Overload for tests — uses last close as live price. */
+    boolean isShortTermDowntrend(List<Double> closes) {
+        return isShortTermDowntrend(closes, closes.isEmpty() ? 0.0 : closes.get(closes.size() - 1));
+    }
+
     boolean isShortTermDowntrend(List<Double> closes, double livePrice) {
         if (closes.size() < 22) {
             return false;

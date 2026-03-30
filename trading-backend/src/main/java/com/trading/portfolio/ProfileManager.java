@@ -825,7 +825,10 @@ public class ProfileManager implements Runnable {
         try {
             var recentBars = client.getMarketHistory(symbol, 2);
             if (recentBars.size() >= 2) {
-                double prevClose = recentBars.get(0).close();
+                // Use the MOST RECENT completed bar (last in list = yesterday's close).
+                // Bug was: get(0) = older bar (e.g. Thursday), not yesterday (Friday).
+                // If stock rallied Friday then gaps down Monday, old code missed the gap.
+                double prevClose = recentBars.get(recentBars.size() - 1).close();
                 double gapDownPct = (prevClose - currentPrice) / prevClose * 100.0;
                 double gapDownThreshold = profile.stopLossPercent() * 0.67;
                 if (gapDownPct >= gapDownThreshold) {
@@ -846,6 +849,39 @@ public class ProfileManager implements Runnable {
             }
         } catch (Exception e) {
             logger.debug("{} Could not check gap-down for {}: {}", profilePrefix, symbol, e.getMessage());
+        }
+
+        // ========== INTRADAY TREND CHECK ==========
+        // Strategy BUY signals are based on yesterday's daily closes. If the stock is
+        // actively falling in the current session, the signal is stale and entry is risky.
+        // Check: last completed hourly bar must not show a decline of ≥0.3%, AND
+        //        current price must not be more than 0.2% below the previous hour close.
+        try {
+            var NY = java.time.ZoneId.of("America/New_York");
+            var sessionStart = java.time.LocalDate.now(NY).atTime(9, 30).atZone(NY).toInstant();
+            var intradayBars = client.getBars(symbol, "1Hour", 8).stream()
+                .filter(b -> !b.timestamp().isBefore(sessionStart))
+                .toList();
+            if (intradayBars.size() >= 2) {
+                double lastHourClose = intradayBars.get(intradayBars.size() - 1).close();
+                double prevHourClose = intradayBars.get(intradayBars.size() - 2).close();
+                double hourlyDeclinePct = (prevHourClose - lastHourClose) / prevHourClose * 100.0;
+                double currentVsPrevHour = (prevHourClose - currentPrice) / prevHourClose * 100.0;
+                // Block only if BOTH last hour was red AND current price is still below it
+                if (hourlyDeclinePct >= 0.3 && currentVsPrevHour >= 0.2) {
+                    String reason = String.format("intraday downtrend: last hour -%.1f%%, now -%.1f%% from prev hour",
+                        hourlyDeclinePct, currentVsPrevHour);
+                    blockedBuys.put(symbol, reason);
+                    logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⛔ BUY BLOCKED: %s %s", profile.name(), symbol, reason),
+                        "WARN"
+                    );
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("{} Could not check intraday trend for {}: {}", profilePrefix, symbol, e.getMessage());
         }
 
         // ========== POSITION LIMIT CHECK ==========
@@ -2453,18 +2489,26 @@ public class ProfileManager implements Runnable {
     }
 
     /**
-     * Returns milliseconds until 4:00 PM ET today (market close).
-     * Used to set pdtBlockedUntil for the rest of the trading day when PDT limit is hit
-     * on a protective exit — no point retrying every 10 min if Alpaca will keep rejecting.
+     * Returns milliseconds until the PDT day-trade count resets.
+     * - During market hours (before 4PM ET): block until today's close.
+     * - After market close: block only until next market OPEN (9:30 AM ET next weekday).
+     *   This prevents the block from lasting an entire extra trading day when a PDT
+     *   rejection occurs after hours (e.g. during an urgent-exit retry loop post-deploy).
      */
     private long millisUntilMarketClose() {
-        var now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
-        var closeToday = now.toLocalDate().atTime(16, 0)
-            .atZone(java.time.ZoneId.of("America/New_York"));
-        if (now.isAfter(closeToday)) {
-            // Already past close — block until tomorrow's close
-            closeToday = closeToday.plusDays(1);
+        var NY = java.time.ZoneId.of("America/New_York");
+        var now = java.time.ZonedDateTime.now(NY);
+        var closeToday = now.toLocalDate().atTime(16, 0).atZone(NY);
+        if (now.isBefore(closeToday)) {
+            // Still in trading day — block until today's close
+            return java.time.Duration.between(now, closeToday).toMillis();
         }
-        return java.time.Duration.between(now, closeToday).toMillis();
+        // After close — block only until next market open (9:30 AM next weekday)
+        var nextOpen = closeToday.toLocalDate().plusDays(1).atTime(9, 30).atZone(NY);
+        while (nextOpen.getDayOfWeek() == java.time.DayOfWeek.SATURDAY ||
+               nextOpen.getDayOfWeek() == java.time.DayOfWeek.SUNDAY) {
+            nextOpen = nextOpen.plusDays(1);
+        }
+        return java.time.Duration.between(now, nextOpen).toMillis();
     }
 }

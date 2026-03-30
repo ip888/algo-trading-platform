@@ -96,7 +96,7 @@ public final class StrategyManager {
                     };
 
                     // Block BUY signals when short-term price trend is bearish
-                    if (mtfSignal instanceof TradingSignal.Buy && isShortTermDowntrend(closes)) {
+                    if (mtfSignal instanceof TradingSignal.Buy && isShortTermDowntrend(closes, currentPrice)) {
                         logger.info("{}: Blocked MTF BUY signal - short-term downtrend detected " +
                             "(price below declining 10-bar SMA)", symbol);
                         return new TradingSignal.Hold("Short-term downtrend - blocking BUY");
@@ -109,7 +109,7 @@ public final class StrategyManager {
             var signal = evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime);
 
             // Block BUY signals from individual strategies when short-term trend is bearish
-            if (signal instanceof TradingSignal.Buy && isShortTermDowntrend(closes)) {
+            if (signal instanceof TradingSignal.Buy && isShortTermDowntrend(closes, currentPrice)) {
                 logger.info("{}: Blocked {} BUY signal - short-term downtrend detected",
                     symbol, activeStrategy);
                 return new TradingSignal.Hold("Short-term downtrend - blocking BUY");
@@ -235,7 +235,7 @@ public final class StrategyManager {
      * This catches both recent pullbacks AND sustained multi-week downtrends
      * where lagging indicators (MACD, SMA50) still look bullish.
      */
-    boolean isShortTermDowntrend(List<Double> closes) {
+    boolean isShortTermDowntrend(List<Double> closes, double livePrice) {
         if (closes.size() < 22) {
             return false;
         }
@@ -245,25 +245,25 @@ public final class StrategyManager {
         // ---- 10-bar SMA check (short-term) ----
         double sma10Current = smaOf(closes, size - 10, size);
         double sma10Previous = smaOf(closes, size - 11, size - 1);
-        double currentPrice = closes.get(size - 1);
-        boolean shortTermDown = currentPrice < sma10Current && sma10Current < sma10Previous;
+        // Use live intraday price instead of last daily close — catches today's drop
+        boolean shortTermDown = livePrice < sma10Current && sma10Current < sma10Previous;
 
         if (shortTermDown) {
-            double pct = ((sma10Current - currentPrice) / sma10Current) * 100;
+            double pct = ((sma10Current - livePrice) / sma10Current) * 100;
             logger.debug("Short-term downtrend: price ${} is {:.2f}% below declining 10-SMA ${}",
-                String.format("%.2f", currentPrice), pct, String.format("%.2f", sma10Current));
+                String.format("%.2f", livePrice), pct, String.format("%.2f", sma10Current));
             return true;
         }
 
         // ---- 20-bar SMA check (medium-term) ----
         double sma20Current = smaOf(closes, size - 20, size);
         double sma20Previous = smaOf(closes, size - 21, size - 1);
-        boolean mediumTermDown = currentPrice < sma20Current && sma20Current < sma20Previous;
+        boolean mediumTermDown = livePrice < sma20Current && sma20Current < sma20Previous;
 
         if (mediumTermDown) {
-            double pct = ((sma20Current - currentPrice) / sma20Current) * 100;
+            double pct = ((sma20Current - livePrice) / sma20Current) * 100;
             logger.debug("Medium-term downtrend: price ${} is {:.2f}% below declining 20-SMA ${}",
-                String.format("%.2f", currentPrice), pct, String.format("%.2f", sma20Current));
+                String.format("%.2f", livePrice), pct, String.format("%.2f", sma20Current));
             return true;
         }
 

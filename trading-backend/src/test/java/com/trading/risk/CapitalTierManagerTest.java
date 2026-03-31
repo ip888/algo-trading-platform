@@ -18,17 +18,18 @@ class CapitalTierManagerTest {
     class TierDetectionTests {
 
         @Test
-        @DisplayName("Should classify MICRO tier for very small accounts (<$500)")
+        @DisplayName("Should classify MICRO tier for very small accounts (<$250)")
         void testMicroTier() {
             assertEquals(CapitalTierManager.CapitalTier.MICRO, CapitalTierManager.getTier(0));
             assertEquals(CapitalTierManager.CapitalTier.MICRO, CapitalTierManager.getTier(100));
-            assertEquals(CapitalTierManager.CapitalTier.MICRO, CapitalTierManager.getTier(499));
+            assertEquals(CapitalTierManager.CapitalTier.MICRO, CapitalTierManager.getTier(249));
         }
 
         @Test
-        @DisplayName("Should classify SMALL tier for $500-$2000")
+        @DisplayName("Should classify SMALL tier for $250-$2000")
         void testSmallTier() {
-            assertEquals(CapitalTierManager.CapitalTier.SMALL, CapitalTierManager.getTier(500));
+            assertEquals(CapitalTierManager.CapitalTier.SMALL, CapitalTierManager.getTier(250));
+            assertEquals(CapitalTierManager.CapitalTier.SMALL, CapitalTierManager.getTier(499));
             assertEquals(CapitalTierManager.CapitalTier.SMALL, CapitalTierManager.getTier(1000));
             assertEquals(CapitalTierManager.CapitalTier.SMALL, CapitalTierManager.getTier(1999));
         }
@@ -65,7 +66,7 @@ class CapitalTierManagerTest {
         @Test
         @DisplayName("MICRO tier should have ultra-conservative parameters")
         void testMicroParameters() {
-            var params = CapitalTierManager.getParameters(300);
+            var params = CapitalTierManager.getParameters(200); // $200 < $250 = MICRO
 
             assertEquals(CapitalTierManager.CapitalTier.MICRO, params.tier());
             assertEquals(0.50, params.maxPositionPercent());

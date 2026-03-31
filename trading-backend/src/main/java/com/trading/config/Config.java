@@ -207,9 +207,9 @@ public class Config {
      * Get initial trading capital.
      */
     @Positive(message = "Initial capital must be positive")
-    @Min(value = 100, message = "Minimum capital is $100")
+    // No minimum: this is a fallback only. Live equity is fetched from Alpaca on startup.
     public double getInitialCapital() {
-        return getDoubleProperty("INITIAL_CAPITAL", 1000.0);
+        return getDoubleProperty("INITIAL_CAPITAL", 1.0);
     }
 
     public boolean isPDTProtectionEnabled() {

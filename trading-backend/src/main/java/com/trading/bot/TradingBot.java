@@ -33,7 +33,9 @@ public final class TradingBot {
     
     // Start time for uptime tracking
     private static final long START_TIME = System.currentTimeMillis();
-    
+    // Session start equity — set once from live Alpaca account, used for P&L display
+    private static volatile double SESSION_START_CAPITAL = 0.0;
+
     // Safety components
     private static com.trading.protection.HeartbeatMonitor heartbeatMonitor;
     private static com.trading.protection.EmergencyProtocol emergencyProtocol;
@@ -111,6 +113,8 @@ public final class TradingBot {
             logger.warn("Could not fetch Alpaca equity at startup ({}), using config value: ${}",
                 e.getMessage(), totalCapital);
         }
+
+        SESSION_START_CAPITAL = totalCapital; // persist for P&L display in later cycles
 
         double mainCapital = mainProfile.getCapitalAmount(totalCapital);
         double expCapital = expProfile.getCapitalAmount(totalCapital);
@@ -409,14 +413,8 @@ public final class TradingBot {
         var account = client.getAccount();
         var alpacaEquity = account.get("equity").asDouble();
         
-        // Cap equity at configured INITIAL_CAPITAL for small account testing
-        // This allows testing fractional trading behavior even on large paper accounts
-        var equity = Math.min(alpacaEquity, config.getInitialCapital());
-        
-        if (equity < alpacaEquity) {
-            logger.info("Capital capped: Using ${} (configured) instead of ${} (actual) for position sizing", 
-                String.format("%.2f", equity), String.format("%.2f", alpacaEquity));
-        }
+        // Always use the live Alpaca equity — INITIAL_CAPITAL is a startup fallback only.
+        var equity = alpacaEquity;
 
         // Check market hours
         boolean isMarketOpen = marketHoursFilter.isMarketOpen();
@@ -555,8 +553,9 @@ public final class TradingBot {
         
         // Broadcast portfolio update
         var totalValue = equity;
-        var totalPnL = totalValue - config.getInitialCapital();
-        var pnlPercent = (totalPnL / config.getInitialCapital()) * 100;
+        double startCapital = SESSION_START_CAPITAL > 0 ? SESSION_START_CAPITAL : config.getInitialCapital();
+        var totalPnL = totalValue - startCapital;
+        var pnlPercent = (totalPnL / startCapital) * 100;
         
         TradingWebSocketHandler.broadcastPortfolioUpdate(
             totalValue, totalPnL, pnlPercent, 

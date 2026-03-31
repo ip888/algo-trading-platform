@@ -59,7 +59,7 @@ public final class CapitalTierManager {
      * Determine the capital tier for a given equity amount.
      */
     public static CapitalTier getTier(double equity) {
-        if (equity < 500) {
+        if (equity < 250) {
             return CapitalTier.MICRO;
         } else if (equity < 2000) {
             return CapitalTier.SMALL;

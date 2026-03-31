@@ -1157,12 +1157,11 @@ public class ProfileManager implements Runnable {
             }
         }
         
-        // Adjust for VIX (traditional logic)
-        if (currentVix > 25) {
-            positionSize *= 0.7; // Reduce size in high volatility
-        }
-        
-        logger.info("{} {}: 🎯 Final position sizing: {} shares (VIX adjusted)", 
+        // VIX adjustment is already applied inside calculateVolatilityAdjustedSize (20/VIX factor).
+        // A second 30% cut here was double-penalizing volatile markets and starving a $365 account
+        // of capital. Removed to avoid triple-stacking: MICRO tier risk% + VIX formula + 0.7 here.
+
+        logger.info("{} {}: 🎯 Final position sizing: {} shares",
             profilePrefix, symbol, positionSize);
         
         // Create position with profile-specific risk parameters

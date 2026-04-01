@@ -698,11 +698,29 @@ public class ProfileManager implements Runnable {
             
             // Allow buying if:
             // 1. We don't have a position (qty == 0), OR
-            // 2. We have a position but BUY signal is strong (can add to position)
-            if (qty == 0 || (isTarget && buyingPower > 1.0)) {
+            // 2. We have a position but BUY signal is strong AND position is under tier max
+            if (qty == 0) {
                 handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
-            } else if (qty > 0) {
-                logger.debug("{} Skipping BUY for {} (already have position, low buying power: ${})", 
+            } else if (isTarget && buyingPower > 1.0) {
+                // Guard: don't add to position if it already exceeds tier max
+                double currentPositionValue = qty * currentPrice;
+                double tierMaxValue = equity * com.trading.risk.CapitalTierManager.getParameters(equity).maxPositionPercent();
+                if (currentPositionValue >= tierMaxValue) {
+                    logger.info("{} Skipping add-to-position for {} — already at tier max (${} / ${})",
+                        profilePrefix, symbol,
+                        String.format("%.2f", currentPositionValue),
+                        String.format("%.2f", tierMaxValue));
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⛔ ADD BLOCKED: %s position $%.0f exceeds tier max $%.0f (%.0f%%)",
+                            profile.name(), symbol, currentPositionValue, tierMaxValue,
+                            com.trading.risk.CapitalTierManager.getParameters(equity).maxPositionPercent() * 100),
+                        "INFO"
+                    );
+                } else {
+                    handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
+                }
+            } else {
+                logger.debug("{} Skipping BUY for {} (already have position, low buying power: ${})",
                     profilePrefix, symbol, String.format("%.2f", buyingPower));
             }
         } else if (signal instanceof TradingSignal.Sell sell) {

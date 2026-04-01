@@ -15,6 +15,7 @@ interface BotBehavior {
   recentTradeLosses: number;
   healthChecks: HealthCheck[];
   urgentExits: Record<string, string>;
+  blockedBuys: Record<string, string>;
   pdtDayTradeCount: number;
   pdtBlockedUntilMs: number;
   timestamp: number;
@@ -145,6 +146,19 @@ export const BotBehaviorMonitor = () => {
           </div>
         );
       })()}
+
+      {/* Blocked buys — entry gates active */}
+      {data.blockedBuys && Object.keys(data.blockedBuys).length > 0 && (
+        <div style={{ marginTop: '10px', background: '#1a1500', borderRadius: '6px', padding: '8px 10px', border: '1px solid #eab30844' }}>
+          <div style={{ fontSize: '11px', color: '#eab308', fontWeight: 700, marginBottom: '4px' }}>⛔ BLOCKED ENTRIES</div>
+          {Object.entries(data.blockedBuys).map(([symbol, reason]) => (
+            <div key={symbol} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', padding: '2px 0', borderBottom: '1px solid #333' }}>
+              <span style={{ color: '#eab308', fontWeight: 700 }}>{symbol}</span>
+              <span style={{ color: '#888', maxWidth: '180px', textAlign: 'right', lineHeight: 1.3 }}>{reason}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Urgent exit queue — failed protective sells */}
       {data.urgentExits && Object.keys(data.urgentExits).length > 0 && (

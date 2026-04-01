@@ -47,6 +47,10 @@ public final class TradingBot {
         return START_TIME;
     }
 
+    public static double getSessionStartCapital() {
+        return SESSION_START_CAPITAL;
+    }
+
 
     public static void main(String[] args) {
         var config = new Config();

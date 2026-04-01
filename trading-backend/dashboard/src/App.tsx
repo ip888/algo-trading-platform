@@ -60,19 +60,17 @@ function App() {
     ? accountData.equity 
     : (accountData?.cash || accountData?.buyingPower || 0);
 
-  // Use a more realistic starting capital for Alpaca Paper Trading
-  // Use a more realistic starting capital for Alpaca Paper Trading
-  const initialCapital = displayEquity > 50000 ? 100000 : (displayEquity > 5000 ? 10000 : 1000);
-  
-  // Use authoritative Daily P&L if available (Equity - Last Close Equity)
-  const dailyPnl = accountData?.lastEquity 
-    ? displayEquity - accountData.lastEquity 
-    : (displayEquity > 0 ? displayEquity - initialCapital : 0);
-    
-  // Calculate percentage based on last equity (standard Daily % change)
-  const pnlPercent = accountData?.lastEquity && accountData.lastEquity > 0
-    ? (dailyPnl / accountData.lastEquity) * 100
-    : (initialCapital > 0 && displayEquity > 0 ? (dailyPnl / initialCapital) * 100 : 0);
+  // Session start capital set by bot at startup from live Alpaca equity
+  const sessionStartCapital: number = (accountData as any)?.sessionStartCapital || 0;
+
+  // Session P&L: equity vs what we started the session with
+  const sessionPnl = sessionStartCapital > 0
+    ? displayEquity - sessionStartCapital
+    : (accountData?.lastEquity ? displayEquity - accountData.lastEquity : 0);
+
+  const sessionPnlBase = sessionStartCapital > 0 ? sessionStartCapital : (accountData?.lastEquity || displayEquity);
+  const pnlPercent = sessionPnlBase > 0 ? (sessionPnl / sessionPnlBase) * 100 : 0;
+  const dailyPnl = sessionPnl;
   
   /* New Tab State */
   const [activeTab, setActiveTab] = useState<'live' | 'strategy'>('live');
@@ -118,7 +116,7 @@ function App() {
           {/* TOP BAR - High-Speed Stats */}
           <div className="stats-strip">
             <div className="stat-card">
-              <span className="label">DAILY P&L</span>
+              <span className="label">SESSION P&L</span>
               <div className={`value ${dailyPnl >= 0 ? 'positive' : 'negative'}`}>
                 ${dailyPnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                 <span className="percent">({pnlPercent.toFixed(2)}%)</span>

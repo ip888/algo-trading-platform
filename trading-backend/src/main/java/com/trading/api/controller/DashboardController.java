@@ -684,7 +684,25 @@ public final class DashboardController {
             accountData.put("mainTakeProfitPercent", config.getMainTakeProfitPercent());
             accountData.put("experimentalTakeProfitPercent", config.getExperimentalTakeProfitPercent());
             accountData.put("stopLossPercent", config.getMainStopLossPercent());
-            
+
+            // Session start capital (set once at bot startup from live Alpaca equity)
+            double sessionStart = com.trading.bot.TradingBot.getSessionStartCapital();
+            accountData.put("sessionStartCapital", sessionStart > 0 ? sessionStart : equity);
+
+            // Capital tier classification + parameters
+            var tier = com.trading.risk.CapitalTierManager.getTier(equity);
+            var tierParams = com.trading.risk.CapitalTierManager.getParameters(equity);
+            accountData.put("capitalTier", tier.name());
+            accountData.put("tierMaxPositionPercent", tierParams.maxPositionPercent() * 100);
+            accountData.put("tierRiskPerTradePercent", tierParams.riskPerTradePercent() * 100);
+            accountData.put("tierMaxPositions", tierParams.maxPositions());
+            accountData.put("tierMinPositionValue", tierParams.minPositionValue());
+            accountData.put("tierPreferWholeShares", tierParams.preferWholeShares());
+
+            // EOD exit config
+            accountData.put("eodExitEnabled", config.isEodExitEnabled());
+            accountData.put("eodProfitLockEnabled", config.isEODProfitLockEnabled());
+
             ctx.json(accountData);
         } catch (Exception e) {
             logger.error("Failed to get account data", e);

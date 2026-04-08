@@ -40,7 +40,9 @@ import java.util.*;
  */
 public class ProfileManager implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger(ProfileManager.class);
-    private static final Duration SLEEP_DURATION = Duration.ofSeconds(10);
+    /** Cycle interval: read from profile-specific env var, default 30s for MAIN, 45s for others. */
+    private final Duration sleepDuration;
+    private static final Duration SLEEP_DURATION = Duration.ofSeconds(30); // fallback
     
     private final TradingProfile profile;
     private final double capital;
@@ -153,6 +155,13 @@ public class ProfileManager implements Runnable {
     private static volatile long staticPdtBlockedUntil = 0;
     private static volatile int staticDayTradeCount = 0;
 
+    // STATIC: Halt state snapshots — updated each cycle, exposed to dashboard
+    private static volatile boolean portfolioStopLossHaltActive = false;
+    private static volatile boolean maxDrawdownHaltActive = false;
+    private static volatile double latestVixSnapshot = 0.0;
+    private static volatile String latestRegimeSnapshot = "UNKNOWN";
+    private static volatile String latestTargetSymbolsSnapshot = "";
+
     private volatile boolean running = true;
     
     public ProfileManager(
@@ -216,7 +225,13 @@ public class ProfileManager implements Runnable {
         positionSizer.setAdaptiveManager(adaptiveManager);
         
         this.riskManager = new RiskManager(capital, positionSizer);
-        this.portfolioRiskManager = new PortfolioRiskManager(config, capital);
+        // Portfolio stop loss baseline = full account equity at startup (not just this profile's share).
+        // Using profile-split capital caused the check to compare full equity vs ~60% of it,
+        // making the portfolio stop loss never fire correctly.
+        double fullStartupCapital = com.trading.bot.TradingBot.getSessionStartCapital();
+        double portfolioBaseline = fullStartupCapital > 0 ? fullStartupCapital
+            : (profile.capitalPercent() > 0 ? capital / profile.capitalPercent() : capital);
+        this.portfolioRiskManager = new PortfolioRiskManager(config, portfolioBaseline);
         this.regimeDetector = new MarketRegimeDetector(client.getDelegate(), config, marketAnalyzer);
         
         // Create enhanced exit and portfolio management components
@@ -238,6 +253,18 @@ public class ProfileManager implements Runnable {
         this.orderTypeSelector = new SmartOrderTypeSelector();
         this.lendingTracker = new com.trading.lending.StockLendingTracker(config);
         this.optionsManager = new com.trading.options.OptionsStrategyManager(config);
+
+        // Cycle interval: MAIN reads MAIN_CYCLE_INTERVAL_MS, others read EXP_CYCLE_INTERVAL_MS
+        // Defaults: MAIN=20s, EXPERIMENTAL=40s — reduces API calls vs old 10s for both
+        String intervalEnvKey = profile.isMainProfile() ? "MAIN_CYCLE_INTERVAL_MS" : "EXP_CYCLE_INTERVAL_MS";
+        long defaultMs = profile.isMainProfile() ? 20_000L : 40_000L;
+        String envVal = System.getenv(intervalEnvKey);
+        long intervalMs = defaultMs;
+        if (envVal != null && !envVal.isBlank()) {
+            try { intervalMs = Long.parseLong(envVal); } catch (NumberFormatException ignored) {}
+        }
+        this.sleepDuration = Duration.ofMillis(intervalMs);
+        logger.info("[{}] Cycle interval: {}ms (env: {})", profile.name(), intervalMs, intervalEnvKey);
         
         logger.info("═══════════════════════════════════════════════════════");
         logger.info("[{}] Profile initialized with ${} capital, {} symbols",
@@ -269,7 +296,7 @@ public class ProfileManager implements Runnable {
                 runTradingCycle();
                 // Send heartbeat to safety system
                 com.trading.bot.TradingBot.beat("Profile-" + profile.name());
-                Thread.sleep(SLEEP_DURATION);
+                Thread.sleep(sleepDuration);
             } catch (InterruptedException e) {
                 logger.info("[{}] Profile thread interrupted", profile.name());
                 Thread.currentThread().interrupt();
@@ -277,7 +304,7 @@ public class ProfileManager implements Runnable {
             } catch (Exception e) {
                 logger.error("[{}] Error in trading cycle", profile.name(), e);
                 try {
-                    Thread.sleep(SLEEP_DURATION);
+                    Thread.sleep(sleepDuration);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     break;
@@ -297,9 +324,17 @@ public class ProfileManager implements Runnable {
         // Reconcile internal portfolio state with Alpaca positions
         reconcilePortfolioWithAlpaca(profilePrefix);
 
-        // Retry any protective exits that failed in a previous cycle (e.g., API down)
+        // Retry any protective exits that failed in a previous cycle (e.g., API down).
+        // Only drain during market hours — pre-market market orders get rejected by Alpaca
+        // (extended_hours=false), which throws an exception and keeps the symbol in the queue,
+        // causing a cancel-and-replace loop every 20s from market close until open.
         if (!urgentExitQueue.isEmpty()) {
-            drainUrgentExitQueue(profilePrefix);
+            if (marketHoursFilter.isMarketOpen()) {
+                drainUrgentExitQueue(profilePrefix);
+            } else {
+                logger.debug("{} Urgent exit queue has {} symbol(s) — holding until market open",
+                    profilePrefix, urgentExitQueue.size());
+            }
         }
 
         // Get current market regime (uses advanced detection if enabled)
@@ -340,6 +375,11 @@ public class ProfileManager implements Runnable {
         this.latestVix = currentVix;
         this.latestRegime = regime;
         this.latestEquity = equity;
+
+        // Update static snapshots for dashboard visibility
+        latestVixSnapshot = currentVix;
+        latestRegimeSnapshot = regime != null ? regime.name() : "UNKNOWN";
+        latestTargetSymbolsSnapshot = String.join(",", targetSymbols);
         
         logger.debug("{} Account equity: ${}, Buying power: ${}, Using: ${}", 
             profilePrefix, 
@@ -363,9 +403,21 @@ public class ProfileManager implements Runnable {
             logger.debug("{} Skipping risk/profit checks — market closed (orders can't fill)", profilePrefix);
         }
 
+        // ========== EMERGENCY / PAUSE GUARD ==========
+        // Risk exits above already ran. Skip all new entries if emergency or paused.
+        if (com.trading.bot.TradingBot.isEmergencyTriggered()) {
+            logger.warn("{} EMERGENCY ACTIVE — skipping new entries this cycle", profilePrefix);
+            return;
+        }
+        if (com.trading.bot.TradingBot.isTradingPaused()) {
+            logger.info("{} TRADING PAUSED — skipping new entries this cycle", profilePrefix);
+            return;
+        }
+
         // ========== PORTFOLIO-LEVEL STOP LOSS CHECK ==========
         // Halts NEW entries only — protective exits above have already run
         if (portfolioRiskManager.shouldHaltTrading(accountEquity)) {
+            portfolioStopLossHaltActive = true;
             logger.error("{} 🛑 PORTFOLIO STOP LOSS - Halting new entries (protective exits already checked)", profilePrefix);
 
             // Assess and log portfolio risk
@@ -378,6 +430,8 @@ public class ProfileManager implements Runnable {
             );
 
             return; // Skip new entries only
+        } else {
+            portfolioStopLossHaltActive = false;
         }
 
         // ========== CLEANUP EXCESS POSITIONS ==========
@@ -411,8 +465,11 @@ public class ProfileManager implements Runnable {
 
         // Check for max drawdown
         if (riskManager.shouldHaltTrading(equity)) {
+            maxDrawdownHaltActive = true;
             logger.error("{} HALTING TRADING: Max drawdown exceeded!", profilePrefix);
             return;
+        } else {
+            maxDrawdownHaltActive = false;
         }
 
         // Determine symbols to process (target + active positions not in target)
@@ -782,9 +839,11 @@ public class ProfileManager implements Runnable {
         // Solution: block all new buys when daytrade_count >= 2.
         int currentDayTrades = pdtProtection.getDayTradeCount();
         staticDayTradeCount = currentDayTrades; // sync for dashboard
-        int pdtReserveThreshold = 2; // Block buys at 2/3 to keep slot 3 for exits
-        if (pdtProtection.getDayTradeCount() > 0 && currentDayTrades >= pdtReserveThreshold && equity < 25000) {
-            logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping last slot for exits",
+        // Reserve 2 PDT slots for exits (2 positions may both need same-day exit).
+        // Block new buys after 1 day trade, keeping slots 2+3 for stop-loss/take-profit exits.
+        int pdtReserveThreshold = 1; // Block buys at 1/3 to keep slots 2+3 for exits
+        if (currentDayTrades >= pdtReserveThreshold && equity < 25000) {
+            logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping slots for exits",
                 profilePrefix, symbol, currentDayTrades, 3);
             TradingWebSocketHandler.broadcastActivity(
                 String.format("[%s] ⛔ BUY BLOCKED: %s — PDT slots reserved for exits (%d/3 used)",
@@ -1414,7 +1473,7 @@ public class ProfileManager implements Runnable {
     private void checkAllPositionsForRiskExits(String profilePrefix) {
         // Only MAIN profile should check and exit all positions
         // This prevents duplicate exit orders from multiple profiles
-        if (!profile.name().equals("MAIN")) {
+        if (!profile.isMainProfile()) {
             return;
         }
 
@@ -1491,6 +1550,11 @@ public class ProfileManager implements Runnable {
                             if (exitDecision.isPartial()) {
                                 logger.info("{} ✅ Partial exit executed: {} ({:.1f}% of position)",
                                     profilePrefix, symbol, exitDecision.quantity() * 100);
+                                // Mark the partial exit level so it won't re-trigger next cycle
+                                if (exitDecision.partialLevel() > 0) {
+                                    portfolio.setPosition(symbol,
+                                        Optional.of(position.markPartialExit(exitDecision.partialLevel())));
+                                }
                             } else {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
                                 portfolio.setPosition(symbol, Optional.empty());
@@ -1522,7 +1586,7 @@ public class ProfileManager implements Runnable {
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] ⛔ PDT LIMIT HIT: %s exit blocked — all sells paused until 4PM ET. Positions protected by native stops.",
                                     profile.name(), symbol), "ERROR");
-                            return;
+                            continue; // try remaining positions — non-day-trade sells may still succeed
                         } catch (Exception e) {
                             logger.error("{} Failed to place enhanced exit order for {}",
                                 profilePrefix, symbol, e);
@@ -1638,7 +1702,7 @@ public class ProfileManager implements Runnable {
      * Only MAIN profile drains the queue to avoid duplicate orders.
      */
     private void drainUrgentExitQueue(String profilePrefix) {
-        if (!profile.name().equals("MAIN")) return;
+        if (!profile.isMainProfile()) return;
         if (System.currentTimeMillis() < pdtBlockedUntil) return;
 
         for (String symbol : new java.util.HashSet<>(urgentExitQueue.keySet())) {
@@ -1717,6 +1781,10 @@ public class ProfileManager implements Runnable {
 
             // Clean up pending exit orders for positions that have been filled (no longer on Alpaca).
             // Use a snapshot of keys to avoid concurrent-modification issues with ConcurrentHashMap.
+            // Also clear STALE entries: order placed >20 min ago but position still exists on Alpaca
+            // (this happens when orders expire after market close or are rejected by Alpaca).
+            long staleThresholdMs = 20 * 60 * 1000L; // 20 minutes
+            long now = System.currentTimeMillis();
             int clearedExits = 0;
             for (String symbol : new java.util.HashSet<>(pendingExitOrders.keySet())) {
                 if (!alpacaSymbols.contains(symbol)) {
@@ -1724,8 +1792,15 @@ public class ProfileManager implements Runnable {
                     clearedExits++;
                     logger.info("{} Pending exit cleared: {} (position filled/gone from Alpaca)",
                         profilePrefix, symbol);
-                    // Also reset consecutive SL counter here if we see a clean exit
-                    // (symbol gone = order filled, we can allow fresh tracking)
+                } else {
+                    // Position still exists — check if our "pending" order is stale
+                    long placedAt = pendingExitOrders.getOrDefault(symbol, now);
+                    if (now - placedAt > staleThresholdMs) {
+                        pendingExitOrders.remove(symbol);
+                        clearedExits++;
+                        logger.warn("{} Stale pending exit cleared for {} — order is {}min old but position still exists (likely expired/rejected by Alpaca); will re-evaluate next cycle",
+                            profilePrefix, symbol, (now - placedAt) / 60000);
+                    }
                 }
             }
 
@@ -1735,6 +1810,34 @@ public class ProfileManager implements Runnable {
                     urgentExitQueue.remove(symbol);
                     logger.info("{} Urgent exit cleared: {} (position filled/gone from Alpaca)",
                         profilePrefix, symbol);
+                }
+            }
+
+            // Ensure every live Alpaca position has a matching OPEN record in the trade DB.
+            // This fixes the "0 trades in DB" problem after a redeploy wipes the ephemeral DB:
+            // positions that were bought in a previous session are re-inserted as OPEN so that
+            // when they are eventually sold, closeTrade() can find them and record P&L.
+            for (var pos : alpacaPositions) {
+                String symbol = pos.symbol();
+                if (!database.hasOpenTrade(symbol)) {
+                    try {
+                        database.recordTrade(
+                            symbol,
+                            "recovered",          // strategy = recovered (synced from Alpaca)
+                            profile.name(),
+                            java.time.Instant.now(),
+                            pos.avgEntryPrice(),
+                            pos.quantity(),
+                            pos.avgEntryPrice() * (1.0 - profile.stopLossPercent() / 100.0),
+                            pos.avgEntryPrice() * (1.0 + profile.takeProfitPercent() / 100.0)
+                        );
+                        logger.info("{} DB recovery: inserted OPEN trade for {} (qty={}, entry=${})",
+                            profilePrefix, symbol,
+                            String.format("%.4f", pos.quantity()),
+                            String.format("%.2f", pos.avgEntryPrice()));
+                    } catch (Exception e) {
+                        logger.warn("{} DB recovery failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                    }
                 }
             }
             if (clearedExits > 0) {
@@ -2009,7 +2112,7 @@ public class ProfileManager implements Runnable {
      */
     private void checkAllPositionsForProfitTargets(String profilePrefix) {
         // Only MAIN profile should check and exit all positions
-        if (!profile.name().equals("MAIN")) {
+        if (!profile.isMainProfile()) {
             return;
         }
 
@@ -2158,6 +2261,12 @@ public class ProfileManager implements Runnable {
                         double pnlDollars = (currentPrice - entryPrice) * qty;
                         
                         // Record trade close
+                        // Set cooldown BEFORE clearing position to close race window between
+                        // MAIN and EXPERIMENTAL profiles (position cleared → cooldown set gap = re-buy risk)
+                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
+                        consecutiveStopLosses.remove(symbol);
+                        lastExitPrices.remove(symbol);
+
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
                         portfolio.setPosition(symbol, Optional.empty());
 
@@ -2170,20 +2279,13 @@ public class ProfileManager implements Runnable {
                             "SUCCESS"
                         );
 
-                        // Set re-entry cooldown after take-profit exit
-                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + 30 * 60 * 1000L);
-
-                        // Reset consecutive SL counter and exit price gate on successful take-profit
-                        consecutiveStopLosses.remove(symbol);
-                        lastExitPrices.remove(symbol);
-
                         logger.info("{} ✅ Take profit exit order placed for {}", profilePrefix, symbol);
                     } catch (PDTRejectedException e) {
                         pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
                 staticPdtBlockedUntil = pdtBlockedUntil;
                         logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
-                        return;
+                        continue; // try remaining positions — non-day-trade sells may still succeed
                     } catch (Exception e) {
                         logger.error("{} ❌ FAILED to place take profit exit for {} - Exception: {}",
                             profilePrefix, symbol, e.getClass().getName(), e);
@@ -2255,7 +2357,7 @@ public class ProfileManager implements Runnable {
                 staticPdtBlockedUntil = pdtBlockedUntil;
                         logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
-                        return;
+                        continue; // try remaining positions — non-day-trade sells may still succeed
                     } catch (Exception e) {
                         logger.error("{} Failed to place stop loss exit for {}", profilePrefix, symbol, e);
                         urgentExitQueue.put(symbol, new UrgentExit(symbol, qty,
@@ -2279,7 +2381,7 @@ public class ProfileManager implements Runnable {
      */
     private void checkAndExecuteEodExit(String profilePrefix) {
         // Only MAIN profile should execute EOD exits
-        if (!profile.name().equals("MAIN")) {
+        if (!profile.isMainProfile()) {
             return;
         }
         
@@ -2423,7 +2525,7 @@ public class ProfileManager implements Runnable {
      */
     private void broadcastProfitTargetsData() {
         // Only broadcast from Main profile to avoid duplicate broadcasts
-        if (!profile.name().equals("MAIN")) {
+        if (!profile.isMainProfile()) {
             return;
         }
         
@@ -2504,6 +2606,13 @@ public class ProfileManager implements Runnable {
     public static java.util.Map<String, String> getBlockedBuys() {
         return java.util.Collections.unmodifiableMap(blockedBuys);
     }
+
+    /** Trading halt/gate state snapshots — updated each cycle, for dashboard diagnostics. */
+    public static boolean isPortfolioStopLossHaltActive() { return portfolioStopLossHaltActive; }
+    public static boolean isMaxDrawdownHaltActive() { return maxDrawdownHaltActive; }
+    public static double getLatestVixSnapshot() { return latestVixSnapshot; }
+    public static String getLatestRegimeSnapshot() { return latestRegimeSnapshot; }
+    public static String getLatestTargetSymbolsSnapshot() { return latestTargetSymbolsSnapshot; }
 
     /**
      * Returns milliseconds until the PDT day-trade count resets.

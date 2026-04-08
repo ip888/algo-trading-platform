@@ -1813,6 +1813,15 @@ public class ProfileManager implements Runnable {
                 }
             }
 
+            // Clean up ghost OPEN DB records for symbols no longer held on Alpaca.
+            // This fixes: close → position still shows on Alpaca one more cycle → recovery
+            // re-inserts OPEN record → fill confirms → orphaned OPEN record accumulates forever.
+            // Only MAIN profile does this cleanup to avoid races; min age = 2 minutes to avoid
+            // closing records for positions currently being opened this cycle.
+            if (profile.isMainProfile()) {
+                database.closeOrphanedOpenTrades(alpacaSymbols, 2 * 60 * 1000L);
+            }
+
             // Ensure every live Alpaca position has a matching OPEN record in the trade DB.
             // This fixes the "0 trades in DB" problem after a redeploy wipes the ephemeral DB:
             // positions that were bought in a previous session are re-inserted as OPEN so that

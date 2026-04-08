@@ -17,13 +17,23 @@ import java.util.concurrent.locks.StampedLock;
  */
 public class TradeDatabase {
     private static final Logger logger = LoggerFactory.getLogger(TradeDatabase.class);
-    private static final String DB_URL = "jdbc:sqlite:trades.db";
-    
+
     private final Connection connection;
     private final StampedLock lock = new StampedLock();
-    
+
+    /** Resolves the DB path: uses DATA_DIR env var if set, otherwise current directory. */
+    private static String resolveDbPath() {
+        String dataDir = System.getenv("DATA_DIR");
+        if (dataDir != null && !dataDir.isBlank()) {
+            java.io.File dir = new java.io.File(dataDir);
+            if (!dir.exists()) dir.mkdirs();
+            return dataDir + "/trades.db";
+        }
+        return "trades.db";
+    }
+
     public TradeDatabase() {
-        this("trades.db");
+        this(resolveDbPath());
     }
     
     public TradeDatabase(String dbPath) {
@@ -190,6 +200,37 @@ public class TradeDatabase {
         return 0.0; // Default if no open trade found
     }
     
+    /**
+     * Returns true if there is already an OPEN trade record for this symbol.
+     * Used during startup reconciliation to avoid double-inserting existing positions.
+     */
+    public boolean hasOpenTrade(String symbol) {
+        String sql = "SELECT COUNT(*) as cnt FROM trades WHERE symbol = ? AND status = 'OPEN'";
+        long stamp = lock.tryOptimisticRead();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            try (var rs = stmt.executeQuery()) {
+                int count = rs.next() ? rs.getInt("cnt") : 0;
+                if (lock.validate(stamp)) return count > 0;
+            }
+        } catch (SQLException e) {
+            logger.debug("hasOpenTrade query failed for {}: {}", symbol, e.getMessage());
+        }
+        // Fallback with read lock
+        stamp = lock.readLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() && rs.getInt("cnt") > 0;
+            }
+        } catch (SQLException e) {
+            logger.error("hasOpenTrade fallback failed for {}: {}", symbol, e.getMessage());
+            return false;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
     /**
      * Close a trade with write lock.
      */
@@ -474,24 +515,27 @@ public class TradeDatabase {
         
         try {
             String sql = "SELECT symbol, strategy, profile, entry_time, entry_price, quantity, " +
-                        "exit_time, exit_price, pnl, stop_loss, take_profit " +
+                        "exit_time, exit_price, pnl, stop_loss, take_profit, status " +
                         "FROM trades ORDER BY entry_time DESC LIMIT ?";
-            
+
             try (PreparedStatement stmt = connection.prepareStatement(sql)) {
                 stmt.setInt(1, limit);
                 ResultSet rs = stmt.executeQuery();
-                
+
                 while (rs.next()) {
                     java.util.Map<String, Object> trade = new java.util.HashMap<>();
                     trade.put("symbol", rs.getString("symbol"));
                     trade.put("strategy", rs.getString("strategy"));
                     trade.put("profile", rs.getString("profile"));
-                    trade.put("entryTime", rs.getLong("entry_time"));
+                    trade.put("entryTime", rs.getString("entry_time"));
                     trade.put("entryPrice", rs.getDouble("entry_price"));
                     trade.put("quantity", rs.getDouble("quantity"));
-                    trade.put("exitTime", rs.getLong("exit_time"));
+                    trade.put("exitTime", rs.getString("exit_time"));
                     trade.put("exitPrice", rs.getDouble("exit_price"));
-                    trade.put("pnl", rs.getDouble("pnl"));
+                    trade.put("status", rs.getString("status"));
+                    // Only include pnl for closed trades (avoids 0.0 masquerading as closed)
+                    double pnlVal = rs.getDouble("pnl");
+                    if (!rs.wasNull()) trade.put("pnl", pnlVal);
                     trade.put("stopLoss", rs.getDouble("stop_loss"));
                     trade.put("takeProfit", rs.getDouble("take_profit"));
                     trades.add(trade);
@@ -514,6 +558,42 @@ public class TradeDatabase {
         return trades;
     }
     
+    /**
+     * Close any OPEN trade records for symbols no longer held on the broker.
+     * Called during portfolio reconciliation to prevent ghost "OPEN" records accumulating
+     * when a sell order fills between the reconcile recovery-insert and the next cycle.
+     * Marks orphaned records as CANCELLED (null exit price/pnl) so they appear in history
+     * but don't count toward P&L stats.
+     * Only closes records older than minAgeMs to avoid race with just-inserted records.
+     */
+    public int closeOrphanedOpenTrades(java.util.Set<String> liveSymbols, long minAgeMs) {
+        if (liveSymbols == null) liveSymbols = java.util.Collections.emptySet();
+        // Build NOT IN clause — safe because symbols are validated ticker strings
+        String placeholders = liveSymbols.isEmpty() ? "'__none__'" :
+            liveSymbols.stream().map(s -> "?").collect(java.util.stream.Collectors.joining(","));
+        String sql = "UPDATE trades SET status = 'CANCELLED', exit_time = ? " +
+            "WHERE status = 'OPEN' AND symbol NOT IN (" + placeholders + ") " +
+            "AND created_at <= datetime('now', '-' || ? || ' seconds')";
+
+        long stamp = lock.writeLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            int idx = 1;
+            stmt.setString(idx++, java.time.Instant.now().toString());
+            for (String sym : liveSymbols) stmt.setString(idx++, sym);
+            stmt.setLong(idx, minAgeMs / 1000);
+            int updated = stmt.executeUpdate();
+            if (updated > 0) {
+                logger.warn("Closed {} orphaned OPEN trade record(s) for symbols no longer on broker", updated);
+            }
+            return updated;
+        } catch (SQLException e) {
+            logger.error("Failed to close orphaned trades", e);
+            return 0;
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
     /**
      * Close database connection.
      * Should be called on application shutdown.

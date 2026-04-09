@@ -889,6 +889,7 @@ public final class TradingBot {
         return switch (broker) {
             case "tradier"   -> new com.trading.api.TradierClient(config);
             case "tradovate" -> new com.trading.api.TradovateClient(config);
+            case "ibkr"      -> new com.trading.api.IBKRClient(config);
             default          -> new AlpacaClient(config);
         };
     }

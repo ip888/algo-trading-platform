@@ -1449,4 +1449,15 @@ public class Config {
     public boolean isTradovateDemo()     {
         return Boolean.parseBoolean(getProperty("TRADOVATE_DEMO", "true"));
     }
+
+    // ==================== IBKR Broker Configuration ====================
+
+    public String getIBKRAccessToken() { return getEnv("IBKR_ACCESS_TOKEN", ""); }
+    public String getIBKRAccountId()   { return getEnv("IBKR_ACCOUNT_ID", ""); }
+    public String getIBKRBaseUrl()     { return getEnv("IBKR_BASE_URL", "https://api.ibkr.com/v1/api"); }
+
+    private String getEnv(String key, String defaultValue) {
+        String env = System.getenv(key);
+        return env != null ? env : getProperty(key, defaultValue);
+    }
 }

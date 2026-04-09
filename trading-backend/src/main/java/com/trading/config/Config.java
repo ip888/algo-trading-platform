@@ -1439,4 +1439,14 @@ public class Config {
         String env = System.getenv("TRADIER_SANDBOX");
         return "true".equalsIgnoreCase(env) || getBooleanProperty("TRADIER_SANDBOX", false);
     }
+
+    // ==================== Tradovate Broker Configuration ====================
+
+    public String getTradovateUsername() { return getProperty("TRADOVATE_USERNAME", ""); }
+    public String getTradovatePassword() { return getProperty("TRADOVATE_PASSWORD", ""); }
+    public String getTradovateAppId()    { return getProperty("TRADOVATE_APP_ID", ""); }
+    public String getTradovateAppSecret(){ return getProperty("TRADOVATE_APP_SECRET", ""); }
+    public boolean isTradovateDemo()     {
+        return Boolean.parseBoolean(getProperty("TRADOVATE_DEMO", "true"));
+    }
 }

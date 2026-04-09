@@ -879,4 +879,17 @@ public final class TradingBot {
         }
         return true; // Default to true if monitor not active
     }
+
+    /**
+     * Factory method: creates the appropriate BrokerClient based on the BROKER env var.
+     * Defaults to Alpaca if BROKER is not set.
+     */
+    public static com.trading.api.BrokerClient createBrokerClient(Config config) {
+        String broker = System.getenv().getOrDefault("BROKER", "alpaca").toLowerCase();
+        return switch (broker) {
+            case "tradier"   -> new com.trading.api.TradierClient(config);
+            case "tradovate" -> new com.trading.api.TradovateClient(config);
+            default          -> new AlpacaClient(config);
+        };
+    }
 }

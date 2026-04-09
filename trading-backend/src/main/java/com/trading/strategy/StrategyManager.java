@@ -19,14 +19,9 @@ public final class StrategyManager {
     private static final Logger logger = LoggerFactory.getLogger(StrategyManager.class);
     private static final double VOLATILITY_THRESHOLD = 0.015; // 1.5%
     
-    // Momentum assets that perform well in uptrends (Gold, safe havens, tech leaders, energy, power)
-    private static final java.util.Set<String> MOMENTUM_ASSETS = java.util.Set.of(
-        "GLD", "SLV", "TLT", "XLU",  // Safe havens / utilities
-        "NVDA", "TSLA", "META",       // Momentum tech
-        "XLE", "XLK",                 // Sector leaders
-        "XOP",                        // Oil & Gas energy
-        "URA", "GRID"                 // Nuclear, grid infrastructure
-    );
+    // Momentum assets loaded from config (MOMENTUM_ASSETS key), with hardcoded fallback.
+    // Use config to tune without redeploying.
+    private final java.util.Set<String> momentumAssets;
     
     private final AlpacaClient client;
     private final Config config;
@@ -54,7 +49,9 @@ public final class StrategyManager {
         this.meanReversionStrategy = new MeanReversionStrategy();
         this.momentumStrategy = config != null ? new MomentumStrategy(config) : new MomentumStrategy();
         this.multiTimeframeAnalyzer = multiTimeframeAnalyzer;
-        
+        this.momentumAssets = config != null ? config.getMomentumAssets()
+            : java.util.Set.of("GLD","SLV","TLT","XLU","NVDA","TSLA","META","XLE","XLK","XOP","URA","GRID");
+
         if (multiTimeframeAnalyzer != null) {
             logger.info("StrategyManager initialized with multi-timeframe analysis + Momentum Strategy");
         }
@@ -131,7 +128,7 @@ public final class StrategyManager {
         currentRegime = regime;
         
         // Check if this is a momentum asset (should use momentum strategy in uptrends)
-        boolean isMomentumAsset = MOMENTUM_ASSETS.contains(symbol);
+        boolean isMomentumAsset = momentumAssets.contains(symbol);
         
         // Select strategy based on regime AND asset type
         TradingSignal signal = switch (regime) {

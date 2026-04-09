@@ -1,6 +1,6 @@
 package com.trading.execution;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import com.trading.config.Config;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -14,9 +14,9 @@ public class SmartOrderRouter {
     private static final Logger logger = LoggerFactory.getLogger(SmartOrderRouter.class);
     
     private final Config config;
-    private final AlpacaClient client;
-    
-    public SmartOrderRouter(Config config, AlpacaClient client) {
+    private final BrokerClient client;
+
+    public SmartOrderRouter(Config config, BrokerClient client) {
         this.config = config;
         this.client = client;
     }

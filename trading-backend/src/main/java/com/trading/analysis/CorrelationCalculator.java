@@ -1,6 +1,6 @@
 package com.trading.analysis;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import com.trading.api.model.Bar;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,11 +23,11 @@ import java.util.stream.Collectors;
 public class CorrelationCalculator {
     private static final Logger logger = LoggerFactory.getLogger(CorrelationCalculator.class);
     
-    private final AlpacaClient client;
+    private final BrokerClient client;
     private static final int CORRELATION_PERIOD = 20; // 20 days for correlation
     private static final double HIGH_CORRELATION_THRESHOLD = 0.7; // 70% correlation
     
-    public CorrelationCalculator(AlpacaClient client) {
+    public CorrelationCalculator(BrokerClient client) {
         this.client = client;
         logger.info("CorrelationCalculator initialized");
     }

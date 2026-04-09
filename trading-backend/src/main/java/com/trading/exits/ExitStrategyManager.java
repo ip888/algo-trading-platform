@@ -7,8 +7,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -50,18 +48,23 @@ public class ExitStrategyManager {
         double quantity,      // How much to exit (0.0 to 1.0 = percentage of position)
         String reason,
         boolean isPartial,    // True if partial exit, false if full exit
-        double expectedPrice  // Expected exit price (for limit orders)
+        double expectedPrice, // Expected exit price (for limit orders)
+        int partialLevel      // 1/2/3 for partial profit levels, 0 otherwise
     ) {
         public static ExitDecision noExit() {
-            return new ExitDecision(ExitType.NONE, 0.0, "No exit signal", false, 0.0);
+            return new ExitDecision(ExitType.NONE, 0.0, "No exit signal", false, 0.0, 0);
         }
-        
+
         public static ExitDecision fullExit(ExitType type, String reason, double price) {
-            return new ExitDecision(type, 1.0, reason, false, price);
+            return new ExitDecision(type, 1.0, reason, false, price, 0);
         }
-        
+
         public static ExitDecision partialExit(ExitType type, double quantity, String reason, double price) {
-            return new ExitDecision(type, quantity, reason, true, price);
+            return new ExitDecision(type, quantity, reason, true, price, 0);
+        }
+
+        public static ExitDecision partialProfitExit(int level, double quantity, String reason, double price) {
+            return new ExitDecision(ExitType.PARTIAL_PROFIT, quantity, reason, true, price, level);
         }
     }
     
@@ -120,7 +123,7 @@ public class ExitStrategyManager {
         }
         
         // Priority 6: Correlation exit
-        ExitDecision correlationExit = evaluateCorrelationExit(position, portfolioPositions);
+        ExitDecision correlationExit = evaluateCorrelationExit(position, currentPrice, portfolioPositions);
         if (correlationExit.type() != ExitType.NONE) {
             return correlationExit;
         }
@@ -141,19 +144,19 @@ public class ExitStrategyManager {
         
         // Check if we've hit any partial exit levels
         if (progressToTarget >= PARTIAL_EXIT_LEVEL_3 && !position.hasPartialExit(3)) {
-            return ExitDecision.partialExit(ExitType.PARTIAL_PROFIT, PARTIAL_EXIT_SIZE_3,
+            return ExitDecision.partialProfitExit(3, PARTIAL_EXIT_SIZE_3,
                 String.format("Partial exit at 75%% profit target (%.1f%% profit)", profitPercent * 100),
                 currentPrice);
         }
-        
+
         if (progressToTarget >= PARTIAL_EXIT_LEVEL_2 && !position.hasPartialExit(2)) {
-            return ExitDecision.partialExit(ExitType.PARTIAL_PROFIT, PARTIAL_EXIT_SIZE_2,
+            return ExitDecision.partialProfitExit(2, PARTIAL_EXIT_SIZE_2,
                 String.format("Partial exit at 50%% profit target (%.1f%% profit)", profitPercent * 100),
                 currentPrice);
         }
-        
+
         if (progressToTarget >= PARTIAL_EXIT_LEVEL_1 && !position.hasPartialExit(1)) {
-            return ExitDecision.partialExit(ExitType.PARTIAL_PROFIT, PARTIAL_EXIT_SIZE_1,
+            return ExitDecision.partialProfitExit(1, PARTIAL_EXIT_SIZE_1,
                 String.format("Partial exit at 25%% profit target (%.1f%% profit)", profitPercent * 100),
                 currentPrice);
         }
@@ -221,23 +224,22 @@ public class ExitStrategyManager {
      * Evaluate correlation-based exit.
      * Reduce position if portfolio becomes too correlated.
      */
-    private ExitDecision evaluateCorrelationExit(TradePosition position, 
+    private ExitDecision evaluateCorrelationExit(TradePosition position, double currentPrice,
                                                  Map<String, Double> portfolioPositions) {
         // If we have too many positions (over-concentrated)
         int maxPositions = config.getPositionSizingMaxCorrelatedPositions();
-        
+
         if (portfolioPositions.size() > maxPositions) {
-            // Exit smallest profitable positions to reduce concentration
-            double profitPercent = position.getProfitPercent(position.entryPrice()); // Simplified
-            
+            double profitPercent = position.getProfitPercent(currentPrice);
+
             if (profitPercent > 0.02) { // At least 2% profit
                 return ExitDecision.partialExit(ExitType.CORRELATION, 0.50,
-                    String.format("Correlation exit - reducing exposure (%d positions)", 
+                    String.format("Correlation exit - reducing exposure (%d positions)",
                         portfolioPositions.size()),
-                    position.entryPrice());
+                    currentPrice);
             }
         }
-        
+
         return ExitDecision.noExit();
     }
     

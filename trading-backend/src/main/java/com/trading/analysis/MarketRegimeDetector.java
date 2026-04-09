@@ -1,6 +1,6 @@
 package com.trading.analysis;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import com.trading.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,7 +21,7 @@ import java.util.*;
 public class MarketRegimeDetector {
     private static final Logger logger = LoggerFactory.getLogger(MarketRegimeDetector.class);
     
-    private final AlpacaClient client;
+    private final BrokerClient client;
     private final Config config;
     private final MarketAnalyzer marketAnalyzer;
     
@@ -30,7 +30,7 @@ public class MarketRegimeDetector {
     private Instant lastUpdate;
     private final Duration cacheExpiry;
     
-    public MarketRegimeDetector(AlpacaClient client, Config config, MarketAnalyzer marketAnalyzer) {
+    public MarketRegimeDetector(BrokerClient client, Config config, MarketAnalyzer marketAnalyzer) {
         this.client = client;
         this.config = config;
         this.marketAnalyzer = marketAnalyzer;

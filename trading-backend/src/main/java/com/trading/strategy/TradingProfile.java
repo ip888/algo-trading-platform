@@ -73,6 +73,11 @@ public record TradingProfile(
         );
     }
     
+    /** True if this is the primary (MAIN) profile responsible for executing all exits. */
+    public boolean isMainProfile() {
+        return "MAIN".equals(name);
+    }
+
     /**
      * Get capital amount for this profile based on total capital.
      */

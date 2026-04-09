@@ -23,7 +23,7 @@ import java.util.Optional;
  * Modern HTTP client for Alpaca Markets API.
  * Uses Jackson for JSON parsing and proper logging.
  */
-public final class AlpacaClient {
+public final class AlpacaClient implements BrokerClient {
     private static final Logger logger = LoggerFactory.getLogger(AlpacaClient.class);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
     

@@ -1,6 +1,6 @@
 package com.trading.risk;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import com.trading.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,7 +53,7 @@ public class PortfolioRiskManager {
     /**
      * Assess overall portfolio risk.
      */
-    public PortfolioRisk assessRisk(AlpacaClient client, double currentEquity) {
+    public PortfolioRisk assessRisk(BrokerClient client, double currentEquity) {
         try {
             var positions = client.getPositions();
             

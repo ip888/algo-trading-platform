@@ -106,6 +106,10 @@ public final class DashboardController {
         app.post("/api/emergency/reset", this::handleReset);
         app.get("/api/emergency/status", this::getEmergencyStatus);
         app.get("/api/heartbeat", this::getHeartbeat);
+
+        app.post("/api/trading/pause", this::handleTradingPause);
+        app.post("/api/trading/resume", this::handleTradingResume);
+        app.get("/api/trading/paused", this::getTradingPausedStatus);
         
         // Health check endpoint for Docker/Kubernetes
         app.get("/api/health", this::getHealth);
@@ -810,9 +814,27 @@ public final class DashboardController {
         var details = com.trading.bot.TradingBot.getHeartbeatDetails();
         boolean isHealthy = com.trading.bot.TradingBot.isSystemHealthy();
         ctx.json(Map.of(
-            "status", isHealthy ? "ok" : "critical", 
+            "status", isHealthy ? "ok" : "critical",
             "components", details
         ));
+    }
+
+    private void handleTradingPause(Context ctx) {
+        com.trading.bot.TradingBot.pauseTrading();
+        com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
+            "⏸ TRADING PAUSED — no new entries until resumed", "WARN");
+        ctx.json(Map.of("paused", true));
+    }
+
+    private void handleTradingResume(Context ctx) {
+        com.trading.bot.TradingBot.resumeTrading();
+        com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
+            "▶ TRADING RESUMED — new entries re-enabled", "INFO");
+        ctx.json(Map.of("paused", false));
+    }
+
+    private void getTradingPausedStatus(Context ctx) {
+        ctx.json(Map.of("paused", com.trading.bot.TradingBot.isTradingPaused()));
     }
     
     /**
@@ -909,47 +931,82 @@ public final class DashboardController {
     }
     
     /**
-     * Get current watchlist with market data for UI initial load.
-     * Provides REST fallback when WebSocket hasn't pushed data yet.
+     * Get current watchlist with bot status per symbol.
+     * Returns which symbols are held, targeted, blocked, or cooling down.
      */
     private void getWatchlist(Context ctx) {
         try {
-            // Combine bullish, bearish symbols into watchlist
-            var watchlist = new java.util.HashSet<String>();
-            watchlist.addAll(config.getBullishSymbols());
-            watchlist.addAll(config.getBearishSymbols());
-            watchlist.addAll(config.getMainBullishSymbols());
-            watchlist.addAll(config.getMainBearishSymbols());
-            
-            // Get current VIX level
-            double vix = volatilityFilter != null ? volatilityFilter.getCurrentVIX() : 15.0;
-            String regime = vix > 25 ? "HIGH_VIX" : (vix < 15 ? "LOW_VIX" : "NORMAL");
-            
+            // Combine all configured symbols
+            var watchlistSet = new java.util.HashSet<String>();
+            watchlistSet.addAll(config.getBullishSymbols());
+            watchlistSet.addAll(config.getBearishSymbols());
+            watchlistSet.addAll(config.getMainBullishSymbols());
+            watchlistSet.addAll(config.getMainBearishSymbols());
+
+            // Current VIX / regime from bot snapshot
+            double vix = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            if (vix <= 0 && volatilityFilter != null) vix = volatilityFilter.getCurrentVIX();
+            String regime = com.trading.portfolio.ProfileManager.getLatestRegimeSnapshot();
+
+            // Per-symbol bot state
+            var blockedBuys  = com.trading.portfolio.ProfileManager.getBlockedBuys();
+            var cooldowns    = com.trading.portfolio.ProfileManager.getActiveCooldowns();
+            String targetStr = com.trading.portfolio.ProfileManager.getLatestTargetSymbolsSnapshot();
+            var targetSymbols = new java.util.HashSet<>(java.util.Arrays.asList(targetStr.split(",")));
+            targetSymbols.remove("");
+
+            // Currently held symbols from Alpaca — include entry price + unrealized P&L for display
+            var heldSymbols    = new java.util.HashSet<String>();
+            var heldEntryPrice = new java.util.HashMap<String, Double>();
+            var heldUnrealPct  = new java.util.HashMap<String, Double>();
+            try {
+                if (alpacaClient != null) {
+                    for (var pos : alpacaClient.getPositions()) {
+                        heldSymbols.add(pos.symbol());
+                        heldEntryPrice.put(pos.symbol(), pos.avgEntryPrice());
+                        heldUnrealPct.put(pos.symbol(), pos.unrealizedPL() / (pos.avgEntryPrice() * pos.quantity()) * 100.0);
+                    }
+                }
+            } catch (Exception ignored) { /* non-critical */ }
+
+            // Always include held positions and active targets in the watchlist
+            // even if they're not in the static config symbol lists
+            watchlistSet.addAll(heldSymbols);
+            watchlistSet.addAll(targetSymbols);
+
+            long now = System.currentTimeMillis();
             var result = new java.util.ArrayList<Map<String, Object>>();
-            
-            for (String symbol : watchlist) {
+
+            for (String symbol : watchlistSet) {
+                boolean inPosition  = heldSymbols.contains(symbol);
+                boolean isTarget    = targetSymbols.contains(symbol);
+                boolean blocked     = blockedBuys.containsKey(symbol);
+                String  blockReason = blocked ? blockedBuys.get(symbol) : null;
+                Long    cdExpiry    = cooldowns.get(symbol);
+                boolean inCooldown  = cdExpiry != null && cdExpiry > now;
+                long    cdMinutes   = inCooldown ? Math.max(0, (cdExpiry - now) / 60000) : 0;
+
                 var item = new java.util.HashMap<String, Object>();
-                item.put("symbol", symbol);
-                
-                // All symbols are stocks now (Alpaca only)
-                item.put("type", "STOCK");
-                item.put("tradingHours", "Market Hours");
-                
-                // Stocks will get prices through WebSocket in main trading loop
-                item.put("price", 0.0);
-                
-                // Add regime-based recommendation
-                item.put("regime", regime);
-                item.put("score", 50); // Neutral score
-                item.put("trend", "NEUTRAL");
-                
+                item.put("symbol",          symbol);
+                item.put("inPosition",      inPosition);
+                item.put("isTarget",        isTarget);
+                item.put("blocked",         blocked);
+                item.put("blockReason",     blockReason);
+                item.put("inCooldown",      inCooldown);
+                item.put("cooldownMinutes", cdMinutes);
+                // For held positions: include entry price and unrealized P&L% for display
+                if (inPosition && heldEntryPrice.containsKey(symbol)) {
+                    item.put("entryPrice",  heldEntryPrice.get(symbol));
+                    item.put("unrealPct",   heldUnrealPct.getOrDefault(symbol, 0.0));
+                }
                 result.add(item);
             }
-            
+
             ctx.json(Map.of(
                 "watchlist", result,
-                "vix", vix,
-                "regime", regime,
+                "vix",       vix,
+                "regime",    regime,
+                "targets",   targetStr,
                 "timestamp", System.currentTimeMillis()
             ));
         } catch (Exception e) {
@@ -1048,18 +1105,22 @@ public final class DashboardController {
             response.put("consecutiveStopLosses", consecSL);
             int maxConsecSL = consecSL.values().stream().mapToInt(Integer::intValue).max().orElse(0);
 
-            // --- Recent Trades (last 10) ---
+            // --- Recent Trades (last 10 CLOSED only) ---
             var recentTrades = database.getRecentTrades(10);
-            long wins = recentTrades.stream()
-                .filter(t -> t.get("pnl") instanceof Number n && n.doubleValue() > 0)
+            // Only count completed (closed) trades for win rate — OPEN trades have no P&L yet
+            var closedTrades = recentTrades.stream()
+                .filter(t -> t.get("pnl") instanceof Number)
+                .toList();
+            long wins = closedTrades.stream()
+                .filter(t -> ((Number) t.get("pnl")).doubleValue() > 0)
                 .count();
-            long losses = recentTrades.stream()
-                .filter(t -> t.get("pnl") instanceof Number n && n.doubleValue() < 0)
+            long losses = closedTrades.stream()
+                .filter(t -> ((Number) t.get("pnl")).doubleValue() < 0)
                 .count();
 
-            // Detect churn: same symbol appearing as both buy+sell within last 10 trades repeatedly
+            // Detect churn: same symbol appearing 4+ times in recent closed trades
             var symbolCounts = new HashMap<String, Integer>();
-            for (var trade : recentTrades) {
+            for (var trade : closedTrades) {
                 String sym = String.valueOf(trade.get("symbol"));
                 symbolCounts.merge(sym, 1, Integer::sum);
             }
@@ -1068,6 +1129,7 @@ public final class DashboardController {
             response.put("recentTradesWins", wins);
             response.put("recentTradeLosses", losses);
             response.put("recentTradeSymbolCounts", symbolCounts);
+            response.put("openPositionsCount", recentTrades.size() - closedTrades.size());
 
             // --- Health Checks (traffic-light signals) ---
             var checks = new ArrayList<Map<String, Object>>();
@@ -1102,13 +1164,13 @@ public final class DashboardController {
                     : "No churn detected in last 10 trades"
             ));
 
-            long winRatePct = recentTrades.isEmpty() ? 0 : (wins * 100) / recentTrades.size();
+            long winRatePct = closedTrades.isEmpty() ? 0 : (wins * 100) / closedTrades.size();
             checks.add(Map.of(
                 "name", "Recent Win Rate",
-                "status", recentTrades.isEmpty() ? "GREEN" : winRatePct >= 50 ? "GREEN" : winRatePct >= 30 ? "YELLOW" : "RED",
-                "detail", recentTrades.isEmpty()
+                "status", closedTrades.isEmpty() ? "GREEN" : winRatePct >= 50 ? "GREEN" : winRatePct >= 30 ? "YELLOW" : "RED",
+                "detail", closedTrades.isEmpty()
                     ? "No completed trades yet"
-                    : wins + "W / " + losses + "L in last " + recentTrades.size() + " trades (" + winRatePct + "%)"
+                    : wins + "W / " + losses + "L in last " + closedTrades.size() + " closed trades (" + winRatePct + "%)"
             ));
 
             boolean emergencyActive = com.trading.bot.TradingBot.isEmergencyTriggered();
@@ -1159,6 +1221,48 @@ public final class DashboardController {
                             .collect(java.util.stream.Collectors.joining(", "))
                 ));
             }
+
+            // --- VIX / Market Regime ---
+            double vixLevel = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            String regime = com.trading.portfolio.ProfileManager.getLatestRegimeSnapshot();
+            String targetSyms = com.trading.portfolio.ProfileManager.getLatestTargetSymbolsSnapshot();
+            double vixThreshold = config.getVixThreshold();
+            boolean vixElevated = vixLevel > 0 && vixLevel >= vixThreshold;
+            String vixStatus = vixLevel == 0 ? "YELLOW" : vixElevated ? "YELLOW" : "GREEN";
+            String vixDetail = vixLevel == 0
+                ? "VIX not yet fetched"
+                : String.format("VIX %.1f (threshold %.0f) — %s mode — targets: %s",
+                    vixLevel, vixThreshold,
+                    vixElevated ? "BEARISH" : "BULLISH",
+                    targetSyms.isEmpty() ? "none" : targetSyms);
+            checks.add(Map.of("name", "VIX / Market Regime", "status", vixStatus, "detail", vixDetail));
+            response.put("vixLevel", vixLevel);
+            response.put("marketRegime", regime);
+            response.put("targetSymbols", targetSyms);
+
+            // --- Portfolio Stop Loss Gate ---
+            boolean portfolioHalt = com.trading.portfolio.ProfileManager.isPortfolioStopLossHaltActive();
+            boolean drawdownHalt = com.trading.portfolio.ProfileManager.isMaxDrawdownHaltActive();
+            String entryGateStatus = (portfolioHalt || drawdownHalt) ? "RED" : "GREEN";
+            String entryGateDetail;
+            if (portfolioHalt && drawdownHalt) {
+                entryGateDetail = "BOTH portfolio stop loss AND max drawdown halts active — no new entries";
+            } else if (portfolioHalt) {
+                entryGateDetail = "Portfolio stop loss triggered — new entries halted (exits still running)";
+            } else if (drawdownHalt) {
+                entryGateDetail = "Max drawdown from peak exceeded — new entries halted";
+            } else {
+                entryGateDetail = "Entry gates open";
+            }
+            checks.add(Map.of("name", "Entry Gates", "status", entryGateStatus, "detail", entryGateDetail));
+
+            // --- Market Hours ---
+            boolean isMarketOpen = marketHoursFilter.isMarketOpen();
+            checks.add(Map.of(
+                "name", "Market Hours",
+                "status", isMarketOpen ? "GREEN" : "YELLOW",
+                "detail", isMarketOpen ? "Market open — normal trading" : "Market closed — risk exits still run, new entries blocked"
+            ));
 
             response.put("healthChecks", checks);
             response.put("urgentExits", urgentExits);

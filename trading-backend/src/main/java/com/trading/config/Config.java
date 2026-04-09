@@ -946,7 +946,17 @@ public class Config {
     }
     
     // ==================== Momentum Strategy Parameters ====================
-    
+
+    /**
+     * Symbols that use MomentumStrategy instead of MACD/RSI.
+     * These are trending assets (gold, safe havens, momentum tech, sector leaders).
+     */
+    public java.util.Set<String> getMomentumAssets() {
+        String symbols = getProperty("MOMENTUM_ASSETS",
+            "GLD,SLV,TLT,XLU,NVDA,TSLA,META,XLE,XLK,XOP,URA,GRID");
+        return java.util.Set.copyOf(java.util.Arrays.asList(symbols.split(",")));
+    }
+
     public double getMomentumRsiBuyMin() {
         return getDoubleProperty("MOMENTUM_RSI_BUY_MIN", 45.0);
     }

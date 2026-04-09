@@ -248,8 +248,8 @@ public final class TradingBot {
         
         Thread expThread = Thread.ofVirtual().name("profile-experimental").start(() -> {
             try {
-                Thread.sleep(5000); // Stagger by 5 seconds to avoid API rate limit conflicts
-                logger.info("Experimental profile starting (staggered by 5s)...");
+                Thread.sleep(20000); // Stagger by 20s to avoid API rate limit conflicts with MAIN
+                logger.info("Experimental profile starting (staggered by 20s)...");
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -839,6 +839,25 @@ public final class TradingBot {
     
     public static boolean isEmergencyTriggered() {
         return emergencyProtocol != null && emergencyProtocol.isTriggered();
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean tradingPaused =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    public static boolean pauseTrading() {
+        boolean changed = tradingPaused.compareAndSet(false, true);
+        if (changed) logger.warn("⏸ TRADING PAUSED by dashboard request");
+        return changed;
+    }
+
+    public static boolean resumeTrading() {
+        boolean changed = tradingPaused.compareAndSet(true, false);
+        if (changed) logger.info("▶ TRADING RESUMED by dashboard request");
+        return changed;
+    }
+
+    public static boolean isTradingPaused() {
+        return tradingPaused.get();
     }
     
     public static Map<String, Long> getHeartbeatDetails() {

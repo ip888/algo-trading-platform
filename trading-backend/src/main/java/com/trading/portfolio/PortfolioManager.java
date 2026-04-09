@@ -114,7 +114,7 @@ public final class PortfolioManager {
      * @param defaultTpPercent Default Take Profit percent (e.g., 4.0) if not known
      * @param defaultSlPercent Default Stop Loss percent (e.g., 2.0) if not known
      */
-    public void syncWithAlpaca(com.trading.api.AlpacaClient client, double defaultTpPercent, double defaultSlPercent) {
+    public void syncWithAlpaca(com.trading.api.BrokerClient client, double defaultTpPercent, double defaultSlPercent) {
         try {
             logger.info("Syncing portfolio with ALL Alpaca positions (Default TP: {}%, SL: {}%)", defaultTpPercent, defaultSlPercent);
             var accountPositions = client.getPositions();

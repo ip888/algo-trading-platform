@@ -1418,8 +1418,25 @@ public class Config {
     public boolean isSmartOrderRouting() {
         return getBooleanProperty("SMART_ORDER_ROUTING", true);
     }
-    
+
     public double getWideSpreadThreshold() {
         return getDoubleProperty("WIDE_SPREAD_THRESHOLD", 0.005);
+    }
+
+    // ==================== Tradier Broker Configuration ====================
+
+    public String getTradierAccessToken() {
+        String env = System.getenv("TRADIER_ACCESS_TOKEN");
+        return env != null ? env : getProperty("TRADIER_ACCESS_TOKEN", "");
+    }
+
+    public String getTradierAccountId() {
+        String env = System.getenv("TRADIER_ACCOUNT_ID");
+        return env != null ? env : getProperty("TRADIER_ACCOUNT_ID", "");
+    }
+
+    public boolean isTradierSandbox() {
+        String env = System.getenv("TRADIER_SANDBOX");
+        return "true".equalsIgnoreCase(env) || getBooleanProperty("TRADIER_SANDBOX", false);
     }
 }

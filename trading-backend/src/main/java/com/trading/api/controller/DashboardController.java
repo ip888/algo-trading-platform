@@ -199,7 +199,7 @@ public final class DashboardController {
             client.placeOrder(symbol, qty, "sell", "market", "day", null);
             
             // Record in DB
-            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnlDollars);
+            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnlDollars, "alpaca");
             
             logger.info("✅ Manually closed {}: qty={}, entry=${}, exit=${}, P&L=${} ({}%)",
                 symbol, qty, entryPrice, currentPrice, String.format("%.2f", pnlDollars), String.format("%.2f", pnlPercent));

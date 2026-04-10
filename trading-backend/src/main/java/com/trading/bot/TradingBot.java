@@ -700,7 +700,7 @@ public final class TradingBot {
                 symbol, "BUY", currentPrice, positionSize, buy.reason());
 
             // Record in database
-            database.recordTrade(symbol, "HYBRID", "SINGLE", newPosition.entryTime(),
+            database.recordTrade(symbol, "HYBRID", "SINGLE", "alpaca", newPosition.entryTime(),
                 newPosition.entryPrice(), newPosition.quantity(),
                 newPosition.stopLoss(), newPosition.takeProfit());
 
@@ -744,7 +744,7 @@ public final class TradingBot {
                         sell.reason() + " (P&L: $" + String.format("%.2f", pnl) + ")");
                     
                     // Record close in database
-                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl);
+                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, "alpaca");
                 }
             }
             
@@ -778,7 +778,7 @@ public final class TradingBot {
                     
                     // Close position in DB
                     var pnl = pos.calculatePnL(currentPrice);
-                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl);
+                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, "alpaca");
                     TradingWebSocketHandler.broadcastTradeEvent(symbol, "SELL", currentPrice, qty, reason);
                     
                     return Optional.empty();

@@ -67,13 +67,14 @@ public class ManualTradeMarket {
             // Record in database for bot tracking
             var position = riskManager.createPosition(symbol, currentPrice, positionSize);
             database.recordTrade(
-                symbol, 
+                symbol,
                 "MANUAL_TEST",
-                "TEST",  // profile name
+                "TEST",     // profile name
+                "alpaca",   // broker
                 position.entryTime(),
-                position.entryPrice(), 
+                position.entryPrice(),
                 position.quantity(),
-                position.stopLoss(), 
+                position.stopLoss(),
                 position.takeProfit()
             );
             logger.info("Position recorded in database for bot tracking");

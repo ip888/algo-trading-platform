@@ -4,7 +4,7 @@ import com.trading.ai.AnomalyDetector;
 import com.trading.ai.RiskPredictor;
 import com.trading.ai.SentimentAnalyzer;
 import com.trading.ai.SignalPredictor;
-import com.trading.api.ResilientAlpacaClient;
+import com.trading.api.ResilientBrokerClient;
 import com.trading.api.PDTRejectedException;
 import com.trading.analysis.MarketAnalyzer;
 import com.trading.config.Config;
@@ -74,7 +74,7 @@ public class ProfileManager implements Runnable {
     private final com.trading.options.OptionsStrategyManager optionsManager;
     
     // Shared resources (thread-safe)
-    private final ResilientAlpacaClient client;
+    private final ResilientBrokerClient client;
     private final StrategyManager strategyManager;
     private final MarketHoursFilter marketHoursFilter;
     private final VolatilityFilter volatilityFilter;
@@ -167,7 +167,7 @@ public class ProfileManager implements Runnable {
     public ProfileManager(
             TradingProfile profile,
             double capital,
-            ResilientAlpacaClient client,
+            ResilientBrokerClient client,
             StrategyManager strategyManager,
             MarketHoursFilter marketHoursFilter,
             VolatilityFilter volatilityFilter,
@@ -839,9 +839,11 @@ public class ProfileManager implements Runnable {
         // Solution: block all new buys when daytrade_count >= 2.
         int currentDayTrades = pdtProtection.getDayTradeCount();
         staticDayTradeCount = currentDayTrades; // sync for dashboard
-        // Reserve 2 PDT slots for exits (2 positions may both need same-day exit).
-        // Block new buys after 1 day trade, keeping slots 2+3 for stop-loss/take-profit exits.
-        int pdtReserveThreshold = 1; // Block buys at 1/3 to keep slots 2+3 for exits
+        // Reserve 1 PDT slot for exits (worst case: 1 position needs same-day stop-loss exit).
+        // Block new buys only when 2 of 3 day trades are already used.
+        // pdtReserveThreshold=2: allows buys at 0/3 and 1/3, blocks at 2/3 to keep 1 exit slot.
+        // Old threshold=1 was too aggressive: it blocked ALL trading after the first day trade.
+        int pdtReserveThreshold = config.getPdtReserveThreshold(); // default 2
         if (currentDayTrades >= pdtReserveThreshold && equity < 25000) {
             logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping slots for exits",
                 profilePrefix, symbol, currentDayTrades, 3);

@@ -217,6 +217,16 @@ public class Config {
     }
 
     /**
+     * Number of day-trade slots to reserve for protective exits before blocking new buys.
+     * Default 2: allow buys at 0/3 and 1/3 used; block at 2/3 to keep 1 slot for stop-loss exit.
+     * Old hardcoded value was 1 (blocked trading after just the first day trade — too aggressive).
+     * Set PDT_RESERVE_THRESHOLD=3 to effectively disable the buy-block (not recommended).
+     */
+    public int getPdtReserveThreshold() {
+        return getIntProperty("PDT_RESERVE_THRESHOLD", 2);
+    }
+
+    /**
      * Check if extended hours trading is enabled.
      * Allows trading during pre-market (4:00-9:30 AM) and post-market (4:00-8:00 PM).
      */
@@ -1445,6 +1455,9 @@ public class Config {
     public String getTradovateUsername() { return getProperty("TRADOVATE_USERNAME", ""); }
     public String getTradovatePassword() { return getProperty("TRADOVATE_PASSWORD", ""); }
     public String getTradovateAppId()    { return getProperty("TRADOVATE_APP_ID", ""); }
+    public String getTradovateAppVersion(){ return getProperty("TRADOVATE_APP_VERSION", "1.0"); }
+    /** Tradovate API Key ID (cid) — separate from appId, required for authentication */
+    public String getTradovateCid()      { return getProperty("TRADOVATE_CID", getProperty("TRADOVATE_APP_ID", "")); }
     public String getTradovateAppSecret(){ return getProperty("TRADOVATE_APP_SECRET", ""); }
     public boolean isTradovateDemo()     {
         return Boolean.parseBoolean(getProperty("TRADOVATE_DEMO", "true"));
@@ -1455,6 +1468,24 @@ public class Config {
     public String getIBKRAccessToken() { return getEnv("IBKR_ACCESS_TOKEN", ""); }
     public String getIBKRAccountId()   { return getEnv("IBKR_ACCOUNT_ID", ""); }
     public String getIBKRBaseUrl()     { return getEnv("IBKR_BASE_URL", "https://api.ibkr.com/v1/api"); }
+
+    // ==================== Multi-Broker Configuration ====================
+
+    /**
+     * Multi-broker allocation string.
+     * Format: "alpaca:40,tradier:35,tradovate:25"
+     * Each entry is broker_name:capital_percent.
+     * Percentages should sum to 100; if not, they are treated as weights.
+     * When set, the bot runs all listed brokers in parallel.
+     */
+    public String getBrokersAllocation() {
+        return getProperty("BROKERS", "");
+    }
+
+    public boolean isMultiBrokerEnabled() {
+        String v = getBrokersAllocation();
+        return v != null && !v.isBlank() && v.contains(",");
+    }
 
     private String getEnv(String key, String defaultValue) {
         String env = System.getenv(key);

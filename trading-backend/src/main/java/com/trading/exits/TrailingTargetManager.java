@@ -48,8 +48,8 @@ public class TrailingTargetManager {
                 state.level = 2;
                 state.lockedPercent = config.getTrailLevel2Lock();
                 
-                logger.info("🎯 {} Level 2 Trail: P&L=+{:.2f}%, Stop=${:.2f} (-{:.2f}%)",
-                    symbol, pnlPercent, newStop, trailPercent);
+                logger.info("🎯 {} Level 2 Trail: P&L=+{}%, Stop=${} (-{}%)",
+                    symbol, String.format("%.2f", pnlPercent), String.format("%.2f", newStop), String.format("%.2f", trailPercent));
                 
                 return newStop;
             }
@@ -64,8 +64,8 @@ public class TrailingTargetManager {
                 state.level = 1;
                 state.lockedPercent = config.getTrailLevel1Lock();
                 
-                logger.info("🎯 {} Level 1 Trail: P&L=+{:.2f}%, Stop=${:.2f} (-{:.2f}%)",
-                    symbol, pnlPercent, newStop, trailPercent);
+                logger.info("🎯 {} Level 1 Trail: P&L=+{}%, Stop=${} (-{}%)",
+                    symbol, String.format("%.2f", pnlPercent), String.format("%.2f", newStop), String.format("%.2f", trailPercent));
                 
                 return newStop;
             }
@@ -89,8 +89,8 @@ public class TrailingTargetManager {
             state.partialTaken = true;
             double exitPercent = state.lockedPercent;
             
-            logger.info("💰 {} Taking {:.0f}% profit at level {} (P&L: +{:.2f}%)",
-                symbol, exitPercent, state.level, pnlPercent);
+            logger.info("💰 {} Taking {}% profit at level {} (P&L: +{}%)",
+                symbol, String.format("%.0f", exitPercent), state.level, String.format("%.2f", pnlPercent));
             
             return exitPercent;
         }

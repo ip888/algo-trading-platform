@@ -62,8 +62,8 @@ public class PositionHealthScorer {
         // Ensure within bounds
         score = Math.max(0, Math.min(100, score));
         
-        logger.debug("{} Health Score: {:.0f} (P&L:{:.2f}% Held:{}h Mom:{:.2f}%)",
-            position.symbol(), score, pnlPercent, hoursHeld, momentum);
+        logger.debug("{} Health Score: {} (P&L:{}% Held:{}h Mom:{}%)",
+            position.symbol(), String.format("%.0f", score), String.format("%.2f", pnlPercent), hoursHeld, String.format("%.2f", momentum));
         
         return score;
     }

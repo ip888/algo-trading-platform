@@ -163,7 +163,8 @@ public class ProfileManager implements Runnable {
     private static volatile String latestTargetSymbolsSnapshot = "";
 
     private volatile boolean running = true;
-    
+    private final String brokerName;
+
     public ProfileManager(
             TradingProfile profile,
             double capital,
@@ -181,7 +182,8 @@ public class ProfileManager implements Runnable {
             AnomalyDetector anomalyDetector,
             RiskPredictor riskPredictor,
             com.trading.autonomous.ErrorDetector errorDetector,
-            com.trading.autonomous.ConfigSelfHealer configSelfHealer) {
+            com.trading.autonomous.ConfigSelfHealer configSelfHealer,
+            String brokerName) {
         
         this.profile = profile;
         this.capital = capital;
@@ -200,7 +202,8 @@ public class ProfileManager implements Runnable {
         this.riskPredictor = riskPredictor;
         this.errorDetector = errorDetector;
         this.configSelfHealer = configSelfHealer;
-        
+        this.brokerName = brokerName;
+
         // Create isolated resources for this profile
         this.symbolSelector = new SymbolSelector(
             profile.bullishSymbols(),
@@ -229,8 +232,9 @@ public class ProfileManager implements Runnable {
         // Using profile-split capital caused the check to compare full equity vs ~60% of it,
         // making the portfolio stop loss never fire correctly.
         double fullStartupCapital = com.trading.bot.TradingBot.getSessionStartCapital();
-        double portfolioBaseline = fullStartupCapital > 0 ? fullStartupCapital
-            : (profile.capitalPercent() > 0 ? capital / profile.capitalPercent() : capital);
+        // In multi-broker mode, getSessionStartCapital() returns 0 — use capital directly to avoid
+        // inflated baseline (e.g. $1179/0.6 = $1966 ghost baseline that triggers false stop loss).
+        double portfolioBaseline = fullStartupCapital > 0 ? fullStartupCapital : capital;
         this.portfolioRiskManager = new PortfolioRiskManager(config, portfolioBaseline);
         this.regimeDetector = new MarketRegimeDetector(client.getDelegate(), config, marketAnalyzer);
         
@@ -534,12 +538,12 @@ public class ProfileManager implements Runnable {
                 var correlation = correlationCalculator.analyzePortfolio(symbols);
                 
                 if (!correlation.highCorrelations().isEmpty()) {
-                    logger.warn("{} ⚠️ High correlation detected in portfolio (diversification: {:.2f})",
-                        profilePrefix, correlation.diversificationScore());
+                    logger.warn("{} ⚠️ High correlation detected in portfolio (diversification: {})",
+                        profilePrefix, String.format("%.2f", correlation.diversificationScore()));
                 }
                 
-                logger.debug("{} Portfolio diversification score: {:.2f}", 
-                    profilePrefix, correlation.diversificationScore());
+                logger.debug("{} Portfolio diversification score: {}",
+                    profilePrefix, String.format("%.2f", correlation.diversificationScore()));
             } catch (Exception e) {
                 logger.debug("{} Could not analyze correlation: {}", profilePrefix, e.getMessage());
             }
@@ -666,8 +670,8 @@ public class ProfileManager implements Runnable {
                 pos.isMaxLossExceeded(currentPrice, config.getMaxLossPercent())) {
                 
                 double lossPercent = pos.getLossPercent(currentPrice);
-                logger.warn("{} ⚠️ MAX LOSS EXIT: {} down {:.2f}% (limit: -{:.1f}%)", 
-                    profilePrefix, symbol, lossPercent, config.getMaxLossPercent());
+                logger.warn("{} ⚠️ MAX LOSS EXIT: {} down {}% (limit: -{}%)",
+                    profilePrefix, symbol, String.format("%.2f", lossPercent), String.format("%.1f", config.getMaxLossPercent()));
 
                 // Cancel existing orders to free up held shares
                 cancelExistingOrders(profilePrefix, symbol);
@@ -682,7 +686,7 @@ public class ProfileManager implements Runnable {
                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
                         logger.info("{} ✅ Max loss exit order placed for {} (attempt {}/{})", profilePrefix, symbol, attempt+1, maxAttempts);
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pos.calculatePnL(currentPrice));
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pos.calculatePnL(currentPrice), brokerName);
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]", 
                                 profile.name(), symbol, lossPercent, attempt+1),
@@ -723,7 +727,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Time-based exit order placed for {}", profilePrefix, symbol);
 
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnl);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
 
                         TradingWebSocketHandler.broadcastActivity(
@@ -788,8 +792,8 @@ public class ProfileManager implements Runnable {
 
                 // EMERGENCY STOP-LOSS: bypass hold-time and PDT if loss exceeds emergency threshold
                 if (lossPercent <= -emergencyThreshold) {
-                    logger.warn("{} {} EMERGENCY STOP-LOSS: loss {:.2f}% exceeds -{:.1f}% threshold — bypassing hold-time restriction",
-                        profilePrefix, symbol, lossPercent, emergencyThreshold);
+                    logger.warn("{} {} EMERGENCY STOP-LOSS: loss {}% exceeds -{}% threshold — bypassing hold-time restriction",
+                        profilePrefix, symbol, String.format("%.2f", lossPercent), String.format("%.1f", emergencyThreshold));
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] 🚨 EMERGENCY SELL: %s loss %.2f%% exceeds -%.1f%% threshold",
                             profile.name(), symbol, lossPercent, emergencyThreshold),
@@ -878,9 +882,9 @@ public class ProfileManager implements Runnable {
             double improvementPercent = ((lastExit - currentPrice) / lastExit) * 100.0;
             if (improvementPercent < MIN_PRICE_IMPROVEMENT_PERCENT) {
                 blockedBuys.put(symbol, String.format("waiting for price: need %.1f%% below $%.2f exit", MIN_PRICE_IMPROVEMENT_PERCENT, lastExit));
-                logger.info("{} {} PRICE IMPROVEMENT CHECK FAILED - last exit=${}, now=${}, need {:.1f}% drop but only {:.2f}%",
+                logger.info("{} {} PRICE IMPROVEMENT CHECK FAILED - last exit=${}, now=${}, need {}% drop but only {}%",
                     profilePrefix, symbol, String.format("%.2f", lastExit), String.format("%.2f", currentPrice),
-                    MIN_PRICE_IMPROVEMENT_PERCENT, improvementPercent);
+                    String.format("%.1f", MIN_PRICE_IMPROVEMENT_PERCENT), String.format("%.2f", improvementPercent));
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] ⏳ %s waiting for better price: need %.1f%% below $%.2f exit",
                         profile.name(), symbol, MIN_PRICE_IMPROVEMENT_PERCENT, lastExit),
@@ -889,8 +893,8 @@ public class ProfileManager implements Runnable {
                 return;
             }
             // Price has improved enough — clear the gate and allow entry
-            logger.info("{} {} PRICE IMPROVED {:.2f}% below last exit ${} — allowing re-entry",
-                profilePrefix, symbol, improvementPercent, String.format("%.2f", lastExit));
+            logger.info("{} {} PRICE IMPROVED {}% below last exit ${} — allowing re-entry",
+                profilePrefix, symbol, String.format("%.2f", improvementPercent), String.format("%.2f", lastExit));
             blockedBuys.remove(symbol);
             lastExitPrices.remove(symbol);
         }
@@ -913,9 +917,9 @@ public class ProfileManager implements Runnable {
                 if (gapDownPct >= gapDownThreshold) {
                     String reason = String.format("gap-down %.1f%% from $%.2f", gapDownPct, prevClose);
                     blockedBuys.put(symbol, reason);
-                    logger.info("{} {} BUY BLOCKED — gap-down {:.1f}% from yesterday close ${} (threshold {:.1f}%)",
-                        profilePrefix, symbol, gapDownPct,
-                        String.format("%.2f", prevClose), gapDownThreshold);
+                    logger.info("{} {} BUY BLOCKED — gap-down {}% from yesterday close ${} (threshold {}%)",
+                        profilePrefix, symbol, String.format("%.1f", gapDownPct),
+                        String.format("%.2f", prevClose), String.format("%.1f", gapDownThreshold));
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] ⛔ BUY BLOCKED: %s gap-down %.1f%% from $%.2f",
                             profile.name(), symbol, gapDownPct, prevClose),
@@ -1133,8 +1137,8 @@ public class ProfileManager implements Runnable {
                 // Use adaptive size instead of basic size
                 positionSize = Math.min(positionSize, adaptiveSize);
                 
-                logger.info("{} {}: 📊 PHASE 3 - Adaptive sizing: ${:.2f} (ML:{:.1f} VIX:{:.1f} Corr:{:.2f})",
-                    profilePrefix, symbol, positionSize, mlScore, currentVix, maxCorrelation);
+                logger.info("{} {}: 📊 PHASE 3 - Adaptive sizing: ${} (ML:{} VIX:{} Corr:{})",
+                    profilePrefix, symbol, String.format("%.2f", positionSize), String.format("%.1f", mlScore), String.format("%.1f", currentVix), String.format("%.2f", maxCorrelation));
                 
                 // Broadcast adaptive sizing to UI
                 TradingWebSocketHandler.broadcastPhase3Event(
@@ -1380,6 +1384,7 @@ public class ProfileManager implements Runnable {
             symbol,
             profile.strategyType(),
             profile.name(),  // Add profile name for tracking
+            brokerName,
             newPosition.entryTime(),
             currentPrice,
             positionSize,
@@ -1439,7 +1444,7 @@ public class ProfileManager implements Runnable {
         }
 
         // Close trade in database
-        database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl);
+        database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
         
         // Broadcast trade event
         TradingWebSocketHandler.broadcastTradeEvent(
@@ -1554,8 +1559,8 @@ public class ProfileManager implements Runnable {
                             client.placeOrderDirect(symbol, qtyToExit, "sell", "market", "day", null);
                             
                             if (exitDecision.isPartial()) {
-                                logger.info("{} ✅ Partial exit executed: {} ({:.1f}% of position)",
-                                    profilePrefix, symbol, exitDecision.quantity() * 100);
+                                logger.info("{} ✅ Partial exit executed: {} ({}% of position)",
+                                    profilePrefix, symbol, String.format("%.1f", exitDecision.quantity() * 100));
                                 // Mark the partial exit level so it won't re-trigger next cycle
                                 if (exitDecision.partialLevel() > 0) {
                                     portfolio.setPosition(symbol,
@@ -1611,8 +1616,8 @@ public class ProfileManager implements Runnable {
                 double lossPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
                 
                 if (lossPercent <= -config.getMaxLossPercent()) {
-                    logger.warn("{} ⚠️ MAX LOSS EXIT (untracked): {} down {:.2f}% (limit: -{:.1f}%)",
-                        profilePrefix, symbol, Math.abs(lossPercent), config.getMaxLossPercent());
+                    logger.warn("{} ⚠️ MAX LOSS EXIT (untracked): {} down {}% (limit: -{}%)",
+                        profilePrefix, symbol, String.format("%.2f", Math.abs(lossPercent)), String.format("%.1f", config.getMaxLossPercent()));
 
                     try {
                         cancelExistingOrders(profilePrefix, symbol);
@@ -1832,7 +1837,7 @@ public class ProfileManager implements Runnable {
             // Only MAIN profile does this cleanup to avoid races; min age = 2 minutes to avoid
             // closing records for positions currently being opened this cycle.
             if (profile.isMainProfile()) {
-                database.closeOrphanedOpenTrades(alpacaSymbols, 2 * 60 * 1000L);
+                database.closeOrphanedOpenTrades(brokerName, alpacaSymbols, 2 * 60 * 1000L);
             }
 
             // Ensure every live Alpaca position has a matching OPEN record in the trade DB.
@@ -1841,12 +1846,13 @@ public class ProfileManager implements Runnable {
             // when they are eventually sold, closeTrade() can find them and record P&L.
             for (var pos : alpacaPositions) {
                 String symbol = pos.symbol();
-                if (!database.hasOpenTrade(symbol)) {
+                if (!database.hasOpenTrade(symbol, brokerName)) {
                     try {
                         database.recordTrade(
                             symbol,
                             "recovered",          // strategy = recovered (synced from Alpaca)
                             profile.name(),
+                            brokerName,
                             java.time.Instant.now(),
                             pos.avgEntryPrice(),
                             pos.quantity(),
@@ -2108,7 +2114,7 @@ public class ProfileManager implements Runnable {
                 
                 // Record trade close
                 double currentPrice = Math.abs(pos.marketValue() / qty);
-                database.closeTrade(symbol, Instant.now(), currentPrice, pnl);
+                database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
                 
             } catch (Exception e) {
                 logger.error("{} Failed to close {} during cleanup", profilePrefix, symbol, e);
@@ -2214,7 +2220,7 @@ public class ProfileManager implements Runnable {
                     client.placeOrder(symbol, exitQty, "sell", "market", "day", null);
 
                     double pnlDollars = (currentPrice - entryPrice) * exitQty;
-                    database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
+                    database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                     if (!eodDecision.isPartial()) {
                         portfolio.setPosition(symbol, Optional.empty());
                         pendingExitOrders.put(symbol, System.currentTimeMillis());
@@ -2289,7 +2295,7 @@ public class ProfileManager implements Runnable {
                         consecutiveStopLosses.remove(symbol);
                         lastExitPrices.remove(symbol);
 
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
@@ -2334,7 +2340,7 @@ public class ProfileManager implements Runnable {
                         double pnlDollars = (currentPrice - entryPrice) * qty;
                         
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
@@ -2451,8 +2457,8 @@ public class ProfileManager implements Runnable {
                     double pnl = (currentPrice - entryPrice) * qty;
                     double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
                     
-                    logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({:.2f}%)",
-                        profilePrefix, symbol, qty, entryPrice, currentPrice, pnl, pnlPercent);
+                    logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({}%)",
+                        profilePrefix, symbol, qty, entryPrice, currentPrice, pnl, String.format("%.2f", pnlPercent));
                     
                     try {
                         // Cancel any existing orders for this symbol first

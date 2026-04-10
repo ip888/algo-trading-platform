@@ -2,7 +2,7 @@ package com.trading.api.controller;
 
 import com.trading.analysis.MarketAnalyzer;
 import com.trading.analysis.MarketRegimeDetector.MarketRegime;
-import com.trading.api.ResilientAlpacaClient;
+import com.trading.api.ResilientBrokerClient;
 import com.trading.backtest.BacktestEngine;
 import com.trading.config.Config;
 import com.trading.filters.MarketHoursFilter;
@@ -39,7 +39,7 @@ public final class DashboardController {
     private final VolatilityFilter volatilityFilter;
     private final Config config;
     private final TradeAnalytics tradeAnalytics;
-    private final ResilientAlpacaClient alpacaClient;
+    private final ResilientBrokerClient alpacaClient;
 
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
@@ -51,7 +51,7 @@ public final class DashboardController {
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                               VolatilityFilter volatilityFilter, Config config,
-                              TradeAnalytics tradeAnalytics, ResilientAlpacaClient alpacaClient) {
+                              TradeAnalytics tradeAnalytics, ResilientBrokerClient alpacaClient) {
         this.database = database;
         this.portfolio = portfolio;
         this.marketAnalyzer = marketAnalyzer;
@@ -142,6 +142,11 @@ public final class DashboardController {
 
         // Bot behavior health monitor
         app.get("/api/bot/behavior", this::getBotBehavior);
+
+        // Multi-broker endpoints
+        app.get("/api/brokers", this::getBrokers);
+        app.get("/api/brokers/status", this::getBrokerStatus);
+        app.get("/api/trades/by-broker", this::getTradesByBroker);
     }
     
     /**
@@ -479,8 +484,9 @@ public final class DashboardController {
                 positionMap.put("unrealized_pl", pos.unrealizedPL());
                 positionMap.put("unrealized_plpc", plpc);
                 positionMap.put("market_value", pos.marketValue());
+                positionMap.put("broker", "alpaca");
                 positionMap.put("platform", "alpaca");
-                
+
                 // Inject Risk Management Data (TP/SL) from PortfolioManager
                 // Falls back to config-derived values so dashboard always shows protection levels
                 var managedPos = portfolio.getPosition(pos.symbol());
@@ -500,7 +506,40 @@ public final class DashboardController {
                 positionMap.put("take_profit", tp);
                 result.add(positionMap);
             }
-            
+
+            // Fetch Tradier positions if configured
+            String brokersAlloc = config.getBrokersAllocation();
+            if (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier")) {
+                try {
+                    var tradierClient = new com.trading.api.TradierClient(config);
+                    var tradierPositions = tradierClient.getPositions();
+                    for (var pos : tradierPositions) {
+                        Map<String, Object> positionMap = new java.util.HashMap<>();
+                        positionMap.put("symbol", pos.symbol());
+                        positionMap.put("qty", pos.quantity());
+                        positionMap.put("quantity", pos.quantity());
+                        positionMap.put("entry_price", pos.avgEntryPrice());
+                        positionMap.put("entryPrice", pos.avgEntryPrice());
+                        double currentPrice = pos.quantity() != 0 ? pos.marketValue() / pos.quantity() : 0.0;
+                        double costBasis = pos.quantity() * pos.avgEntryPrice();
+                        double plpc = costBasis != 0 ? pos.unrealizedPL() / costBasis : 0.0;
+                        positionMap.put("current_price", currentPrice);
+                        positionMap.put("currentPrice", currentPrice);
+                        positionMap.put("unrealized_pl", pos.unrealizedPL());
+                        positionMap.put("unrealized_plpc", plpc);
+                        positionMap.put("market_value", pos.marketValue());
+                        positionMap.put("broker", "tradier");
+                        positionMap.put("platform", "tradier");
+                        double entryPx = pos.avgEntryPrice();
+                        positionMap.put("stopLoss", entryPx * (1.0 - config.getMainStopLossPercent() / 100.0));
+                        positionMap.put("takeProfit", entryPx * (1.0 + config.getMainTakeProfitPercent() / 100.0));
+                        result.add(positionMap);
+                    }
+                } catch (Exception te) {
+                    logger.warn("Failed to fetch Tradier positions for dashboard: {}", te.getMessage());
+                }
+            }
+
             ctx.json(result);
         } catch (Exception e) {
             logger.error("Failed to fetch positions", e);
@@ -1277,6 +1316,118 @@ public final class DashboardController {
             ctx.json(response);
         } catch (Exception e) {
             logger.error("Failed to get bot behavior", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/brokers
+     * Returns active brokers parsed from the BROKERS env var.
+     */
+    private void getBrokers(Context ctx) {
+        try {
+            String brokersAllocation = config.getBrokersAllocation();
+            List<Map<String, Object>> brokerList = new ArrayList<>();
+            boolean multiBroker = brokersAllocation != null && !brokersAllocation.isBlank();
+            if (multiBroker) {
+                for (String part : brokersAllocation.split(",")) {
+                    String trimmed = part.trim();
+                    if (trimmed.isEmpty()) continue;
+                    String[] kv = trimmed.split(":", 2);
+                    String name = kv[0].trim().toLowerCase();
+                    double allocation = kv.length == 2 ? Double.parseDouble(kv[1].trim()) : 100.0;
+                    boolean sandbox = "tradier".equals(name) && config.isTradierSandbox();
+                    brokerList.add(Map.of("name", name, "allocation", allocation, "sandbox", sandbox));
+                }
+            }
+            ctx.json(Map.of("brokers", brokerList, "multiBroker", multiBroker));
+        } catch (Exception e) {
+            logger.error("Failed to get brokers", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/brokers/status
+     * Returns live connectivity and account summary for each configured broker.
+     */
+    private void getBrokerStatus(Context ctx) {
+        var brokers = new java.util.ArrayList<Map<String, Object>>();
+        String brokersAlloc = config.getBrokersAllocation();
+
+        // Always include Alpaca
+        try {
+            var alpacaClient2 = new com.trading.api.AlpacaClient(config);
+            var account = alpacaClient2.getAccount();
+            Map<String, Object> alpacaInfo = new java.util.HashMap<>();
+            alpacaInfo.put("name", "alpaca");
+            alpacaInfo.put("sandbox", false);
+            alpacaInfo.put("connected", true);
+            alpacaInfo.put("equity", account.path("equity").asDouble(0));
+            alpacaInfo.put("cash", account.path("cash").asDouble(0));
+            alpacaInfo.put("buyingPower", account.path("buying_power").asDouble(0));
+            brokers.add(alpacaInfo);
+        } catch (Exception e) {
+            Map<String, Object> alpacaInfo = new java.util.HashMap<>();
+            alpacaInfo.put("name", "alpaca");
+            alpacaInfo.put("connected", false);
+            alpacaInfo.put("error", e.getMessage());
+            brokers.add(alpacaInfo);
+        }
+
+        // Include Tradier if configured
+        if (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier")) {
+            try {
+                var tradierClient = new com.trading.api.TradierClient(config);
+                var account = tradierClient.getAccount();
+                Map<String, Object> tradierInfo = new java.util.HashMap<>();
+                tradierInfo.put("name", "tradier");
+                tradierInfo.put("sandbox", config.isTradierSandbox());
+                tradierInfo.put("connected", true);
+                tradierInfo.put("equity", account.path("equity").asDouble(0));
+                tradierInfo.put("cash", account.path("buying_power").asDouble(0));
+                tradierInfo.put("buyingPower", account.path("buying_power").asDouble(0));
+                brokers.add(tradierInfo);
+            } catch (Exception e) {
+                Map<String, Object> tradierInfo = new java.util.HashMap<>();
+                tradierInfo.put("name", "tradier");
+                tradierInfo.put("sandbox", config.isTradierSandbox());
+                tradierInfo.put("connected", false);
+                tradierInfo.put("error", e.getMessage());
+                brokers.add(tradierInfo);
+            }
+        }
+
+        ctx.json(Map.of(
+            "brokers", brokers,
+            "multiBroker", brokersAlloc != null && !brokersAlloc.isBlank() && brokersAlloc.contains(":")
+        ));
+    }
+
+    /**
+     * GET /api/trades/by-broker?broker=tradier
+     * Returns trades filtered by broker, or all trades grouped by broker if no param given.
+     */
+    private void getTradesByBroker(Context ctx) {
+        try {
+            String brokerParam = ctx.queryParam("broker");
+            var allTrades = database.exportTrades(null);
+            if (brokerParam != null && !brokerParam.isBlank()) {
+                var filtered = allTrades.stream()
+                    .filter(t -> brokerParam.equalsIgnoreCase(String.valueOf(t.get("broker"))))
+                    .toList();
+                ctx.json(filtered);
+            } else {
+                // Group by broker
+                var grouped = new java.util.LinkedHashMap<String, List<Map<String, Object>>>();
+                for (var trade : allTrades) {
+                    String broker = String.valueOf(trade.getOrDefault("broker", "alpaca"));
+                    grouped.computeIfAbsent(broker, k -> new ArrayList<>()).add(trade);
+                }
+                ctx.json(grouped);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to get trades by broker", e);
             ctx.status(500).json(Map.of("error", e.getMessage()));
         }
     }

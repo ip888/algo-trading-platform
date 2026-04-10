@@ -1,6 +1,6 @@
 package com.trading.health;
 
-import com.trading.api.ResilientAlpacaClient;
+import com.trading.api.ResilientBrokerClient;
 import com.trading.persistence.TradeDatabase;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,10 +15,10 @@ import java.util.Map;
 public final class HealthCheckService {
     private static final Logger logger = LoggerFactory.getLogger(HealthCheckService.class);
     
-    private final ResilientAlpacaClient alpacaClient;
+    private final ResilientBrokerClient alpacaClient;
     private final TradeDatabase database;
     
-    public HealthCheckService(ResilientAlpacaClient alpacaClient, TradeDatabase database) {
+    public HealthCheckService(ResilientBrokerClient alpacaClient, TradeDatabase database) {
         this.alpacaClient = alpacaClient;
         this.database = database;
     }

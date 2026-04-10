@@ -77,8 +77,8 @@ public class FinGPTClient {
             // Cache result
             cache.put(cacheKey, new CachedSentiment(result, Instant.now()));
             
-            logger.info("📊 FinGPT Sentiment for {}: score={:.2f}, confidence={:.2f}, weighted={:.2f}", 
-                symbol, result.sentimentScore(), result.confidence(), result.weightedScore());
+            logger.info("📊 FinGPT Sentiment for {}: score={}, confidence={}, weighted={}",
+                symbol, String.format("%.2f", result.sentimentScore()), String.format("%.2f", result.confidence()), String.format("%.2f", result.weightedScore()));
             
             return result;
             

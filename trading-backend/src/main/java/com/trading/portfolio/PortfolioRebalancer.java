@@ -117,8 +117,8 @@ public class PortfolioRebalancer {
         
         if (shouldRebalance) {
             logger.info("🔄 REBALANCING RECOMMENDED: {}", reason);
-            logger.info("   Max drift: {:.1f}%, Target allocation: {:.1f}% per position",
-                maxDrift * 100, targetAllocation * 100);
+            logger.info("   Max drift: {}%, Target allocation: {}% per position",
+                String.format("%.1f", maxDrift * 100), String.format("%.1f", targetAllocation * 100));
         }
         
         // Create target allocations map
@@ -166,12 +166,12 @@ public class PortfolioRebalancer {
             if (Math.abs(sharesToTrade) > currentShares * 0.01) {
                 orders.put(symbol, sharesToTrade);
                 
-                logger.info("   {}: {} {} shares (current: {:.2f}, target: {:.2f})",
+                logger.info("   {}: {} {} shares (current: {}, target: {})",
                     symbol,
                     sharesToTrade > 0 ? "BUY" : "SELL",
                     Math.abs(sharesToTrade),
-                    currentShares,
-                    targetShares);
+                    String.format("%.2f", currentShares),
+                    String.format("%.2f", targetShares));
             }
         }
         

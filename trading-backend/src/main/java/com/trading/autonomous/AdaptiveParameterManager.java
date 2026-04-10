@@ -102,8 +102,8 @@ public class AdaptiveParameterManager {
             
             logger.info("🔄 ADAPTIVE TUNING: Evaluating performance...");
             logger.info("   Total Trades: {}", stats.totalTrades());
-            logger.info("   Win Rate: {:.1f}%", stats.winRate() * 100);
-            logger.info("   Total P&L: ${:.2f}", stats.totalPnL());
+            logger.info("   Win Rate: {}%", String.format("%.1f", stats.winRate() * 100));
+            logger.info("   Total P&L: ${}", String.format("%.2f", stats.totalPnL()));
             
             // Adjust based on performance
             adjustKellyFraction(stats);
@@ -132,31 +132,31 @@ public class AdaptiveParameterManager {
         if (winRate >= HIGH_WIN_RATE && profitable) {
             // Excellent performance - increase aggressiveness
             adaptiveKellyFraction = Math.min(0.30, adaptiveKellyFraction + 0.05);
-            logger.info("📈 Kelly Fraction INCREASED: {:.2f} → {:.2f} (Win Rate: {:.1f}%)", 
-                oldKelly, adaptiveKellyFraction, winRate * 100);
+            logger.info("📈 Kelly Fraction INCREASED: {} → {} (Win Rate: {}%)",
+                String.format("%.2f", oldKelly), String.format("%.2f", adaptiveKellyFraction), String.format("%.1f", winRate * 100));
                 
         } else if (winRate >= GOOD_WIN_RATE && profitable) {
             // Good performance - slight increase
             adaptiveKellyFraction = Math.min(0.25, adaptiveKellyFraction + 0.02);
-            logger.info("📈 Kelly Fraction increased: {:.2f} → {:.2f} (Win Rate: {:.1f}%)", 
-                oldKelly, adaptiveKellyFraction, winRate * 100);
+            logger.info("📈 Kelly Fraction increased: {} → {} (Win Rate: {}%)",
+                String.format("%.2f", oldKelly), String.format("%.2f", adaptiveKellyFraction), String.format("%.1f", winRate * 100));
                 
         } else if (winRate >= ACCEPTABLE_WIN_RATE) {
             // Acceptable - maintain
-            logger.info("➡️  Kelly Fraction maintained: {:.2f} (Win Rate: {:.1f}%)", 
-                adaptiveKellyFraction, winRate * 100);
+            logger.info("➡️  Kelly Fraction maintained: {} (Win Rate: {}%)",
+                String.format("%.2f", adaptiveKellyFraction), String.format("%.1f", winRate * 100));
                 
         } else if (winRate >= LOW_WIN_RATE) {
             // Below target - decrease slightly
             adaptiveKellyFraction = Math.max(0.15, adaptiveKellyFraction - 0.03);
-            logger.warn("📉 Kelly Fraction decreased: {:.2f} → {:.2f} (Win Rate: {:.1f}%)", 
-                oldKelly, adaptiveKellyFraction, winRate * 100);
+            logger.warn("📉 Kelly Fraction decreased: {} → {} (Win Rate: {}%)",
+                String.format("%.2f", oldKelly), String.format("%.2f", adaptiveKellyFraction), String.format("%.1f", winRate * 100));
                 
         } else {
             // Poor performance - significant decrease
             adaptiveKellyFraction = Math.max(0.10, adaptiveKellyFraction - 0.05);
-            logger.warn("⚠️  Kelly Fraction DECREASED: {:.2f} → {:.2f} (Win Rate: {:.1f}%)", 
-                oldKelly, adaptiveKellyFraction, winRate * 100);
+            logger.warn("⚠️  Kelly Fraction DECREASED: {} → {} (Win Rate: {}%)",
+                String.format("%.2f", oldKelly), String.format("%.2f", adaptiveKellyFraction), String.format("%.1f", winRate * 100));
         }
     }
     
@@ -170,18 +170,18 @@ public class AdaptiveParameterManager {
         if (winRate >= HIGH_WIN_RATE) {
             // High win rate - allow larger positions
             adaptiveMaxPositionPercent = Math.min(0.25, adaptiveMaxPositionPercent + 0.02);
-            logger.info("📈 Max Position increased: {:.0f}% → {:.0f}%", 
-                oldMax * 100, adaptiveMaxPositionPercent * 100);
+            logger.info("📈 Max Position increased: {}% → {}%",
+                String.format("%.0f", oldMax * 100), String.format("%.0f", adaptiveMaxPositionPercent * 100));
                 
         } else if (winRate >= ACCEPTABLE_WIN_RATE) {
             // Acceptable - maintain
-            logger.debug("Max Position maintained: {:.0f}%", adaptiveMaxPositionPercent * 100);
+            logger.debug("Max Position maintained: {}%", String.format("%.0f", adaptiveMaxPositionPercent * 100));
             
         } else {
             // Low win rate - reduce position sizes
             adaptiveMaxPositionPercent = Math.max(0.10, adaptiveMaxPositionPercent - 0.03);
-            logger.warn("📉 Max Position decreased: {:.0f}% → {:.0f}%", 
-                oldMax * 100, adaptiveMaxPositionPercent * 100);
+            logger.warn("📉 Max Position decreased: {}% → {}%",
+                String.format("%.0f", oldMax * 100), String.format("%.0f", adaptiveMaxPositionPercent * 100));
         }
     }
     
@@ -195,28 +195,28 @@ public class AdaptiveParameterManager {
             // Too few trades - relax requirements
             if (adaptiveRequireAlignment) {
                 adaptiveRequireAlignment = false;
-                logger.info("🔓 Timeframe alignment requirement RELAXED (trades/day: {:.1f})", 
-                    tradesPerDay);
+                logger.info("🔓 Timeframe alignment requirement RELAXED (trades/day: {})",
+                    String.format("%.1f", tradesPerDay));
             } else if (adaptiveMinAligned > 2) {
                 adaptiveMinAligned = 2;
-                logger.info("🔓 Min aligned timeframes reduced to 2 (trades/day: {:.1f})", 
-                    tradesPerDay);
+                logger.info("🔓 Min aligned timeframes reduced to 2 (trades/day: {})",
+                    String.format("%.1f", tradesPerDay));
             }
             
         } else if (tradesPerDay > 15 && stats.winRate() < ACCEPTABLE_WIN_RATE) {
             // Too many trades with poor performance - tighten requirements
             if (!adaptiveRequireAlignment) {
                 adaptiveRequireAlignment = true;
-                logger.info("🔒 Timeframe alignment requirement ENABLED (trades/day: {:.1f}, win rate: {:.1f}%)", 
-                    tradesPerDay, stats.winRate() * 100);
+                logger.info("🔒 Timeframe alignment requirement ENABLED (trades/day: {}, win rate: {}%)",
+                    String.format("%.1f", tradesPerDay), String.format("%.1f", stats.winRate() * 100));
             } else if (adaptiveMinAligned < 3) {
                 adaptiveMinAligned = 3;
-                logger.info("🔒 Min aligned timeframes increased to 3 (trades/day: {:.1f}, win rate: {:.1f}%)", 
-                    tradesPerDay, stats.winRate() * 100);
+                logger.info("🔒 Min aligned timeframes increased to 3 (trades/day: {}, win rate: {}%)",
+                    String.format("%.1f", tradesPerDay), String.format("%.1f", stats.winRate() * 100));
             }
             
         } else {
-            logger.debug("Timeframe requirements maintained (trades/day: {:.1f})", tradesPerDay);
+            logger.debug("Timeframe requirements maintained (trades/day: {})", String.format("%.1f", tradesPerDay));
         }
     }
     

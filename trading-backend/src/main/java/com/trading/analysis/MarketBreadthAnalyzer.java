@@ -33,10 +33,10 @@ public class MarketBreadthAnalyzer {
         boolean healthy = currentBreadth >= minBreadth;
         
         if (!healthy) {
-            logger.warn("⚠️ Market breadth too low: {:.1f}% (min: {:.1f}%) - Skipping new entries",
-                currentBreadth * 100, minBreadth * 100);
+            logger.warn("⚠️ Market breadth too low: {}% (min: {}%) - Skipping new entries",
+                String.format("%.1f", currentBreadth * 100), String.format("%.1f", minBreadth * 100));
         } else {
-            logger.debug("✅ Market breadth healthy: {:.1f}%", currentBreadth * 100);
+            logger.debug("✅ Market breadth healthy: {}%", String.format("%.1f", currentBreadth * 100));
         }
         
         return healthy;
@@ -59,6 +59,6 @@ public class MarketBreadthAnalyzer {
         // In production: query NYSE/NASDAQ advance/decline data
         currentBreadth = 0.50 + (Math.random() * 0.3); // 50-80%
         
-        logger.debug("Market breadth updated: {:.1f}%", currentBreadth * 100);
+        logger.debug("Market breadth updated: {}%", String.format("%.1f", currentBreadth * 100));
     }
 }

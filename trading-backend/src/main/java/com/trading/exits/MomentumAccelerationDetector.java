@@ -46,8 +46,8 @@ public class MomentumAccelerationDetector {
         if (absChange > config.getAccelerationThreshold()) {
             double exitPercent = config.getAccelerationExitPercent();
             
-            logger.info("🚀 {} Momentum Spike: {:.2f}% in 5min! Taking {:.0f}% profit",
-                symbol, priceChange, exitPercent);
+            logger.info("🚀 {} Momentum Spike: {}% in 5min! Taking {}% profit",
+                symbol, String.format("%.2f", priceChange), String.format("%.0f", exitPercent));
             
             return exitPercent;
         }

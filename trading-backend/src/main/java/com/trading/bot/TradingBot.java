@@ -59,8 +59,15 @@ public final class TradingBot {
             System.exit(1);
         }
 
+        // Multi-broker mode: BROKERS=alpaca:40,tradier:35,tradovate:25
+        if (config.isMultiBrokerEnabled()) {
+            logger.info("Starting Multi-Broker Trading Bot ({})", config.getBrokersAllocation());
+            new MultiBrokerOrchestrator(config).run();
+            return;
+        }
+
         var client = new AlpacaClient(config);
-        
+
         // Check if multi-profile mode is enabled
         if (config.isMultiProfileEnabled()) {
             logger.info("Starting Multi-Profile Trading Bot...");
@@ -171,15 +178,15 @@ public final class TradingBot {
             marketHoursFilter, volatilityFilter, marketAnalyzer,
             database, pdtProtection, config, testSimulator,
             sentimentAnalyzer, signalPredictor, anomalyDetector, riskPredictor,
-            errorDetector, configSelfHealer
+            errorDetector, configSelfHealer, "alpaca"
         );
-        
+
         var expManager = new com.trading.portfolio.ProfileManager(
             expProfile, expCapital, resilientClient, strategyManager,
             marketHoursFilter, volatilityFilter, marketAnalyzer,
             database, pdtProtection, config, testSimulator,
             sentimentAnalyzer, signalPredictor, anomalyDetector, riskPredictor,
-            errorDetector, configSelfHealer
+            errorDetector, configSelfHealer, "alpaca"
         );
         
         // Create autonomous systems

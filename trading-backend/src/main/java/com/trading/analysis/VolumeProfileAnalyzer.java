@@ -41,13 +41,13 @@ public class VolumeProfileAnalyzer {
             double distance = Math.abs(currentPrice - node.price) / currentPrice;
             
             if (distance < threshold) {
-                logger.info("✅ {} Good entry price ${:.2f} near volume node ${:.2f} (vol: {})",
-                    symbol, currentPrice, node.price, node.volume);
+                logger.info("✅ {} Good entry price ${} near volume node ${} (vol: {})",
+                    symbol, String.format("%.2f", currentPrice), String.format("%.2f", node.price), node.volume);
                 return true;
             }
         }
         
-        logger.debug("⚠️ {} Price ${:.2f} not near volume support", symbol, currentPrice);
+        logger.debug("⚠️ {} Price ${} not near volume support", symbol, String.format("%.2f", currentPrice));
         return false; // Not near support
     }
     

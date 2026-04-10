@@ -121,14 +121,14 @@ public class CorrelationCalculator {
         // Higher score = better diversification
         double diversificationScore = 1.0 - avgCorrelation;
         
-        logger.info("Portfolio correlation analysis: {} symbols, avg correlation: {:.2f}, diversification: {:.2f}",
-            validSymbols.size(), avgCorrelation, diversificationScore);
+        logger.info("Portfolio correlation analysis: {} symbols, avg correlation: {}, diversification: {}",
+            validSymbols.size(), String.format("%.2f", avgCorrelation), String.format("%.2f", diversificationScore));
         
         if (!highCorrelations.isEmpty()) {
-            logger.warn("Found {} highly correlated pairs (>{:.0f}%):", 
-                highCorrelations.size(), HIGH_CORRELATION_THRESHOLD * 100);
+            logger.warn("Found {} highly correlated pairs (>{}%):",
+                highCorrelations.size(), String.format("%.0f", HIGH_CORRELATION_THRESHOLD * 100));
             for (var pair : highCorrelations) {
-                logger.warn("  {} ↔ {}: {:.2f}", pair.symbol1(), pair.symbol2(), pair.correlation());
+                logger.warn("  {} ↔ {}: {}", pair.symbol1(), pair.symbol2(), String.format("%.2f", pair.correlation()));
             }
         }
         

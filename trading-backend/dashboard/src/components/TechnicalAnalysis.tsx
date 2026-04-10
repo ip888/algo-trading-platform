@@ -2,182 +2,170 @@ import { useEffect, useState } from 'react';
 import { useTradingStore } from '../store/tradingStore';
 import { CONFIG } from '../config';
 
-interface SymbolData {
+interface TargetEntry {
   symbol: string;
-  price: number;
-  change: number;
-  changePercent: number;
-  score: number;
-  trend: string;
-  recommendation?: string;
+  inPosition: boolean;
+  blocked: boolean;
+  blockReason: string | null;
+  inCooldown: boolean;
+  cooldownMinutes: number;
+  price?: number;
+  changePercent?: number;
 }
 
 export const TechnicalAnalysis = () => {
-  const [symbols, setSymbols] = useState<SymbolData[]>([]);
-  const [vix, setVix] = useState(0);
-  const [regime, setRegime] = useState('ANALYZING');
-  const [loading, setLoading] = useState(true);
+  const [targets, setTargets]     = useState<TargetEntry[]>([]);
+  const [allCount, setAllCount]   = useState(0);
+  const [vix, setVix]             = useState(0);
+  const [regime, setRegime]       = useState('UNKNOWN');
+  const [loading, setLoading]     = useState(true);
+  const [updatedAt, setUpdatedAt] = useState(0);
 
-  // Live WS overlay
   const { marketData, systemStatus } = useTradingStore();
 
+  const fetchData = async () => {
+    try {
+      const res  = await fetch(`${CONFIG.API_BASE_URL}/api/watchlist`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      setVix(Number(data.vix) || 0);
+      setRegime(String(data.regime || 'UNKNOWN'));
+      setAllCount((data.watchlist || []).length);
+
+      const list: TargetEntry[] = (data.watchlist || [])
+        .filter((it: any) => it.isTarget || it.inPosition)
+        .map((it: any) => ({
+          symbol:          String(it.symbol),
+          inPosition:      Boolean(it.inPosition),
+          blocked:         Boolean(it.blocked),
+          blockReason:     it.blockReason ?? null,
+          inCooldown:      Boolean(it.inCooldown),
+          cooldownMinutes: Number(it.cooldownMinutes) || 0,
+        }));
+      setTargets(list);
+      setUpdatedAt(Date.now());
+    } catch (e) {
+      console.error('EntryScanner fetch failed', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [watchRes, regimeRes] = await Promise.all([
-          fetch(`${CONFIG.API_BASE_URL}/api/watchlist`),
-          fetch(`${CONFIG.API_BASE_URL}/api/market/regime`),
-        ]);
-
-        if (watchRes.ok) {
-          const data = await watchRes.json();
-          const list: SymbolData[] = (data.watchlist || []).map((item: any) => ({
-            symbol: item.symbol,
-            price: item.price || 0,
-            change: item.change || 0,
-            changePercent: item.changePercent || 0,
-            score: item.score || 50,
-            trend: item.trend || 'NEUTRAL',
-            recommendation: undefined,
-          }));
-          setSymbols(list);
-        }
-
-        if (regimeRes.ok) {
-          const r = await regimeRes.json();
-          setVix(r.vix || 0);
-          setRegime(r.regime || r.trend || 'NEUTRAL');
-        }
-      } catch (e) {
-        console.error('TechnicalAnalysis fetch failed', e);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchData();
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
+    const id = setInterval(fetchData, 15000);
+    return () => clearInterval(id);
   }, []);
 
-  // Prefer live WS data when available
-  const displayVix = systemStatus?.vix || vix;
-  const displayRegime = systemStatus?.marketTrend || regime;
-
-  // Merge live WS prices on top of REST baseline
-  const enriched = symbols.map(s => {
-    const live = marketData[s.symbol];
-    if (live && live.price > 0) {
-      return {
-        ...s,
-        price: live.price,
-        change: live.change,
-        changePercent: live.changePercent,
-        score: live.score || s.score,
-        trend: live.trend || s.trend,
-        recommendation: live.recommendation,
-      };
-    }
-    return s;
+  // Overlay live WS prices
+  const enriched = targets.map(t => {
+    const live = marketData[t.symbol];
+    return live && live.price > 0
+      ? { ...t, price: live.price, changePercent: live.changePercent ?? 0 }
+      : t;
   });
 
-  const topSymbols = [...enriched]
-    .sort((a, b) => {
-      const sigOrder = (r?: string) => r === 'BUY' ? 0 : r === 'SELL' ? 1 : 2;
-      const sigDiff = sigOrder(a.recommendation) - sigOrder(b.recommendation);
-      if (sigDiff !== 0) return sigDiff;
-      return (b.score || 0) - (a.score || 0);
-    })
-    .slice(0, 10);
+  const displayVix    = systemStatus?.vix || vix;
+  const displayRegime = systemStatus?.marketTrend || regime;
+  const isBearish     = displayRegime.includes('BEAR');
+  const vixColor      = displayVix === 0 ? '#555' : displayVix >= 25 ? '#ef4444' : displayVix >= 16 ? '#eab308' : '#22c55e';
+  const regimeColor   = isBearish ? '#eab308' : '#22c55e';
 
-  const vixColor = displayVix === 0 ? 'var(--text-dim)' : displayVix > 30 ? 'var(--neon-red)' : displayVix > 20 ? 'var(--neon-amber)' : 'var(--neon-green)';
-  const regimeColor = displayRegime.includes('BEAR') ? 'var(--neon-red)' : displayRegime.includes('BULL') ? 'var(--neon-green)' : 'var(--neon-cyan)';
+  // Entry gate status for each target
+  const getGateStatus = (t: TargetEntry): { label: string; color: string; detail: string } => {
+    if (t.inPosition)  return { label: 'IN POSITION', color: '#22c55e', detail: 'Currently holding' };
+    if (t.inCooldown)  return { label: `COOL ${t.cooldownMinutes}m`, color: '#f97316', detail: `Cooldown — re-entry in ${t.cooldownMinutes}m` };
+    if (t.blocked)     return { label: 'BLOCKED', color: '#ef4444', detail: t.blockReason ?? 'Entry blocked' };
+    return { label: 'READY', color: '#38bdf8', detail: 'Entry gate open' };
+  };
 
   return (
     <div className="panel technical-analysis">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-        <h2 style={{ margin: 0 }}>📊 Technical Execution Matrix</h2>
-        <div style={{ display: 'flex', gap: '15px', fontSize: '10px', fontFamily: 'monospace' }}>
-          <div>
-            <span style={{ color: 'var(--text-dim)' }}>VIX: </span>
-            <span style={{ fontWeight: 800, color: vixColor }}>
-              {displayVix === 0 ? '--.--' : displayVix.toFixed(2)}
-            </span>
-          </div>
-          <div>
-            <span style={{ color: 'var(--text-dim)' }}>REGIME: </span>
-            <span style={{ fontWeight: 800, color: regimeColor }}>{displayRegime}</span>
-          </div>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+        <h2 style={{ margin: 0, fontSize: '14px' }}>🎯 Entry Scanner</h2>
+        <div style={{ display: 'flex', gap: '12px', fontSize: '10px', fontFamily: 'monospace' }}>
+          <span>
+            <span style={{ color: '#555' }}>VIX </span>
+            <b style={{ color: vixColor }}>{displayVix > 0 ? displayVix.toFixed(1) : '—'}</b>
+          </span>
+          <span>
+            <span style={{ color: '#555' }}>REGIME </span>
+            <b style={{ color: regimeColor }}>{isBearish ? '🐻' : '🐂'} {displayRegime.replace('_', ' ')}</b>
+          </span>
         </div>
       </div>
 
       {loading ? (
-        <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
-          Loading signal matrix...
-        </div>
-      ) : topSymbols.length === 0 ? (
-        <div className="scanning-state" style={{ padding: '30px', textAlign: 'center', color: 'var(--text-dim)', border: '1px dashed var(--text-muted)', borderRadius: 'var(--radius-sm)' }}>
-          <p style={{ fontSize: '0.8rem' }}>🛰 SYNCING SIGNAL FEED...</p>
+        <div style={{ padding: '20px', textAlign: 'center', color: '#555', fontSize: '13px' }}>Loading…</div>
+      ) : enriched.length === 0 ? (
+        <div style={{ padding: '24px 12px', textAlign: 'center', border: '1px dashed #333', borderRadius: '6px' }}>
+          <div style={{ fontSize: '13px', color: '#555', marginBottom: '6px' }}>No active targets</div>
+          <div style={{ fontSize: '11px', color: '#444' }}>
+            {allCount} symbols in watchlist — bot selects targets based on VIX regime each cycle
+          </div>
         </div>
       ) : (
-        <div className="table-container">
-          <table className="positions-table">
-            <thead>
-              <tr>
-                <th>Asset</th>
-                <th style={{ textAlign: 'right' }}>Price</th>
-                <th style={{ textAlign: 'right' }}>Chg%</th>
-                <th>Strength</th>
-                <th style={{ textAlign: 'center' }}>Signal</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topSymbols.map((s) => {
-                const chgPct = s.changePercent ?? 0;
-                const hasPrice = s.price > 0;
-                return (
-                  <tr key={s.symbol}>
-                    <td className="font-bold">{s.symbol}</td>
-                    <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
-                      {hasPrice
-                        ? `$${s.price.toFixed(2)}`
-                        : <span style={{ color: 'var(--text-dim)' }}>---</span>}
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      {chgPct !== 0 ? (
-                        <span className={s.change >= 0 ? 'positive' : 'negative'}>
-                          {s.change >= 0 ? '▲' : '▼'} {Math.abs(chgPct).toFixed(2)}%
-                        </span>
-                      ) : (
-                        <span style={{ color: 'var(--text-dim)' }}>--</span>
-                      )}
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <div style={{ flex: 1, minWidth: '50px', height: '3px', background: 'var(--bg-deep)', borderRadius: '10px', overflow: 'hidden' }}>
-                          <div style={{
-                            width: `${Math.min(100, Math.max(0, s.score))}%`,
-                            height: '100%',
-                            background: s.score > 70 ? 'var(--neon-green)' : s.score < 30 ? 'var(--neon-red)' : 'var(--neon-cyan)'
-                          }} />
-                        </div>
-                        <span style={{ fontSize: '9px', fontWeight: 700, color: 'var(--text-dim)', minWidth: '22px' }}>
-                          {s.score.toFixed(0)}
-                        </span>
-                      </div>
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <span className={`status-tag ${s.recommendation === 'BUY' ? 'status-buy' : s.recommendation === 'SELL' ? 'status-sell' : 'status-hold'}`}>
-                        {s.recommendation || s.trend || 'HOLD'}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div>
+          <div style={{ fontSize: '10px', color: '#555', marginBottom: '8px' }}>
+            {enriched.length} active target{enriched.length !== 1 ? 's' : ''} — entry gate status
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+            {enriched.map(t => {
+              const gate = getGateStatus(t);
+              const chg  = t.changePercent ?? 0;
+              return (
+                <div key={t.symbol} style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  background: '#0d0d1a',
+                  borderRadius: '6px',
+                  padding: '7px 10px',
+                  borderLeft: `3px solid ${gate.color}`,
+                }}>
+                  {/* Symbol */}
+                  <span style={{ fontWeight: 700, fontSize: '13px', minWidth: '48px' }}>{t.symbol}</span>
+
+                  {/* Price */}
+                  <span style={{ fontFamily: 'monospace', fontSize: '12px', minWidth: '60px' }}>
+                    {t.price && t.price > 0
+                      ? `$${t.price.toFixed(2)}`
+                      : <span style={{ color: '#444' }}>—</span>}
+                  </span>
+
+                  {/* Change % */}
+                  <span style={{ fontSize: '11px', minWidth: '52px', textAlign: 'right' }}>
+                    {chg !== 0
+                      ? <span style={{ color: chg >= 0 ? '#22c55e' : '#ef4444' }}>{chg >= 0 ? '▲' : '▼'}{Math.abs(chg).toFixed(2)}%</span>
+                      : <span style={{ color: '#444' }}>—</span>}
+                  </span>
+
+                  {/* Gate badge */}
+                  <span style={{
+                    marginLeft: 'auto',
+                    padding: '2px 8px',
+                    borderRadius: '10px',
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    color: gate.color,
+                    background: gate.color + '22',
+                    border: `1px solid ${gate.color}44`,
+                    whiteSpace: 'nowrap',
+                  }} title={gate.detail}>
+                    {gate.label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
+
+      <div style={{ fontSize: '10px', color: '#333', marginTop: '10px', textAlign: 'right' }}>
+        {updatedAt > 0 ? `Updated ${new Date(updatedAt).toLocaleTimeString()}` : ''}
+      </div>
     </div>
   );
 };

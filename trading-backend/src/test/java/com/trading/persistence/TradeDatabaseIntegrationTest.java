@@ -43,7 +43,7 @@ class TradeDatabaseIntegrationTest {
         Instant entryTime = Instant.now();
         
         // Record trade
-        database.recordTrade(symbol, "TEST", "test-profile", 
+        database.recordTrade(symbol, "TEST", "test-profile", "test",
             entryTime, 150.0, 10.0, 147.0, 154.0);
         
         // Verify it was recorded
@@ -58,10 +58,10 @@ class TradeDatabaseIntegrationTest {
         Instant entryTime = Instant.now();
         
         // Record and close trade
-        database.recordTrade(symbol, "TEST", "test-profile",
+        database.recordTrade(symbol, "TEST", "test-profile", "test",
             entryTime, 150.0, 10.0, 147.0, 154.0);
-        
-        database.closeTrade(symbol, Instant.now(), 152.0, 20.0);
+
+        database.closeTrade(symbol, Instant.now(), 152.0, 20.0, "test");
         
         // Verify P&L
         double totalPnL = database.getTotalPnL();
@@ -127,7 +127,7 @@ class TradeDatabaseIntegrationTest {
     void testConcurrentAccess() {
         // StampedLock should handle this
         assertDoesNotThrow(() -> {
-            database.recordTrade("AAPL", "TEST", "test",
+            database.recordTrade("AAPL", "TEST", "test", "test",
                 Instant.now(), 150.0, 10.0, 147.0, 154.0);
             database.getTotalPnL();
             database.getTotalTrades();
@@ -156,50 +156,50 @@ class TradeDatabaseIntegrationTest {
     @DisplayName("closeOrphanedOpenTrades - marks ghost records as CANCELLED")
     void testCloseOrphanedTrades_closesOrphanedRecords() throws Exception {
         // Insert OPEN trade for NVDA (not in live set)
-        database.recordTrade("NVDA", "TEST", "MAIN", Instant.now().minusSeconds(300), 500.0, 2.0, 490.0, 515.0);
+        database.recordTrade("NVDA", "TEST", "MAIN", "test", Instant.now().minusSeconds(300), 500.0, 2.0, 490.0, 515.0);
         // Insert OPEN trade for DIA (in live set - should NOT be touched)
-        database.recordTrade("DIA", "TEST", "MAIN", Instant.now().minusSeconds(300), 479.0, 1.0, 472.0, 493.0);
+        database.recordTrade("DIA", "TEST", "MAIN", "test", Instant.now().minusSeconds(300), 479.0, 1.0, 472.0, 493.0);
 
         Set<String> liveSymbols = Set.of("DIA");
-        int closed = database.closeOrphanedOpenTrades(liveSymbols, 0); // minAge=0 to close immediately
+        int closed = database.closeOrphanedOpenTrades("test", liveSymbols, 0); // minAge=0 to close immediately
 
         assertEquals(1, closed, "Should have closed 1 orphaned record (NVDA)");
-        assertTrue(database.hasOpenTrade("DIA"), "DIA should still be OPEN (it's live)");
-        assertFalse(database.hasOpenTrade("NVDA"), "NVDA should no longer be OPEN (orphaned)");
+        assertTrue(database.hasOpenTrade("DIA", "test"), "DIA should still be OPEN (it's live)");
+        assertFalse(database.hasOpenTrade("NVDA", "test"), "NVDA should no longer be OPEN (orphaned)");
     }
 
     @Test
     @DisplayName("closeOrphanedOpenTrades - respects minimum age, does not close recent records")
     void testCloseOrphanedTrades_respectsMinAge() throws Exception {
         // Insert a very recent OPEN trade (just now)
-        database.recordTrade("SPY", "TEST", "MAIN", Instant.now(), 500.0, 1.0, 490.0, 515.0);
+        database.recordTrade("SPY", "TEST", "MAIN", "test", Instant.now(), 500.0, 1.0, 490.0, 515.0);
 
         Set<String> liveSymbols = Set.of(); // empty - SPY not live
         // minAge = 10 minutes — record is too new, should NOT be closed
-        int closed = database.closeOrphanedOpenTrades(liveSymbols, 10 * 60 * 1000L);
+        int closed = database.closeOrphanedOpenTrades("test", liveSymbols, 10 * 60 * 1000L);
 
         assertEquals(0, closed, "Should not close recent record (younger than minAge)");
-        assertTrue(database.hasOpenTrade("SPY"), "SPY should still be OPEN (too new)");
+        assertTrue(database.hasOpenTrade("SPY", "test"), "SPY should still be OPEN (too new)");
     }
 
     @Test
     @DisplayName("closeOrphanedOpenTrades - empty live set closes all old records")
     void testCloseOrphanedTrades_emptyLiveSet() throws Exception {
-        database.recordTrade("AAPL", "TEST", "MAIN", Instant.now().minusSeconds(300), 200.0, 5.0, 196.0, 206.0);
-        database.recordTrade("MSFT", "TEST", "MAIN", Instant.now().minusSeconds(300), 400.0, 2.0, 394.0, 412.0);
+        database.recordTrade("AAPL", "TEST", "MAIN", "test", Instant.now().minusSeconds(300), 200.0, 5.0, 196.0, 206.0);
+        database.recordTrade("MSFT", "TEST", "MAIN", "test", Instant.now().minusSeconds(300), 400.0, 2.0, 394.0, 412.0);
 
-        int closed = database.closeOrphanedOpenTrades(Set.of(), 0);
+        int closed = database.closeOrphanedOpenTrades("test", Set.of(), 0);
 
         assertEquals(2, closed, "Empty live set should close all old OPEN records");
-        assertFalse(database.hasOpenTrade("AAPL"));
-        assertFalse(database.hasOpenTrade("MSFT"));
+        assertFalse(database.hasOpenTrade("AAPL", "test"));
+        assertFalse(database.hasOpenTrade("MSFT", "test"));
     }
 
     @Test
     @DisplayName("getRecentTrades - entryTime and exitTime are returned as Strings, not longs")
     void testGetRecentTrades_timestampsAreStrings() {
-        database.recordTrade("TSLA", "TEST", "MAIN", Instant.now(), 250.0, 3.0, 244.0, 257.0);
-        database.closeTrade("TSLA", Instant.now(), 255.0, 15.0);
+        database.recordTrade("TSLA", "TEST", "MAIN", "test", Instant.now(), 250.0, 3.0, 244.0, 257.0);
+        database.closeTrade("TSLA", Instant.now(), 255.0, 15.0, "test");
 
         var trades = database.getRecentTrades(10);
         assertFalse(trades.isEmpty(), "Should have at least one trade");

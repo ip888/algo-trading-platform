@@ -98,13 +98,13 @@ public final class MomentumStrategy implements TradingStrategy {
         double atrPercent = calculateATRPercent(history, ATR_PERIOD, currentPrice);
         boolean volatilityOK = atrPercent < maxAtrPercent;
 
-        logger.debug("{} Momentum: Price=${} RSI={:.1f}({}) Mom={:.2f}%({}) AboveSMA={:.2f}% ATR={:.2f}%", 
-            symbol, 
-            String.format("%.2f", currentPrice), 
-            rsi, rsiRising ? "↑" : "↓",
-            momentum * 100, momentumConsistent ? "consistent" : "weak",
-            percentAboveSMA,
-            atrPercent);
+        logger.debug("{} Momentum: Price=${} RSI={}({}) Mom={}%({}) AboveSMA={}% ATR={}%",
+            symbol,
+            String.format("%.2f", currentPrice),
+            String.format("%.1f", rsi), rsiRising ? "↑" : "↓",
+            String.format("%.2f", momentum * 100), momentumConsistent ? "consistent" : "weak",
+            String.format("%.2f", percentAboveSMA),
+            String.format("%.2f", atrPercent));
 
         // EXIT: RSI overbought - take profit (exit earlier at 72 instead of 75)
         if (positionQty > 0 && rsi >= rsiSellThreshold) {
@@ -131,8 +131,8 @@ public final class MomentumStrategy implements TradingStrategy {
         if (positionQty == 0) {
             // Skip high volatility periods
             if (!volatilityOK) {
-                logger.debug("{}: Skipping - ATR too high ({:.2f}% > {:.1f}%)", 
-                    symbol, atrPercent, maxAtrPercent);
+                logger.debug("{}: Skipping - ATR too high ({}% > {}%)",
+                    symbol, String.format("%.2f", atrPercent), String.format("%.1f", maxAtrPercent));
                 return new TradingSignal.Hold(String.format("Volatility too high: ATR=%.2f%%", atrPercent));
             }
             

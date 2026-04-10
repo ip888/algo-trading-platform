@@ -22,27 +22,42 @@ import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Tradovate broker integration implementing BrokerClient.
  *
- * Uses the Tradovate REST API v1:
- *   Live: https://live.tradovate.com/v1/
- *   Demo: https://demo.tradovate.com/v1/
+ * Base URLs (from official openapi.json):
+ *   Demo: https://demo.tradovateapi.com/v1
+ *   Live: https://live.tradovateapi.com/v1
  *
- * Authentication: POST /auth/accesstokenrequest → Bearer token.
- * On 401, re-authenticates once and retries.
+ * Authentication: POST /auth/accesstokenrequest
+ *   Required fields: name, password, appId, appVersion, cid (API Key ID string), sec
+ *   Token lifetime: 90 minutes. Renewal: GET /auth/renewaccesstoken.
  *
- * Equity symbols (SPY, QQQ, …) are automatically mapped to front-month
- * micro-futures contracts via FuturesSymbolMapper.
+ * Market data is WebSocket-only (wss://md.tradovateapi.com/v1/websocket).
+ * getBars() / getLatestBar() throw UnsupportedOperationException — use Alpaca for signal data.
+ *
+ * All automated orders MUST include isAutomated=true per exchange requirements.
+ * Bracket orders use POST /order/placeoso (OSO = Order Sends Order).
+ *
+ * Note: Tradovate API access requires a Live account + paid API subscription.
+ * Demo accounts cannot access the REST/WebSocket API.
  */
 public final class TradovateClient implements BrokerClient {
     private static final Logger logger = LoggerFactory.getLogger(TradovateClient.class);
 
-    private static final String LIVE_BASE = "https://live.tradovate.com/v1";
-    private static final String DEMO_BASE = "https://demo.tradovate.com/v1";
+    // Correct base URLs from official Tradovate openapi.json
+    private static final String LIVE_BASE = "https://live.tradovateapi.com/v1";
+    private static final String DEMO_BASE = "https://demo.tradovateapi.com/v1";
+
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    // Tokens expire in 90 min; renew at 80 min to stay ahead
+    private static final long RENEWAL_INTERVAL_MINUTES = 80;
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -50,15 +65,21 @@ public final class TradovateClient implements BrokerClient {
     private final String username;
     private final String password;
     private final String appId;
-    private final String appSecret;
+    private final String appVersion;
+    private final String cid;   // API Key ID (string) — distinct from appId
+    private final String sec;   // API secret
     private final AtomicReference<String> accessToken = new AtomicReference<>("");
+    private final AtomicLong accountId = new AtomicLong(-1);
+    private final ScheduledExecutorService renewalExecutor;
 
     public TradovateClient(Config config) {
-        this.username  = config.getTradovateUsername();
-        this.password  = config.getTradovatePassword();
-        this.appId     = config.getTradovateAppId();
-        this.appSecret = config.getTradovateAppSecret();
-        this.baseUrl   = config.isTradovateDemo() ? DEMO_BASE : LIVE_BASE;
+        this.username   = config.getTradovateUsername();
+        this.password   = config.getTradovatePassword();
+        this.appId      = config.getTradovateAppId();
+        this.appVersion = config.getTradovateAppVersion();
+        this.cid        = config.getTradovateCid();
+        this.sec        = config.getTradovateAppSecret();
+        this.baseUrl    = config.isTradovateDemo() ? DEMO_BASE : LIVE_BASE;
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(REQUEST_TIMEOUT)
             .build();
@@ -67,25 +88,33 @@ public final class TradovateClient implements BrokerClient {
         logger.info("TradovateClient initialized — baseUrl={}, user={}",
             baseUrl, username.isBlank() ? "<not set>" : username);
 
+        this.renewalExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "tradovate-token-renewal");
+            t.setDaemon(true);
+            return t;
+        });
+
         try {
             authenticate();
+            scheduleTokenRenewal();
         } catch (Exception e) {
-            logger.warn("TradovateClient: initial authentication failed — will retry on first request: {}", e.getMessage());
+            logger.warn("TradovateClient: initial authentication failed — will retry on first request: {}",
+                e.getMessage());
         }
     }
 
     // ── Authentication ────────────────────────────────────────────────────────
 
-    private void authenticate() throws Exception {
+    private synchronized void authenticate() throws Exception {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("name",       username);
         body.put("password",   password);
         body.put("appId",      appId);
-        body.put("appVersion", "1.0");
-        body.put("cid",        appId);
-        body.put("sec",        appSecret);
+        body.put("appVersion", appVersion);
+        body.put("cid",        cid);   // API Key ID — must be string
+        body.put("sec",        sec);
 
-        String json = sendPostJson(baseUrl + "/auth/accesstokenrequest", body.toString(), false);
+        String json = sendPostJsonRaw(baseUrl + "/auth/accesstokenrequest", body.toString());
         JsonNode resp = objectMapper.readTree(json);
         String token = resp.path("accessToken").asText("");
         if (token.isBlank()) {
@@ -93,15 +122,63 @@ public final class TradovateClient implements BrokerClient {
         }
         accessToken.set(token);
         logger.info("TradovateClient: authenticated successfully");
+
+        // Cache account ID for order placement
+        resolveAccountId();
+    }
+
+    private void resolveAccountId() {
+        try {
+            String json = sendGetRaw(baseUrl + "/account/list");
+            JsonNode arr = objectMapper.readTree(json);
+            if (arr.isArray() && arr.size() > 0) {
+                long id = arr.get(0).path("id").asLong(-1);
+                if (id > 0) {
+                    accountId.set(id);
+                    logger.info("TradovateClient: resolved accountId={}", id);
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("TradovateClient: failed to resolve accountId: {}", e.getMessage());
+        }
+    }
+
+    private void renewToken() {
+        try {
+            // Token renewal uses GET /auth/renewaccesstoken (not POST)
+            String json = sendGetRaw(baseUrl + "/auth/renewaccesstoken");
+            JsonNode resp = objectMapper.readTree(json);
+            String token = resp.path("accessToken").asText("");
+            if (!token.isBlank()) {
+                accessToken.set(token);
+                logger.debug("TradovateClient: access token renewed");
+            } else {
+                logger.warn("TradovateClient: renewal returned no token — re-authenticating");
+                authenticate();
+            }
+        } catch (Exception e) {
+            logger.warn("TradovateClient: token renewal failed, re-authenticating: {}", e.getMessage());
+            try {
+                authenticate();
+            } catch (Exception ex) {
+                logger.error("TradovateClient: re-authentication failed: {}", ex.getMessage());
+            }
+        }
+    }
+
+    private void scheduleTokenRenewal() {
+        renewalExecutor.scheduleAtFixedRate(
+            this::renewToken,
+            RENEWAL_INTERVAL_MINUTES,
+            RENEWAL_INTERVAL_MINUTES,
+            TimeUnit.MINUTES
+        );
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
-    private String sendGet(String url) throws Exception {
-        return sendGetWithRetry(url, true);
-    }
-
-    private String sendGetWithRetry(String url, boolean retryOn401) throws Exception {
+    /** Raw GET without retry — used during auth (to avoid infinite recursion). */
+    private String sendGetRaw(String url) throws Exception {
         var req = HttpRequest.newBuilder(URI.create(url))
             .header("Authorization", "Bearer " + accessToken.get())
             .header("Accept", "application/json")
@@ -109,39 +186,74 @@ public final class TradovateClient implements BrokerClient {
             .GET()
             .build();
         var resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() == 401 && retryOn401) {
-            logger.warn("TradovateClient: 401 on GET {}, re-authenticating…", url);
-            authenticate();
-            return sendGetWithRetry(url, false);
-        }
         if (resp.statusCode() >= 400) {
             throw new RuntimeException("Tradovate GET failed [" + resp.statusCode() + "]: " + resp.body());
         }
         return resp.body();
     }
 
-    private String sendPostJson(String url, String jsonBody, boolean retryOn401) throws Exception {
+    /** Raw POST without retry — used during auth. */
+    private String sendPostJsonRaw(String url, String jsonBody) throws Exception {
         var req = HttpRequest.newBuilder(URI.create(url))
-            .header("Authorization", "Bearer " + accessToken.get())
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .timeout(REQUEST_TIMEOUT)
             .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
             .build();
         var resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() == 401 && retryOn401) {
-            logger.warn("TradovateClient: 401 on POST {}, re-authenticating…", url);
-            authenticate();
-            return sendPostJson(url, jsonBody, false);
-        }
         if (resp.statusCode() >= 400) {
             throw new RuntimeException("Tradovate POST failed [" + resp.statusCode() + "]: " + resp.body());
         }
         return resp.body();
     }
 
+    private String sendGet(String url) throws Exception {
+        try {
+            return sendGetRaw(url);
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("[401]")) {
+                logger.warn("TradovateClient: 401 on GET {}, re-authenticating…", url);
+                authenticate();
+                return sendGetRaw(url);
+            }
+            throw e;
+        }
+    }
+
     private String sendPost(String url, String jsonBody) throws Exception {
-        return sendPostJson(url, jsonBody, true);
+        try {
+            var req = HttpRequest.newBuilder(URI.create(url))
+                .header("Authorization", "Bearer " + accessToken.get())
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .timeout(REQUEST_TIMEOUT)
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+            var resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 401) {
+                logger.warn("TradovateClient: 401 on POST {}, re-authenticating…", url);
+                authenticate();
+                // retry with fresh token
+                var req2 = HttpRequest.newBuilder(URI.create(url))
+                    .header("Authorization", "Bearer " + accessToken.get())
+                    .header("Accept", "application/json")
+                    .header("Content-Type", "application/json")
+                    .timeout(REQUEST_TIMEOUT)
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                    .build();
+                var resp2 = httpClient.send(req2, HttpResponse.BodyHandlers.ofString());
+                if (resp2.statusCode() >= 400) {
+                    throw new RuntimeException("Tradovate POST failed [" + resp2.statusCode() + "]: " + resp2.body());
+                }
+                return resp2.body();
+            }
+            if (resp.statusCode() >= 400) {
+                throw new RuntimeException("Tradovate POST failed [" + resp.statusCode() + "]: " + resp.body());
+            }
+            return resp.body();
+        } catch (RuntimeException e) {
+            throw e;
+        }
     }
 
     // ── Symbol mapping helper ─────────────────────────────────────────────────
@@ -150,7 +262,7 @@ public final class TradovateClient implements BrokerClient {
         if (FuturesSymbolMapper.isMappedSymbol(symbol)) {
             return FuturesSymbolMapper.toFuturesSymbol(symbol, LocalDate.now());
         }
-        return symbol; // pass through unmapped symbols (already a futures symbol)
+        return symbol;
     }
 
     private String fromFutures(String futuresSymbol) {
@@ -161,19 +273,43 @@ public final class TradovateClient implements BrokerClient {
 
     @Override
     public JsonNode getAccount() throws Exception {
-        String json = sendGet(baseUrl + "/account/list");
-        JsonNode arr = objectMapper.readTree(json);
+        // Get account list for basic info
+        String acctJson = sendGet(baseUrl + "/account/list");
+        JsonNode arr = objectMapper.readTree(acctJson);
         JsonNode acct = arr.isArray() && arr.size() > 0 ? arr.get(0) : arr;
+        long acctId = acct.path("id").asLong(-1);
+
+        // Get cash balance via dedicated endpoint
+        double cash = 0;
+        double equity = 0;
+        if (acctId > 0) {
+            try {
+                ObjectNode req = objectMapper.createObjectNode();
+                req.put("accountId", acctId);
+                String balJson = sendPost(baseUrl + "/cashBalance/getcashbalancesnapshot", req.toString());
+                JsonNode bal = objectMapper.readTree(balJson);
+                cash   = bal.path("cashBalance").asDouble(0);
+                equity = bal.path("netLiquidatingValue").asDouble(cash);
+                if (equity == 0) equity = cash;
+            } catch (Exception e) {
+                logger.warn("TradovateClient.getAccount: failed to fetch cash balance — {}", e.getMessage());
+                equity = acct.path("netLiquidatingValue").asDouble(0);
+                cash   = equity;
+            }
+        } else {
+            equity = acct.path("netLiquidatingValue").asDouble(0);
+            cash   = equity;
+        }
 
         ObjectNode result = objectMapper.createObjectNode();
-        result.put("equity",       acct.path("netLiquidatingValue").asDouble(0));
-        result.put("buying_power", acct.path("initialMargin").asDouble(0));
-        result.put("cash",         acct.path("totalCashValue").asDouble(0));
-        result.put("currency",     acct.path("currency").asText("USD"));
-        result.put("status",       acct.path("active").asBoolean(false) ? "ACTIVE" : "INACTIVE");
-        result.put("trading_blocked",   false);
-        result.put("account_blocked",   false);
-        result.put("pattern_day_trader", false);
+        result.put("equity",             equity);
+        result.put("buying_power",       equity);   // futures: no leverage limit; margin tracked separately
+        result.put("cash",               cash);
+        result.put("currency",           acct.path("currency").asText("USD"));
+        result.put("status",             acct.path("active").asBoolean(false) ? "ACTIVE" : "INACTIVE");
+        result.put("trading_blocked",    false);
+        result.put("account_blocked",    false);
+        result.put("pattern_day_trader", false);   // PDT rules don't apply to futures
         return result;
     }
 
@@ -198,16 +334,13 @@ public final class TradovateClient implements BrokerClient {
         }
     }
 
-    /**
-     * Synthesizes a clock response based on current time and CME Globex market hours.
-     */
     @Override
     public JsonNode getClock() throws Exception {
         ZonedDateTime now = ZonedDateTime.now(FuturesMarketHours.CT);
         boolean open = FuturesMarketHours.isOpen(now);
 
         ObjectNode clock = objectMapper.createObjectNode();
-        clock.put("is_open", open);
+        clock.put("is_open",    open);
         clock.put("next_open",  FuturesMarketHours.nextOpen(now).toInstant().toString());
         clock.put("next_close", FuturesMarketHours.nextClose(now).toInstant().toString());
         return clock;
@@ -235,9 +368,11 @@ public final class TradovateClient implements BrokerClient {
         if (arr.isArray()) {
             for (JsonNode p : arr) {
                 double netPos = p.path("netPos").asDouble(0);
-                if (netPos == 0) continue; // skip flat positions
+                if (netPos == 0) continue;
+                // contract name is nested under contractId or contract
                 String futuresSym = p.path("contractId").path("name").asText(
                     p.path("contract").path("name").asText(""));
+                if (futuresSym.isBlank()) continue;
                 String equitySym = fromFutures(futuresSym);
                 double avgPrice  = p.path("netPrice").asDouble(0);
                 double marketVal = netPos * avgPrice;
@@ -249,63 +384,26 @@ public final class TradovateClient implements BrokerClient {
 
     // ── Market Data ───────────────────────────────────────────────────────────
 
+    /**
+     * Tradovate provides market data via WebSocket only (wss://md.tradovateapi.com/v1/websocket).
+     * There is NO REST endpoint for historical bars.
+     *
+     * Use Alpaca as the market data source when trading micro futures on Tradovate.
+     * Configure BROKER=tradovate for order execution while the signal engine
+     * continues to use Alpaca market data (already the default for signal generation).
+     */
     @Override
     public Optional<Bar> getLatestBar(String symbol) {
-        try {
-            List<Bar> bars = getBars(symbol, "1Min", 1);
-            return bars.isEmpty() ? Optional.empty() : Optional.of(bars.get(bars.size() - 1));
-        } catch (Exception e) {
-            logger.error("Failed to get latest bar for {} from Tradovate", symbol, e);
-            return Optional.empty();
-        }
+        throw new UnsupportedOperationException(
+            "TradovateClient: market data is WebSocket-only. Use Alpaca for bar data. "
+            + "Symbol: " + symbol);
     }
 
     @Override
     public List<Bar> getBars(String symbol, String timeframe, int limit) throws Exception {
-        String futuresSym = toFutures(symbol);
-        boolean isDaily = timeframe == null
-            || timeframe.equalsIgnoreCase("1Day")
-            || timeframe.equalsIgnoreCase("1D");
-        int elementSize = isDaily ? 1440 : 1;
-
-        ObjectNode chartDesc = objectMapper.createObjectNode();
-        chartDesc.put("underlyingType", "MinuteBar");
-        chartDesc.put("elementSize", elementSize);
-        chartDesc.put("elementSizeUnit", "UnderlyingUnits");
-        chartDesc.put("withHistogram", false);
-
-        ObjectNode timeRange = objectMapper.createObjectNode();
-        timeRange.put("lastNDays", isDaily ? Math.max(1, limit / 252 + 1) : 1);
-
-        ObjectNode req = objectMapper.createObjectNode();
-        req.put("symbol", futuresSym);
-        req.set("chartDescription", chartDesc);
-        req.set("timeRange", timeRange);
-
-        String json = sendPost(baseUrl + "/md/getChart", req.toString());
-        JsonNode root = objectMapper.readTree(json);
-        JsonNode bars = root.path("charts");
-        if (!bars.isArray()) bars = root.path("historicalData").path("bars");
-        if (!bars.isArray()) bars = root; // fallback: top-level array
-
-        List<Bar> result = new ArrayList<>();
-        if (bars.isArray()) {
-            for (JsonNode b : bars) {
-                double close = b.path("close").asDouble(0);
-                if (close <= 0) continue;
-                Instant ts = Instant.ofEpochMilli(b.path("timestamp").asLong(0));
-                result.add(new Bar(
-                    ts,
-                    b.path("open").asDouble(close),
-                    b.path("high").asDouble(close),
-                    b.path("low").asDouble(close),
-                    close,
-                    b.path("upVolume").asLong(0) + b.path("downVolume").asLong(0)
-                ));
-            }
-        }
-        int from = Math.max(0, result.size() - limit);
-        return result.subList(from, result.size());
+        throw new UnsupportedOperationException(
+            "TradovateClient: market data is WebSocket-only (no REST bar endpoint). "
+            + "Use Alpaca for historical bars. Symbol: " + symbol);
     }
 
     @Override
@@ -387,7 +485,7 @@ public final class TradovateClient implements BrokerClient {
             String action = side.equalsIgnoreCase("buy") ? "Buy" : "Sell";
 
             ObjectNode body = buildOrderBody(futuresSym, action, wholeQty, "TrailingStop", null, null, trailPercent);
-            logger.info("Placing Tradovate trailing stop order: {} {} qty={} trail={}%",
+            logger.info("Placing Tradovate trailing stop: {} {} qty={} trail={}%",
                 action, futuresSym, wholeQty, trailPercent);
             sendPost(baseUrl + "/order/placeorder", body.toString());
         } catch (Exception e) {
@@ -396,44 +494,76 @@ public final class TradovateClient implements BrokerClient {
         }
     }
 
-    private ObjectNode buildOrderBody(String futuresSym, String action, long qty,
-                                      String orderType, Double limitPrice,
-                                      Double stopPrice, Double trailingStop) {
-        ObjectNode body = objectMapper.createObjectNode();
-        body.put("action",      action);
-        body.put("symbol",      futuresSym);
-        body.put("orderQty",    qty);
-        body.put("orderType",   orderType);
-        body.put("timeInForce", "DAY");
-        if (limitPrice  != null) body.put("price",        limitPrice);
-        if (stopPrice   != null) body.put("stopPrice",    stopPrice);
-        if (trailingStop != null) body.put("trailingStop", trailingStop);
-        return body;
-    }
-
-    private String translateOrderType(String type) {
-        if (type == null) return "Market";
-        return switch (type.toLowerCase()) {
-            case "limit"      -> "Limit";
-            case "stop"       -> "Stop";
-            case "stop_limit" -> "StopLimit";
-            default           -> "Market";
-        };
-    }
-
     /**
-     * Tradovate has no native bracket orders for micro futures.
-     * Places a simple order and returns withoutBracket() so the caller falls back to
-     * client-side SL/TP monitoring.
+     * Places a bracket order via POST /order/placeoso (OSO = Order Sends Order).
+     *
+     * The OSO order consists of:
+     *   - entry order (market or limit buy/sell)
+     *   - bracket1: stop-loss order triggered when entry fills
+     *   - bracket2: take-profit limit order triggered when entry fills
+     *
+     * All orders include isAutomated=true as required by Tradovate for automated trading.
      */
     @Override
     public BracketOrderResult placeBracketOrder(String symbol, double qty, String side,
                                                 double takeProfitPrice, double stopLossPrice,
                                                 Double stopLossLimitPrice, Double limitPrice) {
-        logger.warn("TradovateClient: bracket orders not supported — placing simple {} order for {}. "
-            + "Position requires client-side SL/TP monitoring.", side, symbol);
-        placeOrder(symbol, qty, side, limitPrice != null ? "limit" : "market", "day", limitPrice);
-        return BracketOrderResult.withoutBracket(symbol, qty);
+        try {
+            String futuresSym = toFutures(symbol);
+            long wholeQty = Math.max(1, Math.round(Math.abs(qty)));
+            String action     = side.equalsIgnoreCase("buy") ? "Buy" : "Sell";
+            String exitAction = side.equalsIgnoreCase("buy") ? "Sell" : "Buy";
+
+            // Entry order
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("action",      action);
+            entry.put("symbol",      futuresSym);
+            entry.put("orderQty",    wholeQty);
+            entry.put("orderType",   limitPrice != null ? "Limit" : "Market");
+            entry.put("timeInForce", "DAY");
+            entry.put("isAutomated", true);
+            if (limitPrice != null) entry.put("price", limitPrice);
+
+            // Bracket 1: Stop-loss
+            ObjectNode bracket1 = objectMapper.createObjectNode();
+            bracket1.put("action",    exitAction);
+            bracket1.put("orderQty",  wholeQty);
+            if (stopLossLimitPrice != null) {
+                bracket1.put("orderType", "StopLimit");
+                bracket1.put("price",     stopLossLimitPrice);
+            } else {
+                bracket1.put("orderType", "Stop");
+            }
+            bracket1.put("stopPrice",    stopLossPrice);
+            bracket1.put("timeInForce",  "DAY");
+            bracket1.put("isAutomated",  true);
+
+            // Bracket 2: Take-profit
+            ObjectNode bracket2 = objectMapper.createObjectNode();
+            bracket2.put("action",      exitAction);
+            bracket2.put("orderQty",    wholeQty);
+            bracket2.put("orderType",   "Limit");
+            bracket2.put("price",       takeProfitPrice);
+            bracket2.put("timeInForce", "DAY");
+            bracket2.put("isAutomated", true);
+
+            ObjectNode body = objectMapper.createObjectNode();
+            body.set("entryOrder", entry);
+            body.set("bracket1",   bracket1);
+            body.set("bracket2",   bracket2);
+
+            logger.info("Placing Tradovate OSO bracket: {} {} qty={} tp={} sl={}",
+                action, futuresSym, wholeQty, takeProfitPrice, stopLossPrice);
+            String respJson = sendPost(baseUrl + "/order/placeoso", body.toString());
+            JsonNode resp = objectMapper.readTree(respJson);
+
+            String orderId = resp.path("orderId").asText(
+                resp.path("id").asText("unknown"));
+            return BracketOrderResult.withBracket(symbol, qty);
+        } catch (Exception e) {
+            logger.error("Failed to place Tradovate bracket order for {}", symbol, e);
+            throw new RuntimeException("Tradovate bracket order placement failed", e);
+        }
     }
 
     @Override
@@ -449,19 +579,15 @@ public final class TradovateClient implements BrokerClient {
     public void cancelOrder(String orderId) {
         try {
             ObjectNode body = objectMapper.createObjectNode();
-            body.put("orderId", Long.parseLong(orderId));
+            // orderId is numeric in Tradovate
+            try {
+                body.put("orderId", Long.parseLong(orderId));
+            } catch (NumberFormatException nfe) {
+                body.put("orderId", orderId);
+            }
+            body.put("isAutomated", true);
             logger.info("Cancelling Tradovate order {}", orderId);
             sendPost(baseUrl + "/order/cancelorder", body.toString());
-        } catch (NumberFormatException e) {
-            // orderId may be a string id
-            try {
-                ObjectNode body = objectMapper.createObjectNode();
-                body.put("orderId", orderId);
-                sendPost(baseUrl + "/order/cancelorder", body.toString());
-            } catch (Exception ex) {
-                logger.error("Failed to cancel Tradovate order {}", orderId, ex);
-                throw new RuntimeException("Tradovate order cancellation failed", ex);
-            }
         } catch (Exception e) {
             logger.error("Failed to cancel Tradovate order {}", orderId, e);
             throw new RuntimeException("Tradovate order cancellation failed", e);
@@ -490,6 +616,37 @@ public final class TradovateClient implements BrokerClient {
     public void replaceOrder(String orderId, Double qty, Double limitPrice, Double stopPrice) {
         throw new UnsupportedOperationException(
             "TradovateClient does not support order replacement. Cancel and re-place instead.");
+    }
+
+    // ── Order body builder ────────────────────────────────────────────────────
+
+    /**
+     * Builds a single-order body with isAutomated=true (required for automated orders by Tradovate).
+     */
+    private ObjectNode buildOrderBody(String futuresSym, String action, long qty,
+                                      String orderType, Double limitPrice,
+                                      Double stopPrice, Double trailingStop) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("action",      action);
+        body.put("symbol",      futuresSym);
+        body.put("orderQty",    qty);
+        body.put("orderType",   orderType);
+        body.put("timeInForce", "DAY");
+        body.put("isAutomated", true);   // REQUIRED for automated orders
+        if (limitPrice   != null) body.put("price",        limitPrice);
+        if (stopPrice    != null) body.put("stopPrice",    stopPrice);
+        if (trailingStop != null) body.put("trailingStop", trailingStop);
+        return body;
+    }
+
+    private String translateOrderType(String type) {
+        if (type == null) return "Market";
+        return switch (type.toLowerCase()) {
+            case "limit"      -> "Limit";
+            case "stop"       -> "Stop";
+            case "stop_limit" -> "StopLimit";
+            default           -> "Market";
+        };
     }
 
     // ── News / Order History / Account Activities ─────────────────────────────

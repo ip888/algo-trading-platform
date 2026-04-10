@@ -38,6 +38,12 @@
     animation: pulse-orange 1s infinite;
 }
 
+.heartbeat-indicator.paused {
+    border-color: rgba(250, 204, 21, 0.5);
+    background: rgba(250, 204, 21, 0.08);
+    color: #facc15;
+}
+
 .status-text {
     font-size: 0.75rem;
     font-weight: 700;
@@ -100,6 +106,39 @@
 
 .component-row .latency.bad {
     color: #ef4444;
+}
+
+/* Pause Button */
+.pause-button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: rgba(250, 204, 21, 0.08);
+    border: 1px solid rgba(250, 204, 21, 0.3);
+    color: #facc15;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.pause-button:hover {
+    background: rgba(250, 204, 21, 0.18);
+    transform: translateY(-1px);
+}
+
+.pause-button.paused {
+    background: rgba(250, 204, 21, 0.15);
+    border-color: rgba(250, 204, 21, 0.6);
+    animation: pulse-yellow 1.5s infinite;
+}
+
+@keyframes pulse-yellow {
+    0%   { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.4); }
+    70%  { box-shadow: 0 0 0 8px rgba(250, 204, 21, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
 }
 
 /* Panic Button */

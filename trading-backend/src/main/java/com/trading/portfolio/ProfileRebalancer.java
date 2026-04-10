@@ -68,8 +68,8 @@ public class ProfileRebalancer {
         double expReturn = calculateWeeklyReturn(expProfile);
         
         logger.info("Last Week Performance:");
-        logger.info("  MAIN Profile: {:.2f}%", mainReturn);
-        logger.info("  EXPERIMENTAL Profile: {:.2f}%", expReturn);
+        logger.info("  MAIN Profile: {}%", String.format("%.2f", mainReturn));
+        logger.info("  EXPERIMENTAL Profile: {}%", String.format("%.2f", expReturn));
         
         // Store old allocation
         int oldMainAllocation = mainAllocation;

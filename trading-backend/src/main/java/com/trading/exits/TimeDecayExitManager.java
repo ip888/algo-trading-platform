@@ -48,8 +48,8 @@ public class TimeDecayExitManager {
         
         // Exit if flat (within threshold)
         if (pnlPercent < config.getFlatPositionThreshold()) {
-            logger.info("⏰ {} Time-Decay Exit: Held {}h, P&L only ±{:.2f}% (threshold: {:.2f}%)",
-                position.symbol(), hoursHeld, pnlPercent, config.getFlatPositionThreshold());
+            logger.info("⏰ {} Time-Decay Exit: Held {}h, P&L only ±{}% (threshold: {}%)",
+                position.symbol(), hoursHeld, String.format("%.2f", pnlPercent), String.format("%.2f", config.getFlatPositionThreshold()));
             return true;
         }
         

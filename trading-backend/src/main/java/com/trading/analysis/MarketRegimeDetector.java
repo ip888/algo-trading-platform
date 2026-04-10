@@ -230,8 +230,8 @@ public class MarketRegimeDetector {
             strength = 0.3;
         }
         
-        logger.debug("Trend: {} (strength: {:.1f}%), MA50: {:.2f}, MA200: {:.2f}, Price: {:.2f}",
-            direction, strength * 100, ma50, ma200, currentPrice);
+        logger.debug("Trend: {} (strength: {}%), MA50: {}, MA200: {}, Price: {}",
+            direction, String.format("%.1f", strength * 100), String.format("%.2f", ma50), String.format("%.2f", ma200), String.format("%.2f", currentPrice));
         
         return new TrendAnalysis(direction, strength, ma50, ma200, currentPrice, goldenCross, deathCross);
     }
@@ -269,7 +269,7 @@ public class MarketRegimeDetector {
             trend = VolumeTrend.STABLE;
         }
         
-        logger.debug("Volume: {} (ratio: {:.2f}x avg)", trend, volumeRatio);
+        logger.debug("Volume: {} (ratio: {}x avg)", trend, String.format("%.2f", volumeRatio));
         
         return new VolumeAnalysis(trend, currentVolume, avgVolume, volumeRatio);
     }
@@ -299,7 +299,7 @@ public class MarketRegimeDetector {
             double adRatio = total > 0 ? (double) advancing / total : 0.5;
             double strength = adRatio; // 0.0 to 1.0
             
-            logger.debug("Breadth: {:.0f}% (A/D: {}/{})", strength * 100, advancing, declining);
+            logger.debug("Breadth: {}% (A/D: {}/{})", String.format("%.0f", strength * 100), advancing, declining);
             
             return new BreadthAnalysis(strength, advancing, declining, adRatio);
             

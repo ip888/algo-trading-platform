@@ -1,7 +1,7 @@
 package com.trading.protection;
 
 import com.trading.api.BrokerClient;
-import com.trading.api.ResilientAlpacaClient;
+import com.trading.api.ResilientBrokerClient;
 import com.trading.api.model.Position;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class EmergencyProtocol {
     private static final Logger logger = LoggerFactory.getLogger(EmergencyProtocol.class);
     
-    private final ResilientAlpacaClient resilientClient;
+    private final ResilientBrokerClient resilientClient;
     private final BrokerClient directClient; // For emergency bypass
     
     // Modern: AtomicBoolean for lock-free state management
@@ -40,7 +40,7 @@ public class EmergencyProtocol {
     private volatile long lastTriggerTime;
     private volatile String lastTriggerReason;
 
-    public EmergencyProtocol(ResilientAlpacaClient client) {
+    public EmergencyProtocol(ResilientBrokerClient client) {
         this.resilientClient = client;
         this.directClient = client.getDelegate(); // Bypass circuit breaker for emergencies
     }

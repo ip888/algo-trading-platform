@@ -36,19 +36,19 @@ public class AdaptivePositionSizer {
         // Adjust based on ML confidence
         if (mlScore >= config.getAdaptiveSizeHighConfidence()) {
             sizePercent = config.getAdaptiveSizeMax(); // 8%
-            logger.debug("High confidence ({:.1f}), using max size: {:.1f}%", mlScore, sizePercent);
+            logger.debug("High confidence ({}), using max size: {}%", String.format("%.1f", mlScore), String.format("%.1f", sizePercent));
         } else if (mlScore >= 75) {
             sizePercent = 6.0; // Medium-high confidence
-            logger.debug("Medium-high confidence ({:.1f}), using {:.1f}%", mlScore, sizePercent);
+            logger.debug("Medium-high confidence ({}), using {}%", String.format("%.1f", mlScore), String.format("%.1f", sizePercent));
         } else if (mlScore < 70) {
             sizePercent = config.getAdaptiveSizeMin(); // 2%
-            logger.debug("Low confidence ({:.1f}), using min size: {:.1f}%", mlScore, sizePercent);
+            logger.debug("Low confidence ({}), using min size: {}%", String.format("%.1f", mlScore), String.format("%.1f", sizePercent));
         }
         
         // Reduce size in high volatility
         if (vix > config.getAdaptiveSizeVixThreshold()) {
             sizePercent *= 0.5; // Cut in half
-            logger.info("⚠️ High VIX ({:.1f}), reducing size to {:.1f}%", vix, sizePercent);
+            logger.info("⚠️ High VIX ({}), reducing size to {}%", String.format("%.1f", vix), String.format("%.1f", sizePercent));
         }
         
         // Ensure within bounds
@@ -57,8 +57,8 @@ public class AdaptivePositionSizer {
         
         double dollarSize = equity * (sizePercent / 100.0);
         
-        logger.debug("Adaptive size: {:.1f}% (${:.2f}) - ML:{:.1f} VIX:{:.1f}",
-            sizePercent, dollarSize, mlScore, vix);
+        logger.debug("Adaptive size: {}% (${}) - ML:{} VIX:{}",
+            String.format("%.1f", sizePercent), String.format("%.2f", dollarSize), String.format("%.1f", mlScore), String.format("%.1f", vix));
         
         return dollarSize;
     }
@@ -78,8 +78,8 @@ public class AdaptivePositionSizer {
             double reduction = config.getCorrelationSizeReduction();
             double adjustedSize = baseSize * reduction;
             
-            logger.info("📊 High correlation ({:.2f}), reducing size by {:.0f}%: ${:.2f} → ${:.2f}",
-                maxCorrelation, (1 - reduction) * 100, baseSize, adjustedSize);
+            logger.info("📊 High correlation ({}), reducing size by {}%: ${} → ${}",
+                String.format("%.2f", maxCorrelation), String.format("%.0f", (1 - reduction) * 100), String.format("%.2f", baseSize), String.format("%.2f", adjustedSize));
             
             return adjustedSize;
         }

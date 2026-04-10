@@ -168,8 +168,8 @@ public class MultiTimeframeAnalyzer {
             // Generate recommendation
             SignalType recommendation = generateRecommendation(signals, aligned);
             
-            logger.debug("Multi-timeframe analysis for {}: {} (confidence: {:.0f}%)", 
-                symbol, recommendation, confidence * 100);
+            logger.debug("Multi-timeframe analysis for {}: {} (confidence: {}%)",
+                symbol, recommendation, String.format("%.0f", confidence * 100));
             
             return new MultiTimeframeAnalysis(
                 symbol, signals, aligned, primaryTrend, 
@@ -389,8 +389,8 @@ public class MultiTimeframeAnalyzer {
         
         if (bullishPct >= 0.6 && avgStrength >= 0.4) {
             // 60%+ bullish with decent strength = BUY
-            logger.debug("{}% bullish timeframes with {:.0f}% strength - recommending BUY", 
-                String.format("%.0f", bullishPct * 100), avgStrength * 100);
+            logger.debug("{}% bullish timeframes with {}% strength - recommending BUY",
+                String.format("%.0f", bullishPct * 100), String.format("%.0f", avgStrength * 100));
             return SignalType.BUY;
         }
         

@@ -97,10 +97,10 @@ public class AdvancedPositionSizer {
         double minSize = (deployableEquity * config.getPositionSizingMinPercent()) / currentPrice;
         double finalSize = Math.max(cappedSize, minSize);
         
-        logger.debug("{}: Position sizing - Base: {}, Vol-Adj: {}, Max%: {:.0f}%, Final: {} shares", 
-            symbol, String.format("%.2f", baseSize), 
+        logger.debug("{}: Position sizing - Base: {}, Vol-Adj: {}, Max%: {}%, Final: {} shares",
+            symbol, String.format("%.2f", baseSize),
             String.format("%.2f", volatilityAdjusted),
-            maxPercent * 100,
+            String.format("%.0f", maxPercent * 100),
             String.format("%.2f", finalSize));
         
         return finalSize;
@@ -137,8 +137,8 @@ public class AdvancedPositionSizer {
         double positionValue = equity * kellyPercent;
         double shares = positionValue / currentPrice;
         
-        logger.debug("Kelly sizing: WinRate={:.1f}%, Kelly%={:.1f}%, Fraction={:.2f}, Shares={:.2f}", 
-            winRate * 100, kellyPercent * 100, kellyFraction, shares);
+        logger.debug("Kelly sizing: WinRate={}%, Kelly%={}%, Fraction={}, Shares={}",
+            String.format("%.1f", winRate * 100), String.format("%.1f", kellyPercent * 100), String.format("%.2f", kellyFraction), String.format("%.2f", shares));
         
         return shares;
     }
@@ -194,8 +194,8 @@ public class AdvancedPositionSizer {
                 stats.avgWin = dbStats.avgWin();
                 stats.avgLoss = dbStats.avgLoss();
                 
-                logger.debug("{}: Updated stats from DB - WinRate: {:.1f}%, Trades: {}", 
-                    symbol, stats.winRate * 100, stats.totalTrades);
+                logger.debug("{}: Updated stats from DB - WinRate: {}%, Trades: {}",
+                    symbol, String.format("%.1f", stats.winRate * 100), stats.totalTrades);
             }
         } catch (Exception e) {
             logger.debug("Could not load stats for {}: {}", symbol, e.getMessage());
@@ -230,9 +230,9 @@ public class AdvancedPositionSizer {
             stats.avgLoss = stats.totalLossAmount / losses;
         }
         
-        logger.info("{}: Trade recorded - WinRate: {:.1f}% ({}/{}), Avg Win: ${:.2f}, Avg Loss: ${:.2f}", 
-            symbol, stats.winRate * 100, stats.wins, stats.totalTrades,
-            stats.avgWin, stats.avgLoss);
+        logger.info("{}: Trade recorded - WinRate: {}% ({}/{}), Avg Win: ${}, Avg Loss: ${}",
+            symbol, String.format("%.1f", stats.winRate * 100), stats.wins, stats.totalTrades,
+            String.format("%.2f", stats.avgWin), String.format("%.2f", stats.avgLoss));
     }
     
     /**

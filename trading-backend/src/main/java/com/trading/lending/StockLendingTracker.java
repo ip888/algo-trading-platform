@@ -43,8 +43,8 @@ public class StockLendingTracker {
         totalIncome += dailyIncome;
         
         if (dailyIncome > 0) {
-            logger.info("💰 Stock Lending Income: ${:.2f} (Total: ${:.2f})",
-                dailyIncome, totalIncome);
+            logger.info("💰 Stock Lending Income: ${} (Total: ${})",
+                String.format("%.2f", dailyIncome), String.format("%.2f", totalIncome));
             
             TradingWebSocketHandler.broadcastActivity(
                 String.format("💰 Stock Lending: +$%.2f passive income", dailyIncome),

@@ -1,7 +1,7 @@
 package com.trading.dashboard;
 
 import com.trading.analysis.MarketAnalyzer;
-import com.trading.api.ResilientAlpacaClient;
+import com.trading.api.ResilientBrokerClient;
 import com.trading.api.controller.DashboardController;
 import com.trading.autonomous.TradeAnalytics;
 import com.trading.config.Config;
@@ -30,7 +30,7 @@ public final class DashboardServer {
     public DashboardServer(TradeDatabase database, PortfolioManager portfolio,
                           MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                           VolatilityFilter volatilityFilter, Config config,
-                          ResilientAlpacaClient alpacaClient) {
+                          ResilientBrokerClient alpacaClient) {
         
         // Create TradeAnalytics for performance tracking (Task 3)
         var tradeAnalytics = new TradeAnalytics();

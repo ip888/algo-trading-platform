@@ -54,6 +54,7 @@ public class TradeDatabase {
                 symbol TEXT NOT NULL,
                 strategy TEXT,
                 profile TEXT,
+                broker TEXT DEFAULT 'alpaca',
                 entry_time TEXT NOT NULL,
                 exit_time TEXT,
                 entry_price REAL NOT NULL,
@@ -66,38 +67,50 @@ public class TradeDatabase {
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """;
-        
+
         // Add index for common queries
         String createIndexSql = """
-            CREATE INDEX IF NOT EXISTS idx_symbol_status 
+            CREATE INDEX IF NOT EXISTS idx_symbol_status
             ON trades(symbol, status)
             """;
-        
-        // Schema Migration: Add 'profile' column if it doesn't exist (for existing DBs)
-        String migrationSql = """
-            ALTER TABLE trades ADD COLUMN profile TEXT;
+
+        String createBrokerIndexSql = """
+            CREATE INDEX IF NOT EXISTS idx_broker_status
+            ON trades(broker, status)
             """;
-        
+
         long stamp = lock.writeLock();
         try (var stmt = connection.createStatement()) {
             stmt.execute(createSql);
             stmt.execute(createIndexSql);
+            stmt.execute(createBrokerIndexSql);
         } finally {
             lock.unlockWrite(stamp);
         }
-        
-        // Run migration separately (ignoring error if column exists)
-        stamp = lock.writeLock(); 
+
+        runMigration("ALTER TABLE trades ADD COLUMN profile TEXT",
+            "Schema migration: Added 'profile' column");
+        runMigration("ALTER TABLE trades ADD COLUMN broker TEXT DEFAULT 'alpaca'",
+            "Schema migration: Added 'broker' column (existing rows default to 'alpaca')");
+    }
+
+    /**
+     * Execute a DDL migration statement safely, ignoring "duplicate column name" errors
+     * (which mean the column already exists) and logging warnings for other failures.
+     */
+    private void runMigration(String ddl, String description) {
+        long stamp = lock.writeLock();
         try (var stmt = connection.createStatement()) {
-             stmt.execute(migrationSql);
-             logger.info("Schema migration: Added 'profile' column");
+            stmt.execute(ddl);
+            logger.info("{}", description);
         } catch (SQLException e) {
-            // Expected if column already exists - ignore
-            if (!e.getMessage().contains("duplicate column name")) {
-                logger.debug("Schema migration skipped (column likely exists): {}", e.getMessage());
+            if (e.getMessage() != null && e.getMessage().contains("duplicate column name")) {
+                // Expected: column already exists — silently ignore
+            } else {
+                logger.warn("Migration '{}' failed (non-fatal): {}", description, e.getMessage());
             }
         } finally {
-             lock.unlockWrite(stamp); 
+            lock.unlockWrite(stamp);
         }
     }
     
@@ -105,33 +118,36 @@ public class TradeDatabase {
      * Record a new trade with write lock.
      * Modern approach: explicit lock management with try-finally.
      */
-    public void recordTrade(String symbol, String strategy, String profile, Instant entryTime, 
-                           double entryPrice, double quantity, double stopLoss, double takeProfit) {
+    public void recordTrade(String symbol, String strategy, String profile, String broker,
+                           Instant entryTime, double entryPrice, double quantity,
+                           double stopLoss, double takeProfit) {
         String sql = """
-            INSERT INTO trades (symbol, strategy, profile, entry_time, entry_price, quantity, status, stop_loss, take_profit)
-            VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
+            INSERT INTO trades (symbol, strategy, profile, broker, entry_time, entry_price, quantity, status, stop_loss, take_profit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
             """;
-        
+
         long stamp = lock.writeLock();
         try (var stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, symbol);
             stmt.setString(2, strategy);
             stmt.setString(3, profile);
-            stmt.setString(4, entryTime.toString());
-            stmt.setDouble(5, entryPrice);
-            stmt.setDouble(6, quantity);
-            stmt.setDouble(7, stopLoss);
-            stmt.setDouble(8, takeProfit);
+            stmt.setString(4, broker);
+            stmt.setString(5, entryTime.toString());
+            stmt.setDouble(6, entryPrice);
+            stmt.setDouble(7, quantity);
+            stmt.setDouble(8, stopLoss);
+            stmt.setDouble(9, takeProfit);
             stmt.executeUpdate();
-            
+
             // Structured logging (Phase 4)
             logger.atInfo()
                 .addKeyValue("symbol", symbol)
                 .addKeyValue("profile", profile)
+                .addKeyValue("broker", broker)
                 .addKeyValue("price", entryPrice)
                 .addKeyValue("quantity", quantity)
                 .log("Trade recorded");
-                
+
         } catch (SQLException e) {
             logger.error("Failed to record trade for {}", symbol, e);
             throw new RuntimeException("Database write failed", e);
@@ -161,10 +177,10 @@ public class TradeDatabase {
             // For sells, we need to get the entry price from the open trade to calculate actual PnL
             double entryPrice = getOpenTradeEntryPrice(symbol);
             double actualPnL = (price - entryPrice) * quantity; // Correct PnL calculation
-            closeTrade(symbol, entryTime, price, actualPnL);
+            closeTrade(symbol, entryTime, price, actualPnL, "test");
         } else {
             // For buys, record new trade
-            recordTrade(symbol, "TEST", "test", entryTime, price, quantity, stopLoss, takeProfit);
+            recordTrade(symbol, "TEST", "test", "test", entryTime, price, quantity, stopLoss, takeProfit);
         }
     }
     
@@ -204,11 +220,12 @@ public class TradeDatabase {
      * Returns true if there is already an OPEN trade record for this symbol.
      * Used during startup reconciliation to avoid double-inserting existing positions.
      */
-    public boolean hasOpenTrade(String symbol) {
-        String sql = "SELECT COUNT(*) as cnt FROM trades WHERE symbol = ? AND status = 'OPEN'";
+    public boolean hasOpenTrade(String symbol, String broker) {
+        String sql = "SELECT COUNT(*) as cnt FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN'";
         long stamp = lock.tryOptimisticRead();
         try (var stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, symbol);
+            stmt.setString(2, broker);
             try (var rs = stmt.executeQuery()) {
                 int count = rs.next() ? rs.getInt("cnt") : 0;
                 if (lock.validate(stamp)) return count > 0;
@@ -220,6 +237,7 @@ public class TradeDatabase {
         stamp = lock.readLock();
         try (var stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, symbol);
+            stmt.setString(2, broker);
             try (var rs = stmt.executeQuery()) {
                 return rs.next() && rs.getInt("cnt") > 0;
             }
@@ -234,20 +252,22 @@ public class TradeDatabase {
     /**
      * Close a trade with write lock.
      */
-    public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl) {
+    public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl, String broker) {
         String sql = """
             UPDATE trades SET exit_time = ?, exit_price = ?, pnl = ?, status = 'CLOSED'
-            WHERE symbol = ? AND status = 'OPEN'
-            AND entry_time = (SELECT MAX(entry_time) FROM trades WHERE symbol = ? AND status = 'OPEN')
+            WHERE symbol = ? AND broker = ? AND status = 'OPEN'
+            AND entry_time = (SELECT MAX(entry_time) FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN')
             """;
-        
+
         long stamp = lock.writeLock();
         try (var stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, exitTime.toString());
             stmt.setDouble(2, exitPrice);
             stmt.setDouble(3, pnl);
             stmt.setString(4, symbol);
-            stmt.setString(5, symbol); // For subquery
+            stmt.setString(5, broker);
+            stmt.setString(6, symbol); // For subquery
+            stmt.setString(7, broker); // For subquery
             int updated = stmt.executeUpdate();
             
             if (updated > 0) {
@@ -514,7 +534,7 @@ public class TradeDatabase {
         java.util.List<java.util.Map<String, Object>> trades = new java.util.ArrayList<>();
         
         try {
-            String sql = "SELECT symbol, strategy, profile, entry_time, entry_price, quantity, " +
+            String sql = "SELECT symbol, strategy, profile, broker, entry_time, entry_price, quantity, " +
                         "exit_time, exit_price, pnl, stop_loss, take_profit, status " +
                         "FROM trades ORDER BY entry_time DESC LIMIT ?";
 
@@ -527,6 +547,7 @@ public class TradeDatabase {
                     trade.put("symbol", rs.getString("symbol"));
                     trade.put("strategy", rs.getString("strategy"));
                     trade.put("profile", rs.getString("profile"));
+                    trade.put("broker", rs.getString("broker"));
                     trade.put("entryTime", rs.getString("entry_time"));
                     trade.put("entryPrice", rs.getDouble("entry_price"));
                     trade.put("quantity", rs.getDouble("quantity"));
@@ -566,19 +587,20 @@ public class TradeDatabase {
      * but don't count toward P&L stats.
      * Only closes records older than minAgeMs to avoid race with just-inserted records.
      */
-    public int closeOrphanedOpenTrades(java.util.Set<String> liveSymbols, long minAgeMs) {
+    public int closeOrphanedOpenTrades(String broker, java.util.Set<String> liveSymbols, long minAgeMs) {
         if (liveSymbols == null) liveSymbols = java.util.Collections.emptySet();
         // Build NOT IN clause — safe because symbols are validated ticker strings
         String placeholders = liveSymbols.isEmpty() ? "'__none__'" :
             liveSymbols.stream().map(s -> "?").collect(java.util.stream.Collectors.joining(","));
         String sql = "UPDATE trades SET status = 'CANCELLED', exit_time = ? " +
-            "WHERE status = 'OPEN' AND symbol NOT IN (" + placeholders + ") " +
+            "WHERE status = 'OPEN' AND broker = ? AND symbol NOT IN (" + placeholders + ") " +
             "AND created_at <= datetime('now', '-' || ? || ' seconds')";
 
         long stamp = lock.writeLock();
         try (var stmt = connection.prepareStatement(sql)) {
             int idx = 1;
             stmt.setString(idx++, java.time.Instant.now().toString());
+            stmt.setString(idx++, broker);
             for (String sym : liveSymbols) stmt.setString(idx++, sym);
             stmt.setLong(idx, minAgeMs / 1000);
             int updated = stmt.executeUpdate();
@@ -637,6 +659,7 @@ public class TradeDatabase {
                 trade.put("symbol", rs.getString("symbol"));
                 trade.put("strategy", rs.getString("strategy"));
                 trade.put("profile", rs.getString("profile"));
+                trade.put("broker", rs.getString("broker"));
                 trade.put("entryTime", rs.getString("entry_time"));
                 trade.put("exitTime", rs.getString("exit_time"));
                 trade.put("entryPrice", rs.getDouble("entry_price"));
@@ -664,7 +687,7 @@ public class TradeDatabase {
      */
     public String exportTradesAsCsv(String status) {
         var sb = new StringBuilder();
-        sb.append("id,symbol,strategy,profile,entry_time,exit_time,entry_price,exit_price,quantity,pnl,status,stop_loss,take_profit,created_at\n");
+        sb.append("id,symbol,strategy,profile,broker,entry_time,exit_time,entry_price,exit_price,quantity,pnl,status,stop_loss,take_profit,created_at\n");
 
         var trades = exportTrades(status);
         for (var trade : trades) {
@@ -672,6 +695,7 @@ public class TradeDatabase {
             sb.append(csvEscape(trade.get("symbol"))).append(',');
             sb.append(csvEscape(trade.get("strategy"))).append(',');
             sb.append(csvEscape(trade.get("profile"))).append(',');
+            sb.append(csvEscape(trade.get("broker"))).append(',');
             sb.append(csvEscape(trade.get("entryTime"))).append(',');
             sb.append(csvEscape(trade.get("exitTime"))).append(',');
             sb.append(trade.get("entryPrice")).append(',');

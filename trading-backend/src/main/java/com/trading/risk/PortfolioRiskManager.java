@@ -33,18 +33,18 @@ public class PortfolioRiskManager {
         double portfolioLoss = ((currentEquity - initialCapital) / initialCapital) * 100;
         
         if (portfolioLoss < -config.getPortfolioStopLossPercent()) {
-            logger.error("🛑 PORTFOLIO STOP LOSS HIT: {:.2f}% (limit: -{:.1f}%)", 
-                portfolioLoss, config.getPortfolioStopLossPercent());
-            logger.error("   Initial Capital: ${:.2f}", initialCapital);
-            logger.error("   Current Equity: ${:.2f}", currentEquity);
-            logger.error("   Total Loss: ${:.2f}", currentEquity - initialCapital);
+            logger.error("🛑 PORTFOLIO STOP LOSS HIT: {}% (limit: -{}%)",
+                String.format("%.2f", portfolioLoss), String.format("%.1f", config.getPortfolioStopLossPercent()));
+            logger.error("   Initial Capital: ${}", String.format("%.2f", initialCapital));
+            logger.error("   Current Equity: ${}", String.format("%.2f", currentEquity));
+            logger.error("   Total Loss: ${}", String.format("%.2f", currentEquity - initialCapital));
             return true;
         }
-        
+
         // Log warning if approaching stop loss
         if (portfolioLoss < -(config.getPortfolioStopLossPercent() * 0.8)) {
-            logger.warn("⚠️ Approaching portfolio stop loss: {:.2f}% (limit: -{:.1f}%)", 
-                portfolioLoss, config.getPortfolioStopLossPercent());
+            logger.warn("⚠️ Approaching portfolio stop loss: {}% (limit: -{}%)",
+                String.format("%.2f", portfolioLoss), String.format("%.1f", config.getPortfolioStopLossPercent()));
         }
         
         return false;

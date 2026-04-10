@@ -20,6 +20,7 @@ import { BotBehaviorMonitor } from './components/BotBehaviorMonitor';
 import { BacktestDashboard } from './components/BacktestDashboard';
 import SmartFeaturesPanel from './components/SmartFeaturesPanel';
 import OperationalEventsPanel from './components/OperationalEventsPanel';
+import { BrokerStatus } from './components/BrokerStatus';
 import { Activity, TrendingUp } from 'lucide-react';
 
 import './App.css';
@@ -82,7 +83,7 @@ function App() {
           <div className="brand">
             <div className="bot-icon">📊</div>
             <div>
-              <h1>Alpaca Global Finance <span className="version">v6.0</span></h1>
+              <h1>Multi-Broker Terminal <span className="version">v6.0</span></h1>
               <div className="connection-status">
                 <span className={`status-dot ${store.connected ? 'online' : 'offline'}`}></span>
                 {store.connected ? 'Terminal Connected' : 'Reconnecting to Core...'}
@@ -149,6 +150,9 @@ function App() {
           <div className="layout-columns">
             {/* LEFT: Financials */}
             <aside className="control-aside">
+              <ComponentErrorBoundary name="Broker Status">
+                <BrokerStatus />
+              </ComponentErrorBoundary>
               <ComponentErrorBoundary name="Account Overview">
                 <AccountOverview />
               </ComponentErrorBoundary>

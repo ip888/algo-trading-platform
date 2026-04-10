@@ -252,8 +252,8 @@ public final class StrategyManager {
 
         if (shortTermDown) {
             double pct = ((sma10Current - livePrice) / sma10Current) * 100;
-            logger.debug("Short-term downtrend: price ${} is {:.2f}% below declining 10-SMA ${}",
-                String.format("%.2f", livePrice), pct, String.format("%.2f", sma10Current));
+            logger.debug("Short-term downtrend: price ${} is {}% below declining 10-SMA ${}",
+                String.format("%.2f", livePrice), String.format("%.2f", pct), String.format("%.2f", sma10Current));
             return true;
         }
 
@@ -264,8 +264,8 @@ public final class StrategyManager {
 
         if (mediumTermDown) {
             double pct = ((sma20Current - livePrice) / sma20Current) * 100;
-            logger.debug("Medium-term downtrend: price ${} is {:.2f}% below declining 20-SMA ${}",
-                String.format("%.2f", livePrice), pct, String.format("%.2f", sma20Current));
+            logger.debug("Medium-term downtrend: price ${} is {}% below declining 20-SMA ${}",
+                String.format("%.2f", livePrice), String.format("%.2f", pct), String.format("%.2f", sma20Current));
             return true;
         }
 

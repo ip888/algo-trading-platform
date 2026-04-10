@@ -91,10 +91,24 @@ export const PositionsTable = () => {
             const pnl = pos.unrealized_pl !== undefined ? toNumber(pos.unrealized_pl) : (marketPrice - entryPrice) * quantity;
             const pnlPercent = pos.unrealized_plpc !== undefined ? toNumber(pos.unrealized_plpc) * 100 : (entryPrice > 0 ? ((marketPrice - entryPrice) / entryPrice) * 100 : 0);
             
+            const mobileBroker = (pos as any).broker || 'alpaca';
             return (
               <div key={pos.symbol} className="overview-item" style={{ marginBottom: '12px', border: '1px solid var(--border-light)' }}>
                 <div className="position-header" style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border-light)', paddingBottom: '8px', marginBottom: '8px' }}>
-                  <span className="font-bold">{pos.symbol}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span className="font-bold">{pos.symbol}</span>
+                    <span style={{
+                      fontSize: '9px',
+                      fontWeight: 700,
+                      padding: '1px 5px',
+                      borderRadius: '3px',
+                      background: mobileBroker === 'tradier' ? '#22c55e22' : '#3b82f622',
+                      color: mobileBroker === 'tradier' ? '#22c55e' : '#3b82f6',
+                      border: `1px solid ${mobileBroker === 'tradier' ? '#22c55e44' : '#3b82f644'}`
+                    }}>
+                      {mobileBroker.toUpperCase()}
+                    </span>
+                  </div>
                   <span className={pnl >= 0 ? 'positive' : 'negative'} style={{ fontWeight: 600 }}>
                     {pnl >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%
                   </span>
@@ -131,6 +145,7 @@ export const PositionsTable = () => {
           <thead>
             <tr>
               <th>Identification</th>
+              <th>Broker</th>
               <th>Quantity</th>
               <th>Reference</th>
               <th>Current</th>
@@ -155,10 +170,25 @@ export const PositionsTable = () => {
               const distanceToTP = takeProfit > 0 ? ((takeProfit - marketPrice) / marketPrice * 100).toFixed(2) : null;
               const distanceToSL = stopLoss > 0 ? ((marketPrice - stopLoss) / marketPrice * 100).toFixed(2) : null;
               
+              const broker = (pos as any).broker || 'alpaca';
               return (
                 <tr key={pos.symbol}>
                   <td className="font-bold">
                     {pos.symbol}
+                  </td>
+                  <td>
+                    <span style={{
+                      fontSize: '10px',
+                      fontWeight: 700,
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      background: broker === 'tradier' ? '#22c55e22' : '#3b82f622',
+                      color: broker === 'tradier' ? '#22c55e' : '#3b82f6',
+                      border: `1px solid ${broker === 'tradier' ? '#22c55e44' : '#3b82f644'}`
+                    }}>
+                      {broker.toUpperCase()}
+                      {broker === 'tradier' && <span style={{ fontSize: '8px', marginLeft: '3px', color: '#f59e0b' }}>SBX</span>}
+                    </span>
                   </td>
                   <td>{quantity.toFixed(4)}</td>
                   <td>${entryPrice.toFixed(2)}</td>

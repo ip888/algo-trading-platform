@@ -68,30 +68,27 @@ public class TradeDatabase {
             )
             """;
 
-        // Add index for common queries
-        String createIndexSql = """
-            CREATE INDEX IF NOT EXISTS idx_symbol_status
-            ON trades(symbol, status)
-            """;
-
-        String createBrokerIndexSql = """
-            CREATE INDEX IF NOT EXISTS idx_broker_status
-            ON trades(broker, status)
-            """;
-
+        // Create table and base index (symbol+status always exists)
         long stamp = lock.writeLock();
         try (var stmt = connection.createStatement()) {
             stmt.execute(createSql);
-            stmt.execute(createIndexSql);
-            stmt.execute(createBrokerIndexSql);
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_symbol_status
+                ON trades(symbol, status)
+                """);
         } finally {
             lock.unlockWrite(stamp);
         }
 
+        // Additive migrations — safe to re-run on existing DBs (duplicate-column errors ignored)
         runMigration("ALTER TABLE trades ADD COLUMN profile TEXT",
             "Schema migration: Added 'profile' column");
         runMigration("ALTER TABLE trades ADD COLUMN broker TEXT DEFAULT 'alpaca'",
             "Schema migration: Added 'broker' column (existing rows default to 'alpaca')");
+
+        // Broker index must be created AFTER the broker column migration above
+        runMigration("CREATE INDEX IF NOT EXISTS idx_broker_status ON trades(broker, status)",
+            "Schema migration: Added idx_broker_status index");
     }
 
     /**

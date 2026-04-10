@@ -1484,7 +1484,9 @@ public class Config {
 
     public boolean isMultiBrokerEnabled() {
         String v = getBrokersAllocation();
-        return v != null && !v.isBlank() && v.contains(",");
+        // Requires at least one valid "name:percent" entry (colon present).
+        // Works for single broker (BROKERS=tradier:100) and multi (BROKERS=alpaca:100,tradier:100).
+        return v != null && !v.isBlank() && v.contains(":");
     }
 
     private String getEnv(String key, String defaultValue) {

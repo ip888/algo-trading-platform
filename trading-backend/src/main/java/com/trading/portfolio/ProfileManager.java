@@ -1537,7 +1537,11 @@ public class ProfileManager implements Runnable {
                     );
                     
                     if (exitDecision.type() != com.trading.exits.ExitStrategyManager.ExitType.NONE) {
-                        double qtyToExit = position.quantity() * exitDecision.quantity();
+                        // Use live broker qty for full exits to prevent "insufficient qty" errors
+                        // when internal tracker has drifted from actual broker position.
+                        double qtyToExit = exitDecision.isPartial()
+                            ? position.quantity() * exitDecision.quantity()  // partial: fraction of internal
+                            : qty;  // full exit: always use live broker qty
                         
                         logger.info("{} 🎯 ENHANCED EXIT: {} - {}", 
                             profilePrefix, symbol, exitDecision.reason());
@@ -1714,17 +1718,24 @@ public class ProfileManager implements Runnable {
                 profilePrefix, symbol, String.format("%.4f", exit.quantity()), exit.reason(), minsWaiting);
 
             try {
-                // Check if position still exists — native stop may have already filled it
+                // Check if position still exists — native stop may have already filled it.
+                // Always use the LIVE qty from broker, not the stale internal qty, to avoid
+                // "insufficient qty available" errors when position was partially filled externally.
                 var positions = client.getPositions();
-                boolean stillHeld = positions.stream().anyMatch(p -> p.symbol().equals(symbol));
-                if (!stillHeld) {
+                var livePos = positions.stream().filter(p -> p.symbol().equals(symbol)).findFirst();
+                if (livePos.isEmpty()) {
                     urgentExitQueue.remove(symbol);
-                    logger.info("{} Urgent exit cleared: {} position no longer on Alpaca", profilePrefix, symbol);
+                    logger.info("{} Urgent exit cleared: {} position no longer on broker", profilePrefix, symbol);
                     continue;
+                }
+                double liveQty = livePos.get().quantity();
+                if (Math.abs(liveQty - exit.quantity()) > 0.001) {
+                    logger.warn("{} Urgent exit qty mismatch for {}: internal={} broker={} — using broker qty",
+                        profilePrefix, symbol, String.format("%.4f", exit.quantity()), String.format("%.4f", liveQty));
                 }
 
                 cancelExistingOrders(profilePrefix, symbol);
-                client.placeOrderDirect(symbol, exit.quantity(), "sell", "market", "day", null);
+                client.placeOrderDirect(symbol, liveQty, "sell", "market", "day", null);
 
                 urgentExitQueue.remove(symbol);
                 pendingExitOrders.put(symbol, System.currentTimeMillis());

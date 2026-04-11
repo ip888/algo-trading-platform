@@ -1385,7 +1385,7 @@ public final class DashboardController {
                 tradierInfo.put("sandbox", config.isTradierSandbox());
                 tradierInfo.put("connected", true);
                 tradierInfo.put("equity", account.path("equity").asDouble(0));
-                tradierInfo.put("cash", account.path("buying_power").asDouble(0));
+                tradierInfo.put("cash", account.path("cash").asDouble(0));
                 tradierInfo.put("buyingPower", account.path("buying_power").asDouble(0));
                 brokers.add(tradierInfo);
             } catch (Exception e) {

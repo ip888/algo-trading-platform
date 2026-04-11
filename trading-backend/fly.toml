@@ -3,7 +3,7 @@
 # Region: Stockholm (arn) - good for EU
 
 app = "trading-bot-igor-waw"
-primary_region = "arn"  # Stockholm, Sweden - good for EU
+primary_region = "arn"  # Stockholm, Sweden
 
 [build]
   dockerfile = "Dockerfile"
@@ -11,17 +11,22 @@ primary_region = "arn"  # Stockholm, Sweden - good for EU
 [env]
   # JVM settings for container
   JAVA_TOOL_OPTIONS = "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC"
-  # Timezone
-  TZ = "Europe/Warsaw"
-  # Rate limiting - increase delay to prevent 429 errors with 2 profiles
+  # Timezone — EST so logs match US market hours and all time logic is consistent
+  TZ = "America/New_York"
+  # Persistent volume path for trade DB (survives redeploys)
+  DATA_DIR = "/data"
+  # Rate limiting
   API_REQUEST_DELAY_MS = "500"
   SYMBOL_BATCH_SIZE = "4"
   ENABLE_ADAPTIVE_RATE_CONTROL = "true"
+  # Cycle intervals: MAIN checks every 20s, EXPERIMENTAL every 40s to halve API load
+  MAIN_CYCLE_INTERVAL_MS = "20000"
+  EXP_CYCLE_INTERVAL_MS = "40000"
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false   # Keep running 24/7 for trading!
+  auto_stop_machines = "off"   # Keep running 24/7 for trading!
   auto_start_machines = true
   min_machines_running = 1     # Always keep 1 instance running
   processes = ["app"]
@@ -41,9 +46,8 @@ primary_region = "arn"  # Stockholm, Sweden - good for EU
 [[vm]]
   size = "shared-cpu-2x"
   memory = "1gb"
-  # Cost: ~$6.39/month (shared-cpu-2x with 1GB)
-  # Can scale up to "shared-cpu-2x" with 2GB for ~$11/month if needed
 
-# Secrets to set (run these before first deploy):
-# fly secrets set ALPACA_API_KEY=your_key
-# fly secrets set ALPACA_API_SECRET=your_secret
+# Persistent volume — trade history survives redeploys
+[[mounts]]
+  source = "trading_data"
+  destination = "/data"

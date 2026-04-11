@@ -131,10 +131,33 @@ public final class TradierClient implements BrokerClient {
         JsonNode root = objectMapper.readTree(json);
         JsonNode balances = root.path("balances");
 
+        logger.debug("Tradier balances: {}", balances);
+
+        // Resolve buying power: cash accounts use balances.cash.cash_available,
+        // margin accounts use balances.margin.stock_buying_power.
+        // Fall back to total_equity so the bot is never blocked by a zero BP.
+        double cashAvailable  = balances.path("cash").path("cash_available").asDouble(-1);
+        double marginBP       = balances.path("margin").path("stock_buying_power").asDouble(-1);
+        double totalCash      = balances.path("total_cash").asDouble(-1);
+        double equity         = balances.path("total_equity").asDouble(0);
+
+        double buyingPower;
+        if (cashAvailable >= 0)  buyingPower = cashAvailable;
+        else if (marginBP >= 0)  buyingPower = marginBP;
+        else if (totalCash >= 0) buyingPower = totalCash;
+        else                     buyingPower = equity;   // last resort
+
+        double cash = totalCash >= 0 ? totalCash : buyingPower;
+
+        logger.info("Tradier account: equity=${}, buyingPower=${}, cash=${}",
+            String.format("%.2f", equity),
+            String.format("%.2f", buyingPower),
+            String.format("%.2f", cash));
+
         ObjectNode result = objectMapper.createObjectNode();
-        result.put("equity",            balances.path("total_equity").asDouble(0));
-        result.put("buying_power",      balances.path("cash").path("cash_available").asDouble(
-                                         balances.path("buying_power").asDouble(0)));
+        result.put("equity",            equity);
+        result.put("buying_power",      buyingPower);
+        result.put("cash",              cash);
         result.put("status",            "ACTIVE");
         result.put("trading_blocked",   false);
         result.put("account_blocked",   false);

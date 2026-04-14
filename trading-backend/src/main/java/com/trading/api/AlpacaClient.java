@@ -493,15 +493,17 @@ public final class AlpacaClient implements BrokerClient {
     public List<Bar> getBars(String symbol, String timeframe, int limit) throws Exception {
         logger.debug("Fetching {} {} bars for {}", limit, timeframe, symbol);
         
-        // Calculate start time based on timeframe
+        // Calculate start time based on timeframe.
+        // Calendar days needed = (limit * bar_minutes / 390 trading_min_per_day) * 2 safety buffer + 3 for weekends.
+        // This ensures we always get enough bars even after a weekend or holiday.
         var now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
         var start = switch (timeframe) {
-            case "1Min" -> now.minusMinutes(limit * 2L);
-            case "5Min" -> now.minusMinutes(limit * 10L);
-            case "15Min" -> now.minusMinutes(limit * 30L);
-            case "1Hour" -> now.minusHours(limit * 2L);
-            case "1Day" -> now.minusDays(limit * 2L);
-            default -> now.minusHours(limit);
+            case "1Min"  -> now.minusDays((long)(limit /  390.0 * 2) + 3);
+            case "5Min"  -> now.minusDays((long)(limit /   78.0 * 2) + 3);
+            case "15Min" -> now.minusDays((long)(limit /   26.0 * 2) + 3);
+            case "1Hour" -> now.minusDays((long)(limit /    6.5 * 2) + 3);
+            case "1Day"  -> now.minusDays(limit * 2L);
+            default      -> now.minusDays(limit / 6L + 3);
         };
         
         var startStr = start.format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME);

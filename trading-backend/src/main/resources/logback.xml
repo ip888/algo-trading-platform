@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Silence verbose third-party libraries -->
+  <logger name="org.eclipse.jetty"             level="WARN"/>
+  <logger name="io.javalin"                    level="WARN"/>
+  <logger name="io.github.resilience4j"        level="WARN"/>
+  <logger name="org.sqlite"                    level="WARN"/>
+  <logger name="com.zaxxer.hikari"             level="WARN"/>
+  <logger name="org.flywaydb"                  level="WARN"/>
+
+  <!-- Trading application: INFO in prod, DEBUG available via env override -->
+  <logger name="com.trading"                   level="INFO"/>
+
+  <root level="WARN">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+
+</configuration>

@@ -328,8 +328,22 @@ public final class TradierClient implements BrokerClient {
         else if (interval.equals("15min")) interval = "15min";
         else interval = "5min"; // default
 
+        // Calculate lookback: 390 trading min/day; 2x buffer for weekends/holidays
+        double barsPerDay = switch (interval) {
+            case "1min"  -> 390.0;
+            case "5min"  ->  78.0;
+            case "15min" ->  26.0;
+            default      ->  78.0;
+        };
+        long calendarDays = (long)(limit / barsPerDay * 2) + 3;
+        java.time.LocalDate end   = java.time.LocalDate.now();
+        java.time.LocalDate start = end.minusDays(calendarDays);
+
         String url = baseUrl + "/markets/timesales?symbol=" + enc(symbol)
-            + "&interval=" + interval;
+            + "&interval=" + interval
+            + "&start=" + start.format(java.time.format.DateTimeFormatter.ISO_DATE)
+            + "&end="   + end.format(java.time.format.DateTimeFormatter.ISO_DATE)
+            + "&session_filter=open";
         String json = sendGet(url);
         JsonNode root = objectMapper.readTree(json);
         JsonNode series = root.path("series").path("data");
@@ -339,7 +353,8 @@ public final class TradierClient implements BrokerClient {
                 double close = d.path("close").asDouble();
                 if (close > 0) {
                     bars.add(new Bar(
-                        Instant.parse(d.path("time").asText().replace(" ", "T") + "Z"),
+                        java.time.LocalDateTime.parse(d.path("time").asText().replace(" ", "T"))
+                            .atZone(java.time.ZoneId.of("America/New_York")).toInstant(),
                         d.path("open").asDouble(close),
                         d.path("high").asDouble(close),
                         d.path("low").asDouble(close),

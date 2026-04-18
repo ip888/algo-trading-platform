@@ -1,6 +1,6 @@
 package com.trading.filters;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,9 +10,9 @@ import org.slf4j.LoggerFactory;
 public final class VolatilityFilter {
     private static final Logger logger = LoggerFactory.getLogger(VolatilityFilter.class);
     private static final double VIX_THRESHOLD = 30.0;  // VIX > 30 = extreme fear
-    private final AlpacaClient client;
+    private final BrokerClient client;
 
-    public VolatilityFilter(AlpacaClient client) {
+    public VolatilityFilter(BrokerClient client) {
         this.client = client;
     }
 

@@ -1,7 +1,7 @@
 package com.trading.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SentimentAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger(SentimentAnalyzer.class);
     
-    private final AlpacaClient client;
+    private final BrokerClient client;
     private final AlphaVantageClient alphaVantageClient;
     private final FinGPTClient finGPTClient;
     private final Map<String, CachedSentiment> sentimentCache;
@@ -33,7 +33,7 @@ public class SentimentAnalyzer {
         "decline", "loss", "underperform", "sell", "negative", "fall", "drop"
     );
     
-    public SentimentAnalyzer(AlpacaClient client, AlphaVantageClient alphaVantageClient, 
+    public SentimentAnalyzer(BrokerClient client, AlphaVantageClient alphaVantageClient, 
                             FinGPTClient finGPTClient) {
         this.client = client;
         this.alphaVantageClient = alphaVantageClient;

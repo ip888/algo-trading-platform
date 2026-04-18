@@ -64,10 +64,10 @@ public final class DashboardController {
         this.config = config;
         this.tradeAnalytics = tradeAnalytics;
         this.alpacaClient = alpacaClient;
-        this.cachedAlpacaClient = cachedAlpacaClient;
+        this.cachedAlpacaClient = new com.trading.api.AlpacaClient(config);
         String brokersAlloc = config.getBrokersAllocation();
         this.cachedTradierClient = (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier"))
-            ? cachedTradierClient : null;
+            ? new com.trading.api.TradierClient(config) : null;
     }
     
     /**

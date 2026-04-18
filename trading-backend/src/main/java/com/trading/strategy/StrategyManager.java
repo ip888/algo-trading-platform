@@ -3,7 +3,7 @@ package com.trading.strategy;
 import com.trading.analysis.MarketRegimeDetector.MarketRegime;
 import com.trading.analysis.MultiTimeframeAnalyzer;
 import com.trading.analysis.MultiTimeframeAnalyzer.MultiTimeframeAnalysis;
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import com.trading.api.model.Bar;
 import com.trading.config.Config;
 import org.slf4j.Logger;
@@ -23,7 +23,7 @@ public final class StrategyManager {
     // Use config to tune without redeploying.
     private final java.util.Set<String> momentumAssets;
     
-    private final AlpacaClient client;
+    private final BrokerClient client;
     private final Config config;
     private final RSIStrategy rsiStrategy;
     private final MACDStrategy macdStrategy;
@@ -33,15 +33,15 @@ public final class StrategyManager {
     private MarketRegime currentRegime = MarketRegime.RANGE_BOUND;
     private String activeStrategy = "None";
 
-    public StrategyManager(AlpacaClient client) {
+    public StrategyManager(BrokerClient client) {
         this(client, null, null);
     }
     
-    public StrategyManager(AlpacaClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer) {
+    public StrategyManager(BrokerClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer) {
         this(client, multiTimeframeAnalyzer, null);
     }
     
-    public StrategyManager(AlpacaClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer, Config config) {
+    public StrategyManager(BrokerClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer, Config config) {
         this.client = client;
         this.config = config;
         this.rsiStrategy = new RSIStrategy();

@@ -1,6 +1,6 @@
 package com.trading.analysis;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -13,11 +13,11 @@ import java.util.stream.Collectors;
 public final class MarketAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger(MarketAnalyzer.class);
     
-    private final AlpacaClient client;
+    private final BrokerClient client;
     private final com.trading.config.Config config;
     private volatile MarketAnalysis lastAnalysis;
     
-    public MarketAnalyzer(AlpacaClient client) {
+    public MarketAnalyzer(BrokerClient client) {
         this.client = client;
         this.config = new com.trading.config.Config();
         this.lastAnalysis = new MarketAnalysis(

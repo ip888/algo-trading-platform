@@ -1,6 +1,6 @@
 package com.trading.analysis;
 
-import com.trading.api.AlpacaClient;
+import com.trading.api.BrokerClient;
 import com.trading.api.model.Bar;
 import com.trading.config.Config;
 import org.slf4j.Logger;
@@ -22,15 +22,15 @@ import java.util.stream.Collectors;
 public class MultiTimeframeAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger(MultiTimeframeAnalyzer.class);
     
-    private final AlpacaClient client;
+    private final BrokerClient client;
     private final Config config;
     private com.trading.autonomous.AdaptiveParameterManager adaptiveManager;
-    
+
     // Cache for timeframe data
     private final Map<String, TimeframeCache> cache = new HashMap<>();
     private static final Duration CACHE_EXPIRY = Duration.ofMinutes(1);
-    
-    public MultiTimeframeAnalyzer(AlpacaClient client, Config config) {
+
+    public MultiTimeframeAnalyzer(BrokerClient client, Config config) {
         this.client = client;
         this.config = config;
         

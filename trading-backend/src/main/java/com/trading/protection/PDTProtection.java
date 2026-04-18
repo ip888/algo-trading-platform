@@ -19,13 +19,15 @@ public final class PDTProtection {
 
     private final TradeDatabase database;
     private final boolean enabled;
-    private volatile int alpacaDayTradeCount = 0;
+    private final String brokerName;
+    private volatile int dayTradeCount = 0;
     private volatile boolean synced = false;
 
-    public PDTProtection(TradeDatabase database, boolean enabled) {
+    public PDTProtection(TradeDatabase database, boolean enabled, String brokerName) {
         this.database = database;
         this.enabled = enabled;
-        logger.info("PDT Protection initialized - Enabled: {} (using Alpaca as source of truth)", enabled);
+        this.brokerName = brokerName;
+        logger.info("PDT Protection initialized for {} - Enabled: {}", brokerName, enabled);
     }
 
     /**
@@ -53,56 +55,67 @@ public final class PDTProtection {
             return true; // Buy orders are always allowed
         }
 
-        // If not yet synced with Alpaca, block day trades to be safe
+        // If not yet synced, block day trades to be safe
         if (!synced) {
-            logger.warn("PDT count not yet synced with Alpaca — blocking sell to be safe");
+            logger.warn("PDT [{}] count not yet synced — blocking sell to be safe", brokerName);
             return false;
         }
 
-        int dayTradeCount = getDayTradeCount();
+        int count = getDayTradeCount();
 
-        if (dayTradeCount >= MAX_DAY_TRADES) {
-            logger.warn("PDT PROTECTION: Blocking trade — {}/{} day trades used (Alpaca count)",
-                dayTradeCount, MAX_DAY_TRADES);
+        if (count >= MAX_DAY_TRADES) {
+            logger.warn("PDT [{}] PROTECTION: Blocking trade — {}/{} day trades used",
+                brokerName, count, MAX_DAY_TRADES);
             return false;
         }
 
-        if (dayTradeCount == MAX_DAY_TRADES - 1) {
-            logger.warn("PDT WARNING: This would be day trade {}/{} — last one available!",
-                dayTradeCount + 1, MAX_DAY_TRADES);
+        if (count == MAX_DAY_TRADES - 1) {
+            logger.warn("PDT [{}] WARNING: This would be day trade {}/{} — last one available!",
+                brokerName, count + 1, MAX_DAY_TRADES);
         }
 
-        logger.info("Day trade allowed - Count: {}/{} (Alpaca source)", dayTradeCount + 1, MAX_DAY_TRADES);
+        logger.info("PDT [{}] day trade allowed — {}/{}", brokerName, count + 1, MAX_DAY_TRADES);
         return true;
     }
 
     /**
-     * Sync day trade count from Alpaca's /v2/account endpoint.
-     * This is the sole source of truth for PDT decisions.
+     * Sync day trade count from broker's account API (Alpaca: daytrade_count field).
+     * For non-Alpaca brokers that don't report this, use initializeLocal(0) instead.
      */
-    public void syncWithAlpaca(int alpacaCount) {
+    public void syncWithAlpaca(int count) {
         if (!synced) {
-            logger.info("PDT synced with Alpaca: daytrade_count={}", alpacaCount);
-        } else if (alpacaCount != this.alpacaDayTradeCount) {
-            logger.info("PDT count updated from Alpaca: {} → {}", this.alpacaDayTradeCount, alpacaCount);
+            logger.info("PDT [{}] synced from broker API: daytrade_count={}", brokerName, count);
+        } else if (count != this.dayTradeCount) {
+            logger.info("PDT [{}] count updated from broker: {} → {}", brokerName, this.dayTradeCount, count);
         }
-        this.alpacaDayTradeCount = alpacaCount;
+        this.dayTradeCount = count;
         this.synced = true;
     }
 
     /**
-     * Get the count of day trades in the last 5 business days.
-     * Uses Alpaca's server count as the sole source of truth.
+     * Initialize PDT counter for brokers that don't report daytrade_count via API.
+     * Marks counter as synced so sell orders aren't blocked on startup.
      */
-    public int getDayTradeCount() {
-        return alpacaDayTradeCount;
+    public void initializeLocal(int startCount) {
+        this.dayTradeCount = startCount;
+        this.synced = true;
+        logger.info("PDT [{}] initialized with local tracking: count={}", brokerName, startCount);
     }
 
     /**
-     * Record a day trade for tracking purposes (local logging only).
+     * Get the count of day trades used today.
+     */
+    public int getDayTradeCount() {
+        return dayTradeCount;
+    }
+
+    /**
+     * Record a locally-tracked day trade (for brokers without broker-side daytrade_count).
+     * Alpaca's counter is authoritative and refreshed each cycle via syncWithAlpaca().
      */
     public void recordDayTrade(String symbol) {
-        logger.info("Day trade recorded for {} (Alpaca count: {})", symbol, alpacaDayTradeCount);
+        dayTradeCount++;
+        logger.info("PDT [{}] day trade recorded for {} — now {}/{}", brokerName, symbol, dayTradeCount, MAX_DAY_TRADES);
     }
 
     /**
@@ -118,7 +131,7 @@ public final class PDTProtection {
         }
 
         if (!synced) {
-            return "PDT Protection: Waiting for Alpaca sync...";
+            return "PDT Protection [" + brokerName + "]: Waiting for sync...";
         }
 
         int count = getDayTradeCount();

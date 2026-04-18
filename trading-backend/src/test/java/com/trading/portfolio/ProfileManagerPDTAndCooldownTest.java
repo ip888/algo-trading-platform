@@ -53,9 +53,9 @@ class ProfileManagerPDTAndCooldownTest {
     /** Create a real PDTProtection (final class — not mockable) with a controlled day trade count. */
     private static PDTProtection createPDTProtection(int dayTradeCount) throws Exception {
         // PDTProtection(database, enabled) — pass null DB since we won't record trades here
-        var pdt = new PDTProtection(null, true);
-        // Set alpacaDayTradeCount via reflection
-        Field countField = PDTProtection.class.getDeclaredField("alpacaDayTradeCount");
+        var pdt = new PDTProtection(null, true, "alpaca");
+        // Set dayTradeCount via reflection
+        Field countField = PDTProtection.class.getDeclaredField("dayTradeCount");
         countField.setAccessible(true);
         countField.set(pdt, dayTradeCount);
         // Mark as synced so the "not synced" guard doesn't fire

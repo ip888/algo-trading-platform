@@ -73,18 +73,12 @@ public final class MultiBrokerOrchestrator {
             System.exit(1);
         }
 
-        // Alpaca is always the market-data source for signal generation
+        // Alpaca client kept for dashboard health checks only
         AlpacaClient alpacaDataClient = new AlpacaClient(config);
 
-        // Shared signal/data components — all read-only, safe to share across broker threads
-        var multiTimeframeAnalyzer = config.isMultiTimeframeEnabled()
-            ? new com.trading.analysis.MultiTimeframeAnalyzer(alpacaDataClient, config) : null;
-        var strategyManager    = new StrategyManager(alpacaDataClient, multiTimeframeAnalyzer, config);
-        var marketAnalyzer     = new MarketAnalyzer(alpacaDataClient);
+        // Shared stateless components — no market data dependency
         var marketHoursFilter  = new MarketHoursFilter(config);
-        var volatilityFilter   = new VolatilityFilter(alpacaDataClient);
         var database           = new TradeDatabase();
-        var pdtProtection      = new PDTProtection(database, config.isPDTProtectionEnabled());
         var errorDetector      = new ErrorDetector();
         var configSelfHealer   = new ConfigSelfHealer(config, errorDetector);
         var alphaVantageClient = new com.trading.ai.AlphaVantageClient(
@@ -94,7 +88,6 @@ public final class MultiBrokerOrchestrator {
         var finGPTClient       = new com.trading.ai.FinGPTClient(
             config.getHuggingFaceApiToken(), config.getFinGPTSentimentModel(),
             config.isFinGPTEnabled(), config.getFinGPTCacheTTL());
-        var sentimentAnalyzer  = new SentimentAnalyzer(alpacaDataClient, alphaVantageClient, finGPTClient);
         var signalPredictor    = new SignalPredictor(config);
         var anomalyDetector    = new AnomalyDetector();
         var riskPredictor      = new RiskPredictor();
@@ -135,6 +128,23 @@ public final class MultiBrokerOrchestrator {
                 continue;
             }
 
+            // Per-broker PDT counter — each broker tracks its own day trades independently.
+            // Alpaca: counter synced from broker API each cycle (daytrade_count field).
+            // Others (e.g. Tradier): initialized at 0 and incremented locally on each day trade.
+            var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled(), brokerName);
+            if (!"alpaca".equalsIgnoreCase(brokerName)) {
+                pdtProtection.initializeLocal(0);
+            }
+
+            // Per-broker data components — each broker uses its own market data feed
+            logger.info("MultiBrokerOrchestrator: [{}] using own data feed for signal generation", brokerName.toUpperCase());
+            var brokerMtf        = config.isMultiTimeframeEnabled()
+                ? new com.trading.analysis.MultiTimeframeAnalyzer(rawClient, config) : null;
+            var brokerStrategy   = new StrategyManager(rawClient, brokerMtf, config);
+            var brokerAnalyzer   = new MarketAnalyzer(rawClient);
+            var brokerVolFilter  = new VolatilityFilter(rawClient);
+            var brokerSentiment  = new SentimentAnalyzer(rawClient, alphaVantageClient, finGPTClient);
+
             var resilient = new ResilientBrokerClient(rawClient,
                 MetricsService.getInstance().getRegistry());
 
@@ -151,10 +161,10 @@ public final class MultiBrokerOrchestrator {
             );
 
             var manager = new ProfileManager(
-                profile, capital, resilient, strategyManager,
-                marketHoursFilter, volatilityFilter, marketAnalyzer,
+                profile, capital, resilient, brokerStrategy,
+                marketHoursFilter, brokerVolFilter, brokerAnalyzer,
                 database, pdtProtection, config, testSimulator,
-                sentimentAnalyzer, signalPredictor, anomalyDetector, riskPredictor,
+                brokerSentiment, signalPredictor, anomalyDetector, riskPredictor,
                 errorDetector, configSelfHealer, brokerName
             );
             entries.add(new BrokerEntry(brokerName, manager, rawClient));
@@ -172,12 +182,14 @@ public final class MultiBrokerOrchestrator {
             System.exit(1);
         }
 
-        // Dashboard — uses Alpaca as the health-check broker; shows first profile's portfolio
-        var alpacaResilient = new ResilientBrokerClient(alpacaDataClient,
+        // Dashboard — uses Alpaca for health checks and market data display
+        var alpacaResilient   = new ResilientBrokerClient(alpacaDataClient,
             MetricsService.getInstance().getRegistry());
+        var dashboardAnalyzer = new MarketAnalyzer(alpacaDataClient);
+        var dashboardVolFilter = new VolatilityFilter(alpacaDataClient);
         var dashboard = new DashboardServer(database,
             entries.get(0).manager().getPortfolio(),
-            marketAnalyzer, marketHoursFilter, volatilityFilter, config, alpacaResilient);
+            dashboardAnalyzer, marketHoursFilter, dashboardVolFilter, config, alpacaResilient);
         dashboard.start();
         logger.info("Dashboard available at: http://localhost:8080");
 

@@ -247,6 +247,121 @@ public class TradeDatabase {
     }
 
     /**
+     * Count OPEN trades for a symbol/broker combination.
+     * Used to enforce the per-symbol entry cap.
+     */
+    public int countOpenTrades(String symbol, String broker) {
+        String sql = "SELECT COUNT(*) as cnt FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN'";
+        long stamp = lock.tryOptimisticRead();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            stmt.setString(2, broker);
+            try (var rs = stmt.executeQuery()) {
+                int count = rs.next() ? rs.getInt("cnt") : 0;
+                if (lock.validate(stamp)) return count;
+            }
+        } catch (SQLException e) {
+            logger.debug("countOpenTrades failed for {}: {}", symbol, e.getMessage());
+        }
+        stamp = lock.readLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            stmt.setString(2, broker);
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() ? rs.getInt("cnt") : 0;
+            }
+        } catch (SQLException e) {
+            logger.error("countOpenTrades fallback failed: {}", e.getMessage());
+            return 0;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    /** A minimal record for restoring in-memory portfolio from the database on restart. */
+    public record OpenTradeRecord(String symbol, double entryPrice, double quantity,
+                                   double stopLoss, double takeProfit, java.time.Instant entryTime) {}
+
+    /**
+     * Return all OPEN trades for a broker so the in-memory portfolio can be restored on startup.
+     * Deduplicated: if the same symbol has multiple OPEN records (shouldn't happen after fixes),
+     * only the most recent entry is returned.
+     */
+    public java.util.List<OpenTradeRecord> getOpenTradeRecords(String broker) {
+        String sql = """
+            SELECT symbol,
+                   SUM(quantity)    AS total_qty,
+                   AVG(entry_price) AS avg_entry,
+                   MIN(stop_loss)   AS min_sl,
+                   MAX(take_profit) AS max_tp,
+                   MAX(entry_time)  AS last_entry
+            FROM trades
+            WHERE broker = ? AND status = 'OPEN'
+            GROUP BY symbol
+            """;
+        var result = new java.util.ArrayList<OpenTradeRecord>();
+        long stamp = lock.readLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, broker);
+            try (var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    var entryStr = rs.getString("last_entry");
+                    java.time.Instant entryTime = entryStr != null
+                        ? java.time.Instant.parse(entryStr.replace(" ", "T") + (entryStr.contains("Z") ? "" : "Z"))
+                        : java.time.Instant.now();
+                    result.add(new OpenTradeRecord(
+                        rs.getString("symbol"),
+                        rs.getDouble("avg_entry"),
+                        rs.getDouble("total_qty"),
+                        rs.getDouble("min_sl"),
+                        rs.getDouble("max_tp"),
+                        entryTime
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            logger.error("getOpenTradeRecords failed for broker {}: {}", broker, e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return result;
+    }
+
+    /**
+     * Returns the N most recent CLOSED trades (ordered by exit_time DESC).
+     * Used by the bot behavior win-rate calculation — avoids including OPEN trades
+     * that swamp the top-10 list and make win-rate appear 0%.
+     */
+    public java.util.List<java.util.Map<String, Object>> getRecentClosedTrades(int limit) {
+        String sql = "SELECT symbol, strategy, profile, broker, entry_time, entry_price, quantity, " +
+                     "exit_time, exit_price, pnl, stop_loss, take_profit, status " +
+                     "FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC LIMIT ?";
+        var trades = new java.util.ArrayList<java.util.Map<String, Object>>();
+        long stamp = lock.readLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, limit);
+            try (var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    var trade = new java.util.HashMap<String, Object>();
+                    trade.put("symbol",     rs.getString("symbol"));
+                    trade.put("broker",     rs.getString("broker"));
+                    trade.put("entryPrice", rs.getDouble("entry_price"));
+                    trade.put("exitPrice",  rs.getDouble("exit_price"));
+                    trade.put("status",     rs.getString("status"));
+                    double pnlVal = rs.getDouble("pnl");
+                    if (!rs.wasNull()) trade.put("pnl", pnlVal);
+                    trades.add(trade);
+                }
+            }
+        } catch (SQLException e) {
+            logger.error("getRecentClosedTrades failed: {}", e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return trades;
+    }
+
+    /**
      * Close a trade with write lock.
      */
     public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl, String broker) {

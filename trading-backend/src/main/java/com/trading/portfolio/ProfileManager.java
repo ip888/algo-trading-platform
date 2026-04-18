@@ -148,6 +148,15 @@ public class ProfileManager implements Runnable {
     private volatile MarketRegime latestRegime = MarketRegime.RANGE_BOUND;
     private volatile double latestEquity = 0.0;
 
+    // Per-broker: track when we first detected a pending ENTRY order per symbol.
+    // Used to cancel stale orders (e.g. sandbox orders that never fill).
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingEntryTimestamps
+        = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long STALE_ENTRY_ORDER_MS = 30 * 60 * 1000L; // 30 minutes
+    // Hard cap: at most 2 open DB entries per symbol per broker (original + 1 add-to-position).
+    // Prevents runaway pyramid buying across restarts or repeated signals.
+    private static final int MAX_OPEN_ENTRIES_PER_SYMBOL = 2;
+
     // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
     private volatile long pdtBlockedUntil = 0;
 
@@ -365,8 +374,10 @@ public class ProfileManager implements Runnable {
         var accountEquity = account.get("equity").asDouble();
         var buyingPower = account.get("buying_power").asDouble();
 
-        // Sync PDT day trade count from Alpaca server to prevent local DB divergence
-        if (account.has("daytrade_count")) {
+        // Sync PDT day trade count from Alpaca server to prevent local DB divergence.
+        // Only do this for Alpaca — other brokers don't report daytrade_count and must
+        // not overwrite Alpaca's authoritative count with their own (possibly 0) value.
+        if ("alpaca".equalsIgnoreCase(brokerName) && account.has("daytrade_count")) {
             pdtProtection.syncWithAlpaca(account.get("daytrade_count").asInt(0));
         }
         
@@ -758,15 +769,27 @@ public class ProfileManager implements Runnable {
             }
             
             // Allow buying if:
-            // 1. We don't have a position (qty == 0), OR
+            // 1. We don't have a position (qty == 0) AND no open DB record, OR
             // 2. We have a position but BUY signal is strong AND position is under tier max
             if (qty == 0) {
+                // DB gate: block entry if an open trade already exists in the DB for this symbol.
+                // This prevents duplicate entries after a restart when the in-memory portfolio
+                // is empty but broker positions aren't yet filled (e.g., Tradier sandbox pending orders).
+                if (database.hasOpenTrade(symbol, brokerName)) {
+                    logger.debug("{} {} skipping BUY — open DB record exists (pending/filled position)",
+                        profilePrefix, symbol);
+                    return;
+                }
                 handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
             } else if (isTarget && buyingPower > 1.0) {
                 // Guard: don't add to position if it already exceeds tier max
                 double currentPositionValue = qty * currentPrice;
                 double tierMaxValue = equity * com.trading.risk.CapitalTierManager.getParameters(equity).maxPositionPercent();
-                if (currentPositionValue >= tierMaxValue) {
+                int openEntries = database.countOpenTrades(symbol, brokerName);
+                if (openEntries >= MAX_OPEN_ENTRIES_PER_SYMBOL) {
+                    logger.info("{} Skipping add-to-position for {} — at hard cap ({}/{} open entries)",
+                        profilePrefix, symbol, openEntries, MAX_OPEN_ENTRIES_PER_SYMBOL);
+                } else if (currentPositionValue >= tierMaxValue) {
                     logger.info("{} Skipping add-to-position for {} — already at tier max (${} / ${})",
                         profilePrefix, symbol,
                         String.format("%.2f", currentPositionValue),
@@ -985,13 +1008,37 @@ public class ProfileManager implements Runnable {
         }
 
         // ========== PENDING ORDER CHECK ==========
-        // Prevent duplicate orders for the same symbol (fixes order spam issue)
+        // Prevent duplicate orders for the same symbol (fixes order spam issue).
+        // If a pending entry order has been sitting >30 min (e.g. sandbox never fills),
+        // cancel it so the bot can re-evaluate and place a fresh order.
         try {
             var pendingOrders = client.getOpenOrders(symbol);
             if (pendingOrders.isArray() && pendingOrders.size() > 0) {
-                logger.info("{} {} already has {} pending order(s), skipping new entry",
-                    profilePrefix, symbol, pendingOrders.size());
-                return;
+                long now = System.currentTimeMillis();
+                long firstSeen = pendingEntryTimestamps.computeIfAbsent(symbol, k -> now);
+                long ageMs = now - firstSeen;
+
+                if (ageMs >= STALE_ENTRY_ORDER_MS) {
+                    logger.warn("{} {} has {} stale pending entry order(s) ({}min old) — cancelling and re-evaluating",
+                        profilePrefix, symbol, pendingOrders.size(), ageMs / 60000);
+                    for (var order : pendingOrders) {
+                        String orderId = order.path("id").asText();
+                        if (!orderId.isBlank()) {
+                            try { client.cancelOrder(orderId); } catch (Exception ce) {
+                                logger.warn("{} Failed to cancel stale entry order {} for {}: {}",
+                                    profilePrefix, orderId, symbol, ce.getMessage());
+                            }
+                        }
+                    }
+                    pendingEntryTimestamps.remove(symbol);
+                    // Fall through to re-evaluate entry this cycle
+                } else {
+                    logger.info("{} {} already has {} pending order(s) ({}min old), skipping new entry",
+                        profilePrefix, symbol, pendingOrders.size(), ageMs / 60000);
+                    return;
+                }
+            } else {
+                pendingEntryTimestamps.remove(symbol); // order filled/expired — clear tracking
             }
         } catch (Exception e) {
             logger.debug("{} Could not check pending orders for {}: {}", profilePrefix, symbol, e.getMessage());
@@ -1268,15 +1315,17 @@ public class ProfileManager implements Runnable {
             // Calculate order value
             double orderValue = positionSize * currentPrice;
             
-            // Check minimum order amount ($1.00)
-            if (orderValue < 1.00) {
-                logger.warn("{} {}: ⚠️ Order value ${} is below minimum $1.00 - SKIPPING", 
+            // Check minimum order amount ($10.00).
+            // Below $10 the position is too small to meaningfully capture P&L and
+            // creates noise (e.g. $6 GLD fractional shares on a $1K Alpaca account).
+            if (orderValue < 10.00) {
+                logger.warn("{} {}: ⚠️ Order value ${} is below minimum $10.00 - SKIPPING",
                     profilePrefix, symbol, String.format("%.2f", orderValue));
-                
+
                 // Broadcast to UI with capital increase recommendation
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ⚠️ SKIPPED: %s order ($%.2f < $1.00 minimum) - " +
-                        "💡 Recommendation: Increase capital for better position sizing", 
+                    String.format("[%s] ⚠️ SKIPPED: %s order ($%.2f < $10.00 minimum) - " +
+                        "💡 Recommendation: Increase capital for better position sizing",
                         profile.name(), symbol, orderValue),
                     "WARN"
                 );
@@ -1441,6 +1490,17 @@ public class ProfileManager implements Runnable {
             lastExitPrices.remove(symbol);
             consecutiveStopLosses.remove(symbol);
             logger.debug("{} {} consecutive SL counter reset after profitable exit", profilePrefix, symbol);
+        }
+
+        // Track day trades locally for non-Alpaca brokers (Alpaca syncs from broker API each cycle).
+        // A day trade = position opened and closed on the same calendar day (ET timezone).
+        if (!"alpaca".equalsIgnoreCase(brokerName) && position.entryTime() != null) {
+            var NY = java.time.ZoneId.of("America/New_York");
+            boolean isToday = position.entryTime().atZone(NY).toLocalDate()
+                .equals(java.time.LocalDate.now(NY));
+            if (isToday) {
+                pdtProtection.recordDayTrade(symbol);
+            }
         }
 
         // Close trade in database
@@ -1871,6 +1931,31 @@ public class ProfileManager implements Runnable {
             if (clearedExits > 0) {
                 logger.info("{} Cleared {} pending exit order(s) after fill confirmation",
                     profilePrefix, clearedExits);
+            }
+
+            // Restore in-memory portfolio from open DB records.
+            // Critical for brokers where getPositions() returns only FILLED positions:
+            // Tradier sandbox never fills limit orders, so getPositions() is empty even
+            // though we hold pending orders. Without this, the bot sees qty=0 and re-buys.
+            var openDbTrades = database.getOpenTradeRecords(brokerName);
+            int restored = 0;
+            for (var trade : openDbTrades) {
+                if (portfolio.getPosition(trade.symbol()).isEmpty()) {
+                    var position = new com.trading.risk.TradePosition(
+                        trade.symbol(), trade.entryPrice(), trade.quantity(),
+                        trade.stopLoss(), trade.takeProfit(), trade.entryTime(),
+                        trade.entryPrice(), 0
+                    );
+                    portfolio.setPosition(trade.symbol(), java.util.Optional.of(position));
+                    restored++;
+                    logger.info("{} Memory restore: {} loaded from DB (qty={}, entry=${})",
+                        profilePrefix, trade.symbol(),
+                        String.format("%.4f", trade.quantity()),
+                        String.format("%.2f", trade.entryPrice()));
+                }
+            }
+            if (restored > 0) {
+                logger.info("{} Restored {} position(s) from DB into in-memory portfolio", profilePrefix, restored);
             }
         } catch (Exception e) {
             logger.debug("{} Reconciliation check failed: {}", profilePrefix, e.getMessage());

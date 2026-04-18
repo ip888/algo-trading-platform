@@ -93,7 +93,7 @@ public final class TradingBot {
         var marketHoursFilter = new MarketHoursFilter(config);
         var volatilityFilter = new VolatilityFilter(client);
         var database = new TradeDatabase();
-        var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled());
+        var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled(), "alpaca");
         
         // Initialize test mode simulator if enabled
         TestModeSimulator testSimulator = null;
@@ -334,7 +334,7 @@ public final class TradingBot {
             marketHoursFilter, volatilityFilter, config, resilientClient);
         
         // Initialize PDT protection
-        var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled());
+        var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled(), "alpaca");
         
         // Initialize test mode simulator if enabled
         TestModeSimulator testSimulator = null;

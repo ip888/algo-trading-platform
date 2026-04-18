@@ -30,7 +30,7 @@ class PDTProtectionTest {
         
         // Create fresh database for each test
         database = new TradeDatabase(TEST_DB_PATH);
-        pdtProtection = new PDTProtection(database, true);
+        pdtProtection = new PDTProtection(database, true, "alpaca");
     }
     
     @AfterEach
@@ -42,7 +42,7 @@ class PDTProtectionTest {
     @Test
     @DisplayName("Should allow trading when PDT protection disabled")
     void testPDTDisabled() {
-        var pdtDisabled = new PDTProtection(database, false);
+        var pdtDisabled = new PDTProtection(database, false, "alpaca");
         
         boolean canTrade = pdtDisabled.canTrade("AAPL", true, ACCOUNT_EQUITY_BELOW_25K);
         

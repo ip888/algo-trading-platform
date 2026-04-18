@@ -40,6 +40,10 @@ public final class DashboardController {
     private final Config config;
     private final TradeAnalytics tradeAnalytics;
     private final ResilientBrokerClient alpacaClient;
+    // Cached per-request-free broker clients — created once, reused for every dashboard call.
+    // Avoids the "TradierClient initialized" log spam every 2 minutes from health-check threads.
+    private final com.trading.api.AlpacaClient cachedAlpacaClient;
+    private final com.trading.api.TradierClient cachedTradierClient; // null if Tradier not configured
 
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
@@ -60,6 +64,10 @@ public final class DashboardController {
         this.config = config;
         this.tradeAnalytics = tradeAnalytics;
         this.alpacaClient = alpacaClient;
+        this.cachedAlpacaClient = cachedAlpacaClient;
+        String brokersAlloc = config.getBrokersAllocation();
+        this.cachedTradierClient = (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier"))
+            ? cachedTradierClient : null;
     }
     
     /**
@@ -158,7 +166,7 @@ public final class DashboardController {
         logger.info("🔧 Manual close requested for {}", symbol);
         
         try {
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var positions = client.getPositions();
             
             // Find the position
@@ -226,7 +234,7 @@ public final class DashboardController {
         var targets = new java.util.ArrayList<Map<String, Object>>();
         
         try {
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var positions = client.getPositions();
             double takeProfitPercent = config.getMainTakeProfitPercent();
             
@@ -459,7 +467,7 @@ public final class DashboardController {
     private void getPositions(Context ctx) {
         try {
             // Query Alpaca directly for positions
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var alpacaPositions = client.getPositions();
             
             // Convert to list of maps to inject custom fields
@@ -511,8 +519,7 @@ public final class DashboardController {
             String brokersAlloc = config.getBrokersAllocation();
             if (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier")) {
                 try {
-                    var tradierClient = new com.trading.api.TradierClient(config);
-                    var tradierPositions = tradierClient.getPositions();
+                    var tradierPositions = cachedTradierClient.getPositions();
                     for (var pos : tradierPositions) {
                         Map<String, Object> positionMap = new java.util.HashMap<>();
                         positionMap.put("symbol", pos.symbol());
@@ -676,8 +683,11 @@ public final class DashboardController {
             
             // Basic status
             status.put("marketStatus", marketHoursFilter.isMarketOpen() ? "OPEN" : "CLOSED");
-            status.put("regime", "WEAK_BULL"); // TODO: Get from regime detector
-            status.put("vix", volatilityFilter.getCurrentVIX());
+            String regime = com.trading.portfolio.ProfileManager.getLatestRegimeSnapshot();
+            status.put("regime", regime.isEmpty() ? "UNKNOWN" : regime);
+            double vix = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            if (vix <= 0 && volatilityFilter != null) vix = volatilityFilter.getCurrentVIX();
+            status.put("vix", vix);
             status.put("tradingMode", config.getTradingMode());
             
             // Phase 2 metrics
@@ -702,7 +712,7 @@ public final class DashboardController {
      */
     private void getAccountData(Context ctx) {
         try {
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var account = client.getAccount();
             
             var accountData = new HashMap<String, Object>();
@@ -1085,7 +1095,7 @@ public final class DashboardController {
         String symbol = ctx.queryParam("symbol");
         int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
         try {
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var orders = client.getOrderHistory(symbol, limit);
             ctx.json(orders);
         } catch (Exception e) {
@@ -1100,7 +1110,7 @@ public final class DashboardController {
     private void getOrderFills(Context ctx) {
         int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
         try {
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var fills = client.getAccountActivities("FILL", limit);
             ctx.json(fills);
         } catch (Exception e) {
@@ -1145,16 +1155,14 @@ public final class DashboardController {
             int maxConsecSL = consecSL.values().stream().mapToInt(Integer::intValue).max().orElse(0);
 
             // --- Recent Trades (last 10 CLOSED only) ---
-            var recentTrades = database.getRecentTrades(10);
-            // Only count completed (closed) trades for win rate — OPEN trades have no P&L yet
-            var closedTrades = recentTrades.stream()
-                .filter(t -> t.get("pnl") instanceof Number)
-                .toList();
+            // Use getRecentClosedTrades so OPEN trades (which may be many) don't crowd out
+            // the list and make win-rate appear as 0% / "no completed trades yet".
+            var closedTrades = database.getRecentClosedTrades(10);
             long wins = closedTrades.stream()
-                .filter(t -> ((Number) t.get("pnl")).doubleValue() > 0)
+                .filter(t -> t.get("pnl") instanceof Number n && n.doubleValue() > 0)
                 .count();
             long losses = closedTrades.stream()
-                .filter(t -> ((Number) t.get("pnl")).doubleValue() < 0)
+                .filter(t -> t.get("pnl") instanceof Number n && n.doubleValue() < 0)
                 .count();
 
             // Detect churn: same symbol appearing 4+ times in recent closed trades
@@ -1168,7 +1176,7 @@ public final class DashboardController {
             response.put("recentTradesWins", wins);
             response.put("recentTradeLosses", losses);
             response.put("recentTradeSymbolCounts", symbolCounts);
-            response.put("openPositionsCount", recentTrades.size() - closedTrades.size());
+            response.put("openPositionsCount", portfolio.getActivePositionCount());
 
             // --- Health Checks (traffic-light signals) ---
             var checks = new ArrayList<Map<String, Object>>();
@@ -1357,8 +1365,7 @@ public final class DashboardController {
 
         // Always include Alpaca
         try {
-            var alpacaClient2 = new com.trading.api.AlpacaClient(config);
-            var account = alpacaClient2.getAccount();
+            var account = cachedAlpacaClient.getAccount();
             Map<String, Object> alpacaInfo = new java.util.HashMap<>();
             alpacaInfo.put("name", "alpaca");
             alpacaInfo.put("sandbox", false);
@@ -1378,8 +1385,7 @@ public final class DashboardController {
         // Include Tradier if configured
         if (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier")) {
             try {
-                var tradierClient = new com.trading.api.TradierClient(config);
-                var account = tradierClient.getAccount();
+                var account = cachedTradierClient.getAccount();
                 Map<String, Object> tradierInfo = new java.util.HashMap<>();
                 tradierInfo.put("name", "tradier");
                 tradierInfo.put("sandbox", config.isTradierSandbox());
@@ -1440,7 +1446,7 @@ public final class DashboardController {
 
         try {
             MarketRegime regime = MarketRegime.valueOf(regimeStr);
-            var client = new com.trading.api.AlpacaClient(config);
+            var client = cachedAlpacaClient;
             var strategyManager = new com.trading.strategy.StrategyManager(client, null, config);
             var engine = new BacktestEngine(strategyManager);
 

@@ -1,78 +1,88 @@
-import { useTradingStore } from '../store/tradingStore';
 import { Tooltip } from './Tooltip';
 import { useEffect, useState } from 'react';
 import { CONFIG } from '../config';
 
-export const MarketRegime = () => {
-  const { systemStatus } = useTradingStore();
-  const [marketFallback, setMarketFallback] = useState<any>(null);
+// Maps the backend's 6-regime enum to display properties
+const REGIME_MAP: Record<string, { label: string; color: string; strategy: string; note?: string }> = {
+  STRONG_BULL:    { label: 'STRONG BULL',    color: '#22c55e', strategy: 'MACD Trend + Momentum' },
+  WEAK_BULL:      { label: 'WEAK BULL',       color: '#86efac', strategy: 'RSI + Momentum' },
+  STRONG_BEAR:    { label: 'STRONG BEAR',     color: '#ef4444', strategy: 'Exits Only (no new longs)', note: '🐻 Bear block active' },
+  WEAK_BEAR:      { label: 'WEAK BEAR',       color: '#f97316', strategy: 'MACD Trend' },
+  RANGE_BOUND:    { label: 'RANGE BOUND',     color: '#a78bfa', strategy: 'Mean Reversion' },
+  HIGH_VOLATILITY:{ label: 'HIGH VOLATILITY', color: '#eab308', strategy: 'MACD Exits Only (no new entries)' },
+  UNKNOWN:        { label: 'UNKNOWN',          color: '#6b7280', strategy: 'Determining…' },
+};
 
-  // Fallback fetch
+export const MarketRegime = () => {
+  const [status, setStatus] = useState<{ regime: string; vix: number; marketStatus: string } | null>(null);
+
   useEffect(() => {
-    const fetchMarket = async () => {
+    const fetch_ = async () => {
       try {
-        const res = await fetch(`${CONFIG.API_BASE_URL}/api/market/status`);
-        if (res.ok) setMarketFallback(await res.json());
+        const res = await fetch(`${CONFIG.API_BASE_URL}/api/status`);
+        if (res.ok) setStatus(await res.json());
       } catch (e) {
-        console.error('Market status fetch failed', e);
+        console.error('Bot status fetch failed', e);
       }
     };
-    if (!systemStatus?.vix) fetchMarket();
-    const interval = setInterval(fetchMarket, 30000);
+    fetch_();
+    const interval = setInterval(fetch_, 30000);
     return () => clearInterval(interval);
-  }, [systemStatus]);
-  
-  if (!systemStatus && !marketFallback) return null;
-  
-  const vix = systemStatus?.vix || marketFallback?.currentVIX || 15.0;
-  const trend = systemStatus?.marketTrend || (marketFallback?.volatilityAcceptable ? 'FLAT' : 'VOLATILE');
-  
-  // Determine Regime State
-  let regimeState = 'NORMAL';
-  let regimeColor = 'var(--accent-green)';
-  let activeStrategy = 'RSI Range';
-  
-  if (vix > 30) {
-    regimeState = 'EXTREME';
-    regimeColor = 'var(--accent-red)';
-    activeStrategy = 'Mean Reversion';
-  } else if (trend === 'BEARISH') {
-    regimeState = 'DEFENSIVE';
-    regimeColor = 'var(--accent-orange)';
-    activeStrategy = 'Inverse ETFs';
-  } else if (vix > 20) {
-    regimeState = 'VOLATILE';
-    regimeColor = 'var(--accent-yellow)';
-    activeStrategy = 'MACD Trend';
-  }
-  
+  }, []);
+
+  if (!status) return null;
+
+  const regime = status.regime || 'UNKNOWN';
+  const vix = status.vix ?? 0;
+  const marketOpen = status.marketStatus === 'OPEN';
+  const info = REGIME_MAP[regime] ?? REGIME_MAP['UNKNOWN'];
+
   return (
     <div className="panel regime-panel">
       <h2>
         🌊 Market Regime
-        <Tooltip text="Current market conditions and active strategy." />
+        <Tooltip text="Detected market regime drives which strategy the bot uses for entries and exits." />
       </h2>
-      
+
       <div className="regime-gauge">
-        <div className="gauge-label" style={{ color: regimeColor }}>
-          {regimeState}
+        <div className="gauge-label" style={{ color: info.color }}>
+          {info.label}
         </div>
         <div className="gauge-sublabel">VIX: {vix.toFixed(1)}</div>
       </div>
-      
+
       <div className="strategy-info">
         <div className="strategy-label">Active Strategy</div>
-        <div className="strategy-value">{activeStrategy}</div>
+        <div className="strategy-value" style={{ color: info.color }}>{info.strategy}</div>
       </div>
-      
+
+      {info.note && (
+        <div style={{
+          marginTop: '8px',
+          padding: '5px 9px',
+          borderRadius: '6px',
+          background: info.color + '18',
+          border: `1px solid ${info.color}44`,
+          fontSize: '11px',
+          color: info.color,
+          fontWeight: 600,
+        }}>
+          {info.note}
+        </div>
+      )}
+
       <div className="regime-details">
         <div className="detail-row">
-          <span>Trend</span>
-          <span className={`trend-text ${trend.toLowerCase()}`}>{trend}</span>
+          <span>Market</span>
+          <span style={{ color: marketOpen ? '#22c55e' : '#6b7280' }}>
+            {marketOpen ? 'OPEN' : 'CLOSED'}
+          </span>
         </div>
         <div className="detail-row">
           <span>Risk Level</span>
-          <span>{vix > 20 ? 'REDUCED SIZE' : 'STANDARD'}</span>
+          <span style={{ color: vix > 25 ? '#ef4444' : vix > 18 ? '#eab308' : '#22c55e' }}>
+            {vix > 25 ? 'HIGH — REDUCED SIZE' : vix > 18 ? 'ELEVATED' : 'STANDARD'}
+          </span>
         </div>
       </div>
     </div>

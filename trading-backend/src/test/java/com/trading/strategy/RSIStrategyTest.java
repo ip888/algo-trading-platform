@@ -130,14 +130,29 @@ class RSIStrategyTest {
     class Signals {
 
         @Test
-        @DisplayName("evaluateWithHistory returns BUY when RSI < 30 and no position")
-        void buySignalOversold() {
-            // Need RSI < 30: use a sharply falling series with a stable end
-            var prices = new ArrayList<>(falling(40, 200.0, 3.0)); // steep drop
+        @DisplayName("evaluateWithHistory returns BUY when RSI < 30 AND RSI is rising (bounce confirmed)")
+        void buySignalOversoldBouncing() {
+            // Fall sharply to put RSI well below 30, then add one uptick so RSI is rising
+            var prices = new ArrayList<>(falling(40, 200.0, 3.0));
+            prices.add(prices.get(prices.size() - 1) + 5.0); // uptick — RSI starts rising
+            var strategy = new RSIStrategy();
+            var signal = strategy.evaluateWithHistory("TEST", prices.get(prices.size() - 1), 0.0, prices);
+            assertInstanceOf(TradingSignal.Buy.class, signal,
+                "Expected BUY for oversold+rising RSI (bounce confirmed), got: " + signal);
+        }
+
+        @Test
+        @DisplayName("evaluateWithHistory returns HOLD when RSI < 30 but still falling (knife-catch guard)")
+        void buyBlockedWhenRsiStillFalling() {
+            // Steadily falling prices → RSI below 30 and still declining
+            var prices = new ArrayList<>(falling(40, 200.0, 3.0));
             var strategy = new RSIStrategy();
             var signal = strategy.evaluateWithHistory("TEST", 80.0, 0.0, prices);
-            assertInstanceOf(TradingSignal.Buy.class, signal,
-                "Expected BUY for oversold RSI, got: " + signal);
+            assertInstanceOf(TradingSignal.Hold.class, signal,
+                "Should HOLD when RSI < 30 but still falling — knife-catch guard must fire");
+            var hold = (TradingSignal.Hold) signal;
+            assertTrue(hold.reason().contains("wait for bounce") || hold.reason().contains("falling"),
+                "Hold reason should mention waiting for bounce, got: " + hold.reason());
         }
 
         @Test
@@ -146,7 +161,6 @@ class RSIStrategyTest {
             var prices = new ArrayList<>(falling(40, 200.0, 3.0));
             var strategy = new RSIStrategy();
             var signal = strategy.evaluateWithHistory("TEST", 80.0, 5.0, prices);
-            // Should HOLD, not buy again when already in position
             assertInstanceOf(TradingSignal.Hold.class, signal,
                 "Should HOLD when RSI < 30 but position already open");
         }

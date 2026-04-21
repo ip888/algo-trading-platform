@@ -155,10 +155,46 @@ class StrategyManagerTest {
         }
 
         @Test
-        @DisplayName("STRONG_BEAR uses MACD")
-        void strongBearMacd() {
-            manager.evaluateWithHistory("SH", price, 0.0, history, MarketRegime.STRONG_BEAR);
-            assertEquals("MACD Trend", manager.getActiveStrategy());
+        @DisplayName("STRONG_BEAR with no position → HOLD (no new long entries in bear market)")
+        void strongBearBlocksNewEntries() {
+            var signal = manager.evaluateWithHistory("SPY", price, 0.0, history, MarketRegime.STRONG_BEAR);
+            assertInstanceOf(TradingSignal.Hold.class, signal,
+                "STRONG_BEAR with no position must block new long entries");
+            assertEquals("Bear Market Block", manager.getActiveStrategy());
+        }
+
+        @Test
+        @DisplayName("STRONG_BEAR with open position → MACD exit strategy")
+        void strongBearWithPositionUsesMACD() {
+            manager.evaluateWithHistory("SPY", price, 5.0, history, MarketRegime.STRONG_BEAR);
+            assertEquals("MACD Exit (Strong Bear)", manager.getActiveStrategy(),
+                "STRONG_BEAR with existing position should use MACD for exit");
+        }
+    }
+
+    @Nested
+    @DisplayName("50-bar SMA macro downtrend detection")
+    class SMA50Downtrend {
+
+        @Test
+        @DisplayName("returns true when price is below 50-bar SMA (macro downtrend)")
+        void below50SmaDetected() {
+            // 50 bars rising to build a high SMA50, then 10 sharp drops below it
+            List<Double> prices = new ArrayList<>(rising(50, 100.0, 0.5));
+            double peak = prices.get(prices.size() - 1);
+            for (int i = 0; i < 10; i++) prices.add(peak - i * 3.0);
+            double livePrice = prices.get(prices.size() - 1) - 2.0; // even lower than last bar
+            assertTrue(manager.isShortTermDowntrend(prices, livePrice),
+                "Price well below 50-SMA should trigger macro downtrend detection");
+        }
+
+        @Test
+        @DisplayName("returns false when price is above 50-bar SMA in steady uptrend")
+        void above50SmaNotDowntrend() {
+            var prices = rising(65, 100.0, 0.5);
+            double livePrice = prices.get(prices.size() - 1) + 0.5;
+            assertFalse(manager.isShortTermDowntrend(prices, livePrice),
+                "Price above 50-SMA in uptrend should not be flagged as downtrend");
         }
     }
 }

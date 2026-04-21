@@ -29,24 +29,43 @@ public final class RSIStrategy implements TradingStrategy {
         }
 
         double rsi = calculateRSI(history);
-        logger.debug("RSI Strategy: Price={}, RSI={}", currentPrice, String.format("%.2f", rsi));
+        // Calculate RSI on N-1 bars to detect direction
+        double rsiPrev = history.size() > PERIOD + 1
+            ? calculateRSI(history.subList(0, history.size() - 1))
+            : rsi;
+        boolean rsiRising = rsi > rsiPrev;
+
+        logger.debug("RSI Strategy: Price={}, RSI={} ({} from {})",
+            currentPrice, String.format("%.2f", rsi),
+            rsiRising ? "↑" : "↓", String.format("%.2f", rsiPrev));
 
         if (rsi < OVERSOLD && positionQty == 0) {
-            var reason = String.format("RSI Oversold (%.2f < %.0f)", rsi, OVERSOLD);
-            logger.info("{}: BUY signal - {}", symbol, reason);
+            // Guard: RSI must be rising (bouncing off bottom), not still falling.
+            // Buying into a still-declining RSI = catching a falling knife.
+            if (!rsiRising) {
+                String reason = String.format(
+                    "RSI=%.1f oversold but still falling (%.1f→%.1f) — wait for bounce",
+                    rsi, rsiPrev, rsi);
+                logger.info("{}: HOLD (knife-catch guard) — {}", symbol, reason);
+                return new TradingSignal.Hold(reason);
+            }
+            var reason = String.format("RSI Oversold+Rising (%.2f↑ < %.0f)", rsi, OVERSOLD);
+            logger.info("{}: BUY signal — {}", symbol, reason);
             return new TradingSignal.Buy(reason);
         } else if (rsi > OVERBOUGHT && positionQty > 0) {
             var reason = String.format("RSI Overbought (%.2f > %.0f)", rsi, OVERBOUGHT);
-            logger.info("{}: SELL signal - {}", symbol, reason);
+            logger.info("{}: SELL signal — {}", symbol, reason);
             return new TradingSignal.Sell(reason);
         }
 
         // Provide detailed context for HOLD decision
         String context;
         if (positionQty > 0) {
-            context = String.format("RSI=%.1f (have position, waiting for >%.0f to sell)", rsi, OVERBOUGHT);
+            context = String.format("RSI=%.1f%s (have position, waiting for >%.0f to sell)",
+                rsi, rsiRising ? "↑" : "↓", OVERBOUGHT);
         } else {
-            context = String.format("RSI=%.1f (neutral zone, need <%.0f to buy)", rsi, OVERSOLD);
+            context = String.format("RSI=%.1f%s (need <%.0f with ↑ to buy)",
+                rsi, rsiRising ? "↑" : "↓", OVERSOLD);
         }
         return new TradingSignal.Hold(context);
     }

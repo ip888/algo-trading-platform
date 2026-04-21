@@ -44,12 +44,22 @@ public final class MeanReversionStrategy implements TradingStrategy {
                 return new TradingSignal.Buy("Price below Lower Band (Oversold)");
             }
         } else {
-            if (currentPrice >= sma) {
-                return new TradingSignal.Sell("Price returned to Mean");
+            // Exit target: SMA + 1.5σ — captures ~60% of the full reversion (lower→upper band).
+            // Exiting at the SMA alone (old behaviour) leaves the upper half of the move on the table.
+            // Stop-loss from the position protects the downside if price stalls before this target.
+            double reachableTarget = sma + stdDev * 1.5;
+            if (currentPrice >= reachableTarget) {
+                String reason = String.format(
+                    "Mean Reversion: price $%.2f reached SMA+1.5σ target $%.2f — taking profit",
+                    currentPrice, reachableTarget);
+                logger.info("{}: SELL — {}", symbol, reason);
+                return new TradingSignal.Sell(reason);
             }
         }
 
-        return new TradingSignal.Hold("Waiting for extreme deviation");
+        return new TradingSignal.Hold(String.format(
+            "Waiting: price $%.2f, lower $%.2f, target $%.2f",
+            currentPrice, lowerBand, sma + stdDev * 1.5));
     }
 
     private double calculateSMA(List<Double> history, int period) {

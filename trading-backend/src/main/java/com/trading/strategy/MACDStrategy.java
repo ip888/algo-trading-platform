@@ -38,15 +38,22 @@ public final class MACDStrategy implements TradingStrategy {
         double prevSignalLine = macdValuesPrev[1];
         
         double histogram = macdLine - signalLine;
+        double prevHistogram = prevMacdLine - prevSignalLine;
 
-        logger.debug("MACD Strategy: Price={}, MACD={}, Signal={}, Hist={}", 
-            currentPrice, String.format("%.2f", macdLine), String.format("%.2f", signalLine), String.format("%.2f", histogram));
+        logger.debug("MACD Strategy: Price={}, MACD={}, Signal={}, Hist={} (prev={})",
+            currentPrice, String.format("%.2f", macdLine), String.format("%.2f", signalLine),
+            String.format("%.2f", histogram), String.format("%.2f", prevHistogram));
 
         // Bullish Crossover: MACD crosses ABOVE Signal
         boolean bullishCrossover = prevMacdLine <= prevSignalLine && macdLine > signalLine;
-        
-        // Trend Following Entry: MACD is already above Signal AND Histogram is increasing (momentum building)
-        boolean strongUptrend = macdLine > signalLine && histogram > (prevMacdLine - prevSignalLine) && histogram > 0.05;
+
+        // Strong Uptrend: MACD above signal, histogram growing, AND was already positive last bar.
+        // Threshold raised to 0.10 (from 0.05) to filter weak signals.
+        // Requiring prevHistogram > 0 ensures 2+ consecutive bullish bars — avoids single-bar whipsaws.
+        boolean strongUptrend = macdLine > signalLine
+            && histogram > prevHistogram
+            && histogram > 0.10
+            && prevHistogram > 0;
 
         // Bearish Crossover: MACD crosses BELOW Signal
         boolean bearishCrossover = prevMacdLine >= prevSignalLine && macdLine < signalLine;

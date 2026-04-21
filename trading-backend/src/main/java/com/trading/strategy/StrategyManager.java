@@ -65,11 +65,15 @@ public final class StrategyManager {
         try {
             var bars = client.getMarketHistory(symbol, 100);
             var closes = bars.stream().map(Bar::close).toList();
+            var volumes = bars.stream().mapToLong(Bar::volume).boxed().toList();
 
             if (closes.size() < 50) {
                 logger.warn("Insufficient history: {} bars (need 50+)", closes.size());
                 return new TradingSignal.Hold("Insufficient history");
             }
+
+            // Mean reversion legitimately buys below SMA — skip trend/volume guards for it.
+            boolean isMeanReversion = (regime == MarketRegime.RANGE_BOUND);
 
             // Check multi-timeframe alignment if enabled
             if (multiTimeframeAnalyzer != null) {
@@ -92,11 +96,15 @@ public final class StrategyManager {
                         case HOLD -> new TradingSignal.Hold("Multi-timeframe HOLD");
                     };
 
-                    // Block BUY signals when short-term price trend is bearish
-                    if (mtfSignal instanceof TradingSignal.Buy && isShortTermDowntrend(closes, currentPrice)) {
-                        logger.info("{}: Blocked MTF BUY signal - short-term downtrend detected " +
-                            "(price below declining 10-bar SMA)", symbol);
-                        return new TradingSignal.Hold("Short-term downtrend - blocking BUY");
+                    if (mtfSignal instanceof TradingSignal.Buy && !isMeanReversion) {
+                        if (isShortTermDowntrend(closes, currentPrice)) {
+                            logger.info("{}: Blocked MTF BUY — downtrend (price below declining SMA)", symbol);
+                            return new TradingSignal.Hold("Downtrend — blocking BUY");
+                        }
+                        if (!isVolumeConfirming(volumes)) {
+                            logger.info("{}: Blocked MTF BUY — low volume (below 70% of 20-bar avg)", symbol);
+                            return new TradingSignal.Hold("Low volume — BUY not confirmed");
+                        }
                     }
 
                     return mtfSignal;
@@ -105,11 +113,17 @@ public final class StrategyManager {
 
             var signal = evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime);
 
-            // Block BUY signals from individual strategies when short-term trend is bearish
-            if (signal instanceof TradingSignal.Buy && isShortTermDowntrend(closes, currentPrice)) {
-                logger.info("{}: Blocked {} BUY signal - short-term downtrend detected",
-                    symbol, activeStrategy);
-                return new TradingSignal.Hold("Short-term downtrend - blocking BUY");
+            if (signal instanceof TradingSignal.Buy && !isMeanReversion) {
+                // 1. Block if price is in a short-term or medium-term downtrend
+                if (isShortTermDowntrend(closes, currentPrice)) {
+                    logger.info("{}: Blocked {} BUY — downtrend detected", symbol, activeStrategy);
+                    return new TradingSignal.Hold("Downtrend — blocking BUY");
+                }
+                // 2. Block if volume is too low to support the move
+                if (!isVolumeConfirming(volumes)) {
+                    logger.info("{}: Blocked {} BUY — low volume", symbol, activeStrategy);
+                    return new TradingSignal.Hold("Low volume — BUY not confirmed");
+                }
             }
 
             return signal;
@@ -144,8 +158,13 @@ public final class StrategyManager {
                 }
             }
             case STRONG_BEAR -> {
-                // Strong bear → MACD for trend confirmation before shorts
-                activeStrategy = "MACD Trend";
+                if (positionQty == 0) {
+                    // Bear market: never open new long positions — wait for regime to change.
+                    activeStrategy = "Bear Market Block";
+                    yield new TradingSignal.Hold("STRONG_BEAR — no new long entries");
+                }
+                // Already holding: use MACD to find the best exit
+                activeStrategy = "MACD Exit (Strong Bear)";
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }
             case WEAK_BULL -> {
@@ -269,7 +288,46 @@ public final class StrategyManager {
             return true;
         }
 
+        // ---- 50-bar SMA check (macro trend) ----
+        // Any stock trading below its 50-bar SMA is in a macro downtrend regardless of short-term bounces.
+        // No requirement for SMA to be declining — being below it is sufficient.
+        if (size >= 52) {
+            double sma50 = smaOf(closes, size - 50, size);
+            if (livePrice < sma50) {
+                double pct = ((sma50 - livePrice) / sma50) * 100;
+                logger.debug("Macro downtrend: price ${} is {:.2f}% below 50-SMA ${}",
+                    String.format("%.2f", livePrice), pct, String.format("%.2f", sma50));
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    /**
+     * Returns true if the last bar's volume is sufficient to confirm a BUY signal.
+     * Low-volume breakouts and rallies frequently fail — require last bar ≥ 70% of
+     * the 20-bar average (excluding last bar to avoid partial-day skew).
+     */
+    private boolean isVolumeConfirming(List<Long> volumes) {
+        if (volumes.size() < 22) return true; // insufficient data — don't block
+
+        int last = volumes.size() - 1;
+        int avgStart = Math.max(0, last - 20);
+        long sum = 0;
+        for (int i = avgStart; i < last; i++) sum += volumes.get(i);
+        double avgVolume = (double) sum / (last - avgStart);
+
+        if (avgVolume <= 0) return true;
+
+        long lastVolume = volumes.get(last);
+        boolean confirming = lastVolume >= avgVolume * 0.70;
+        if (!confirming) {
+            logger.debug("Low volume: last={} avg={} ratio={:.2f}",
+                lastVolume, (long) avgVolume,
+                avgVolume > 0 ? lastVolume / avgVolume : 0.0);
+        }
+        return confirming;
     }
 
     /** Average of closes[from..to) */

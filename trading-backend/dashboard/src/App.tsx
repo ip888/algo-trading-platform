@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { webSocketService } from './services/WebSocketService';
 import { useTradingStore } from './store/tradingStore';
+import { CONFIG } from './config';
 
 // Error Boundary
 import { ComponentErrorBoundary } from './components/ComponentErrorBoundary';
@@ -35,7 +36,7 @@ function App() {
     // Fetch initial account data via REST (WebSocket may not send until trading activity)
     const fetchAccountData = async () => {
       try {
-        const res = await fetch('http://localhost:8080/api/account');
+        const res = await fetch(`${CONFIG.API_BASE_URL}/api/account`);
         if (res.ok) {
           const data = await res.json();
           store.setAccountData(data);

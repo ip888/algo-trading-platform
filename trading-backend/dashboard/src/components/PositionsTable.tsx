@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTradingStore } from '../store/tradingStore';
+import { CONFIG } from '../config';
 
 // Helper to safely convert values that may be strings to numbers
 const toNumber = (val: unknown): number => {
@@ -18,7 +19,7 @@ export const PositionsTable = () => {
   useEffect(() => {
     const fetchPositions = async () => {
       try {
-        const res = await fetch('http://localhost:8080/api/positions');
+        const res = await fetch(`${CONFIG.API_BASE_URL}/api/positions`);
         if (res.ok) {
           const data = await res.json();
           setPositions(data);

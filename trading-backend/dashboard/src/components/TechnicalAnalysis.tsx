@@ -9,6 +9,8 @@ interface TargetEntry {
   blockReason: string | null;
   inCooldown: boolean;
   cooldownMinutes: number;
+  entryPrice?: number;
+  unrealPct?: number;
   price?: number;
   changePercent?: number;
 }
@@ -42,6 +44,8 @@ export const TechnicalAnalysis = () => {
           blockReason:     it.blockReason ?? null,
           inCooldown:      Boolean(it.inCooldown),
           cooldownMinutes: Number(it.cooldownMinutes) || 0,
+          entryPrice:      it.entryPrice != null ? Number(it.entryPrice) : undefined,
+          unrealPct:       it.unrealPct  != null ? Number(it.unrealPct)  : undefined,
         }));
       setTargets(list);
       setUpdatedAt(Date.now());
@@ -113,49 +117,76 @@ export const TechnicalAnalysis = () => {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             {enriched.map(t => {
-              const gate = getGateStatus(t);
-              const chg  = t.changePercent ?? 0;
+              const gate  = getGateStatus(t);
+              const chg   = t.changePercent ?? 0;
+              const pnl   = t.unrealPct ?? 0;
+              const pnlColor = pnl >= 0 ? '#22c55e' : '#ef4444';
               return (
                 <div key={t.symbol} style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
                   background: '#0d0d1a',
                   borderRadius: '6px',
                   padding: '7px 10px',
                   borderLeft: `3px solid ${gate.color}`,
                 }}>
-                  {/* Symbol */}
-                  <span style={{ fontWeight: 700, fontSize: '13px', minWidth: '48px' }}>{t.symbol}</span>
+                  {/* Top row: symbol + live price + badge */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{
+                      fontWeight: 700, fontSize: '12px', minWidth: '52px',
+                      padding: '2px 6px', borderRadius: '4px',
+                      background: gate.color + '18', border: `1px solid ${gate.color}44`,
+                      color: gate.color, letterSpacing: '0.04em', textAlign: 'center',
+                    }}>{t.symbol}</span>
 
-                  {/* Price */}
-                  <span style={{ fontFamily: 'monospace', fontSize: '12px', minWidth: '60px' }}>
-                    {t.price && t.price > 0
-                      ? `$${t.price.toFixed(2)}`
-                      : <span style={{ color: '#444' }}>—</span>}
-                  </span>
+                    {/* Live price (WS) or dash */}
+                    <span style={{ fontFamily: 'monospace', fontSize: '12px', color: '#ccc' }}>
+                      {t.price && t.price > 0
+                        ? `$${t.price.toFixed(2)}`
+                        : <span style={{ color: '#444' }}>—</span>}
+                    </span>
 
-                  {/* Change % */}
-                  <span style={{ fontSize: '11px', minWidth: '52px', textAlign: 'right' }}>
-                    {chg !== 0
-                      ? <span style={{ color: chg >= 0 ? '#22c55e' : '#ef4444' }}>{chg >= 0 ? '▲' : '▼'}{Math.abs(chg).toFixed(2)}%</span>
-                      : <span style={{ color: '#444' }}>—</span>}
-                  </span>
+                    {/* Intraday change % from WS */}
+                    {chg !== 0 && (
+                      <span style={{ fontSize: '11px', color: chg >= 0 ? '#22c55e' : '#ef4444' }}>
+                        {chg >= 0 ? '▲' : '▼'}{Math.abs(chg).toFixed(2)}%
+                      </span>
+                    )}
 
-                  {/* Gate badge */}
-                  <span style={{
-                    marginLeft: 'auto',
-                    padding: '2px 8px',
-                    borderRadius: '10px',
-                    fontSize: '10px',
-                    fontWeight: 700,
-                    color: gate.color,
-                    background: gate.color + '22',
-                    border: `1px solid ${gate.color}44`,
-                    whiteSpace: 'nowrap',
-                  }} title={gate.detail}>
-                    {gate.label}
-                  </span>
+                    {/* Gate badge */}
+                    <span style={{
+                      marginLeft: 'auto',
+                      padding: '2px 8px',
+                      borderRadius: '10px',
+                      fontSize: '10px',
+                      fontWeight: 700,
+                      color: gate.color,
+                      background: gate.color + '22',
+                      border: `1px solid ${gate.color}44`,
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {gate.label}
+                    </span>
+                  </div>
+
+                  {/* Bottom row: context-sensitive detail */}
+                  <div style={{ marginTop: '3px', fontSize: '10px', color: '#666', display: 'flex', gap: '12px' }}>
+                    {t.inPosition && t.entryPrice != null && (
+                      <span>entry <span style={{ color: '#aaa', fontFamily: 'monospace' }}>${t.entryPrice.toFixed(2)}</span></span>
+                    )}
+                    {t.inPosition && t.unrealPct != null && (
+                      <span>P&amp;L <span style={{ color: pnlColor, fontWeight: 700 }}>
+                        {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}%
+                      </span></span>
+                    )}
+                    {t.blocked && t.blockReason && (
+                      <span style={{ color: '#ef444499' }}>{t.blockReason}</span>
+                    )}
+                    {t.inCooldown && !t.inPosition && (
+                      <span>re-entry in <span style={{ color: '#f97316' }}>{t.cooldownMinutes}m</span></span>
+                    )}
+                    {!t.inPosition && !t.blocked && !t.inCooldown && (
+                      <span style={{ color: '#38bdf855' }}>entry gate open</span>
+                    )}
+                  </div>
                 </div>
               );
             })}

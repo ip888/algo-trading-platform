@@ -140,7 +140,12 @@
       "Bash(fly deploy --region iad)",
       "Bash(mvn -B test)",
       "Bash(curl -s \"https://trading-bot-igor-waw.fly.dev/api/trades/by-broker\")",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(curl -s \"https://trading-bot-igor-waw.fly.dev/api/system/status\")",
+      "Bash(curl -s \"https://trading-bot-igor-waw.fly.dev/api/orders/history?limit=15\")",
+      "Bash(fly logs *)",
+      "Read(//tmp/**)",
+      "Bash(mvn -B compile)"
     ],
     "additionalDirectories": [
       "/Users/igor/.claude/plans"

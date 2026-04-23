@@ -123,11 +123,14 @@ public class ProfileManager implements Runnable {
 
     // STATIC: Urgent exit queue — symbols whose protective sell failed due to API error.
     // Retried every cycle (every 10s) until the sell succeeds or the position disappears.
-    // Key = symbol, Value = UrgentExit record
+    // Key = "broker:symbol" so multi-broker mode doesn't cross-clear entries
+    // (e.g. Alpaca's failed SPY exit shouldn't be wiped by Tradier's reconcile).
     private static final java.util.concurrent.ConcurrentHashMap<String, UrgentExit> urgentExitQueue
         = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private record UrgentExit(String symbol, double quantity, String reason, long firstFailedAt) {}
+    private record UrgentExit(String broker, String symbol, double quantity, String reason, long firstFailedAt) {}
+
+    private static String urgentKey(String broker, String symbol) { return broker + ":" + symbol; }
 
     // STATIC: Track why buys were most recently blocked per symbol (gap-down, price gate, etc.)
     // Key = symbol, Value = reason string. Cleared when the buy is eventually allowed.
@@ -137,8 +140,8 @@ public class ProfileManager implements Runnable {
     public static java.util.Map<String, String> getUrgentExitQueue() {
         var result = new java.util.LinkedHashMap<String, String>();
         long now = System.currentTimeMillis();
-        urgentExitQueue.forEach((symbol, exit) ->
-            result.put(symbol, String.format("%s (queued %dm ago)", exit.reason(), (now - exit.firstFailedAt()) / 60000)));
+        urgentExitQueue.forEach((key, exit) ->
+            result.put(key, String.format("%s (queued %dm ago)", exit.reason(), (now - exit.firstFailedAt()) / 60000)));
         return java.util.Collections.unmodifiableMap(result);
     }
 
@@ -335,7 +338,7 @@ public class ProfileManager implements Runnable {
         cleanupExpiredCooldowns();
 
         // Reconcile internal portfolio state with Alpaca positions
-        reconcilePortfolioWithAlpaca(profilePrefix);
+        reconcilePortfolioWithBroker(profilePrefix);
 
         // Retry any protective exits that failed in a previous cycle (e.g., API down).
         // Only drain during market hours — pre-market market orders get rejected by Alpaca
@@ -697,13 +700,15 @@ public class ProfileManager implements Runnable {
                         client.placeOrder(symbol, qty, "sell", "market", "day", null);
                         logger.info("{} ✅ Max loss exit order placed for {} (attempt {}/{})", profilePrefix, symbol, attempt+1, maxAttempts);
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pos.calculatePnL(currentPrice), brokerName);
+                        double exitPnl = pos.calculatePnL(currentPrice);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, exitPnl, brokerName);
                         TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]", 
+                            String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]",
                                 profile.name(), symbol, lossPercent, attempt+1),
                             "WARN"
                         );
                         portfolio.setPosition(symbol, Optional.empty());
+                        applyPostExitCooldown(symbol, currentPrice, exitPnl, profilePrefix, "max loss");
                         success = true;
                         return;
                     } catch (Exception e) {
@@ -740,6 +745,7 @@ public class ProfileManager implements Runnable {
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
+                        applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "time-based");
 
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] TIME-BASED EXIT: %s (held %d hours)",
@@ -1661,7 +1667,7 @@ public class ProfileManager implements Runnable {
                         } catch (Exception e) {
                             logger.error("{} Failed to place enhanced exit order for {}",
                                 profilePrefix, symbol, e);
-                            urgentExitQueue.put(symbol, new UrgentExit(symbol, qtyToExit, exitDecision.reason(), System.currentTimeMillis()));
+                            urgentExitQueue.put(urgentKey(brokerName, symbol), new UrgentExit(brokerName, symbol, qtyToExit, exitDecision.reason(), System.currentTimeMillis()));
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] ⚠️ EXIT FAILED, QUEUED FOR RETRY: %s (%s)",
                                     profile.name(), symbol, exitDecision.reason()),
@@ -1705,7 +1711,7 @@ public class ProfileManager implements Runnable {
                     } catch (Exception e) {
                         logger.error("{} Failed to place max loss exit order for {}",
                             profilePrefix, symbol, e);
-                        urgentExitQueue.put(symbol, new UrgentExit(symbol, qty,
+                        urgentExitQueue.put(urgentKey(brokerName, symbol), new UrgentExit(brokerName, symbol, qty,
                             String.format("max loss (%.1f%%)", Math.abs(lossPercent)), System.currentTimeMillis()));
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] ⚠️ MAX LOSS EXIT FAILED, QUEUED FOR RETRY: %s",
@@ -1762,6 +1768,23 @@ public class ProfileManager implements Runnable {
     }
 
     /**
+     * Arm the re-entry cooldown + last-exit-price gate after a forced exit
+     * (time-based, max-loss, stop-loss). Without this, forced exits skip the
+     * same-day re-entry protection applied by handleSell, producing churn
+     * (e.g. time-exit TLT → immediately re-buy TLT on next cycle's RSI signal).
+     */
+    private void applyPostExitCooldown(String symbol, double exitPrice, double pnl,
+                                       String profilePrefix, String exitKind) {
+        long cooldownMs = config.getStopLossCooldownMs();
+        stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
+        if (pnl < 0) {
+            lastExitPrices.put(symbol, exitPrice);
+        }
+        logger.info("{} {} placed on {}-minute re-entry cooldown after {} exit (pnl=${})",
+            profilePrefix, symbol, cooldownMs / 60000, exitKind, String.format("%.2f", pnl));
+    }
+
+    /**
      * Reconcile internal portfolio state with actual Alpaca positions.
      * Removes any internal positions that no longer exist on Alpaca.
      * This prevents stale state from blocking new entries after external sells,
@@ -1773,12 +1796,14 @@ public class ProfileManager implements Runnable {
      * Only MAIN profile drains the queue to avoid duplicate orders.
      */
     private void drainUrgentExitQueue(String profilePrefix) {
-        if (!profile.isMainProfile()) return;
         if (System.currentTimeMillis() < pdtBlockedUntil) return;
 
-        for (String symbol : new java.util.HashSet<>(urgentExitQueue.keySet())) {
-            UrgentExit exit = urgentExitQueue.get(symbol);
+        for (String key : new java.util.HashSet<>(urgentExitQueue.keySet())) {
+            UrgentExit exit = urgentExitQueue.get(key);
             if (exit == null) continue;
+            // Only drain entries owned by THIS broker so multi-broker setups don't cross-fire.
+            if (!brokerName.equals(exit.broker())) continue;
+            String symbol = exit.symbol();
 
             long minsWaiting = (System.currentTimeMillis() - exit.firstFailedAt()) / 60000;
             logger.warn("{} 🔄 URGENT EXIT RETRY: {} qty={} reason='{}' ({}m since first fail)",
@@ -1791,7 +1816,7 @@ public class ProfileManager implements Runnable {
                 var positions = client.getPositions();
                 var livePos = positions.stream().filter(p -> p.symbol().equals(symbol)).findFirst();
                 if (livePos.isEmpty()) {
-                    urgentExitQueue.remove(symbol);
+                    urgentExitQueue.remove(key);
                     logger.info("{} Urgent exit cleared: {} position no longer on broker", profilePrefix, symbol);
                     continue;
                 }
@@ -1804,7 +1829,7 @@ public class ProfileManager implements Runnable {
                 cancelExistingOrders(profilePrefix, symbol);
                 client.placeOrderDirect(symbol, liveQty, "sell", "market", "day", null);
 
-                urgentExitQueue.remove(symbol);
+                urgentExitQueue.remove(key);
                 pendingExitOrders.put(symbol, System.currentTimeMillis());
 
                 TradingWebSocketHandler.broadcastActivity(
@@ -1834,21 +1859,21 @@ public class ProfileManager implements Runnable {
         }
     }
 
-    private void reconcilePortfolioWithAlpaca(String profilePrefix) {
+    private void reconcilePortfolioWithBroker(String profilePrefix) {
         try {
-            var alpacaPositions = client.getPositions();
-            var alpacaSymbols = new java.util.HashSet<String>();
-            for (var pos : alpacaPositions) {
-                alpacaSymbols.add(pos.symbol());
+            var brokerPositions = client.getPositions();
+            var brokerSymbols = new java.util.HashSet<String>();
+            for (var pos : brokerPositions) {
+                brokerSymbols.add(pos.symbol());
             }
 
             var internalSymbols = portfolio.getActiveStoredSymbols();
             int removed = 0;
             for (String symbol : internalSymbols) {
-                if (!alpacaSymbols.contains(symbol)) {
+                if (!brokerSymbols.contains(symbol)) {
                     portfolio.setPosition(symbol, Optional.empty());
                     removed++;
-                    logger.info("{} Reconciliation: removed stale position {} (not found on Alpaca)",
+                    logger.info("{} Reconciliation: removed stale position {} (not found at broker)",
                         profilePrefix, symbol);
                 }
             }
@@ -1857,18 +1882,18 @@ public class ProfileManager implements Runnable {
                     profilePrefix, removed, portfolio.getActivePositionCount());
             }
 
-            // Clean up pending exit orders for positions that have been filled (no longer on Alpaca).
+            // Clean up pending exit orders for positions that have been filled (no longer at broker).
             // Use a snapshot of keys to avoid concurrent-modification issues with ConcurrentHashMap.
-            // Also clear STALE entries: order placed >20 min ago but position still exists on Alpaca
-            // (this happens when orders expire after market close or are rejected by Alpaca).
+            // Also clear STALE entries: order placed >20 min ago but position still exists at broker
+            // (this happens when orders expire after market close or are rejected by the broker).
             long staleThresholdMs = 20 * 60 * 1000L; // 20 minutes
             long now = System.currentTimeMillis();
             int clearedExits = 0;
             for (String symbol : new java.util.HashSet<>(pendingExitOrders.keySet())) {
-                if (!alpacaSymbols.contains(symbol)) {
+                if (!brokerSymbols.contains(symbol)) {
                     pendingExitOrders.remove(symbol);
                     clearedExits++;
-                    logger.info("{} Pending exit cleared: {} (position filled/gone from Alpaca)",
+                    logger.info("{} Pending exit cleared: {} (position filled/gone from broker)",
                         profilePrefix, symbol);
                 } else {
                     // Position still exists — check if our "pending" order is stale
@@ -1876,35 +1901,35 @@ public class ProfileManager implements Runnable {
                     if (now - placedAt > staleThresholdMs) {
                         pendingExitOrders.remove(symbol);
                         clearedExits++;
-                        logger.warn("{} Stale pending exit cleared for {} — order is {}min old but position still exists (likely expired/rejected by Alpaca); will re-evaluate next cycle",
+                        logger.warn("{} Stale pending exit cleared for {} — order is {}min old but position still exists (likely expired/rejected by broker); will re-evaluate next cycle",
                             profilePrefix, symbol, (now - placedAt) / 60000);
                     }
                 }
             }
 
-            // Also clear urgent exit queue for positions that are no longer on Alpaca
-            for (String symbol : new java.util.HashSet<>(urgentExitQueue.keySet())) {
-                if (!alpacaSymbols.contains(symbol)) {
-                    urgentExitQueue.remove(symbol);
-                    logger.info("{} Urgent exit cleared: {} (position filled/gone from Alpaca)",
-                        profilePrefix, symbol);
+            // Also clear urgent exit queue for THIS broker's entries that are no longer at broker.
+            // Filter by exit.broker so multi-broker mode doesn't clear another broker's queue.
+            for (String key : new java.util.HashSet<>(urgentExitQueue.keySet())) {
+                UrgentExit exit = urgentExitQueue.get(key);
+                if (exit == null || !brokerName.equals(exit.broker())) continue;
+                if (!brokerSymbols.contains(exit.symbol())) {
+                    urgentExitQueue.remove(key);
+                    logger.info("{} Urgent exit cleared: {} (position filled/gone from broker)",
+                        profilePrefix, exit.symbol());
                 }
             }
 
-            // Clean up ghost OPEN DB records for symbols no longer held on Alpaca.
-            // This fixes: close → position still shows on Alpaca one more cycle → recovery
-            // re-inserts OPEN record → fill confirms → orphaned OPEN record accumulates forever.
-            // Only MAIN profile does this cleanup to avoid races; min age = 2 minutes to avoid
-            // closing records for positions currently being opened this cycle.
-            if (profile.isMainProfile()) {
-                database.closeOrphanedOpenTrades(brokerName, alpacaSymbols, 2 * 60 * 1000L);
-            }
+            // Clean up ghost OPEN DB records for symbols no longer held at this broker.
+            // Each broker owns its own rows (filtered by brokerName), so this is safe to
+            // run per-broker in multi-broker mode. Min age = 2 minutes to avoid closing
+            // records for positions currently being opened this cycle.
+            database.closeOrphanedOpenTrades(brokerName, brokerSymbols, 2 * 60 * 1000L);
 
-            // Ensure every live Alpaca position has a matching OPEN record in the trade DB.
+            // Ensure every live broker position has a matching OPEN record in the trade DB.
             // This fixes the "0 trades in DB" problem after a redeploy wipes the ephemeral DB:
             // positions that were bought in a previous session are re-inserted as OPEN so that
             // when they are eventually sold, closeTrade() can find them and record P&L.
-            for (var pos : alpacaPositions) {
+            for (var pos : brokerPositions) {
                 String symbol = pos.symbol();
                 if (!database.hasOpenTrade(symbol, brokerName)) {
                     try {
@@ -2473,7 +2498,7 @@ public class ProfileManager implements Runnable {
                         continue; // try remaining positions — non-day-trade sells may still succeed
                     } catch (Exception e) {
                         logger.error("{} Failed to place stop loss exit for {}", profilePrefix, symbol, e);
-                        urgentExitQueue.put(symbol, new UrgentExit(symbol, qty,
+                        urgentExitQueue.put(urgentKey(brokerName, symbol), new UrgentExit(brokerName, symbol, qty,
                             String.format("stop loss (%.1f%%)", pnlPercent), System.currentTimeMillis()));
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] ⚠️ STOP LOSS EXIT FAILED, QUEUED FOR RETRY: %s",

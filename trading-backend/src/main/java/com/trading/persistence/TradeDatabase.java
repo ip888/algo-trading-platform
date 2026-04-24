@@ -363,34 +363,63 @@ public class TradeDatabase {
 
     /**
      * Close a trade with write lock.
+     *
+     * Closes ALL OPEN rows for (symbol, broker) in one call, not just the most
+     * recent. Multi-entry positions accumulate multiple OPEN rows; a single
+     * full-exit sell must record P&L for each lot, otherwise the orphan-cleanup
+     * sweep marks the un-closed lots as CANCELLED with $0 P&L — hiding realized
+     * results from reporting.
+     *
+     * Per-lot P&L is recomputed from each row's own entry_price and quantity
+     * against the single exitPrice; the sum equals the aggregate P&L the caller
+     * would have computed from the averaged position. The {@code pnl} parameter
+     * is therefore redundant but kept for signature stability.
      */
     public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl, String broker) {
-        String sql = """
-            UPDATE trades SET exit_time = ?, exit_price = ?, pnl = ?, status = 'CLOSED'
-            WHERE symbol = ? AND broker = ? AND status = 'OPEN'
-            AND entry_time = (SELECT MAX(entry_time) FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN')
-            """;
+        record Lot(int id, double entryPrice, double quantity) {}
+
+        String selectSql = "SELECT id, entry_price, quantity FROM trades " +
+                           "WHERE symbol = ? AND broker = ? AND status = 'OPEN'";
+        String updateSql = "UPDATE trades SET exit_time = ?, exit_price = ?, pnl = ?, status = 'CLOSED' WHERE id = ?";
 
         long stamp = lock.writeLock();
-        try (var stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, exitTime.toString());
-            stmt.setDouble(2, exitPrice);
-            stmt.setDouble(3, pnl);
-            stmt.setString(4, symbol);
-            stmt.setString(5, broker);
-            stmt.setString(6, symbol); // For subquery
-            stmt.setString(7, broker); // For subquery
-            int updated = stmt.executeUpdate();
-            
-            if (updated > 0) {
-                logger.atInfo()
-                    .addKeyValue("symbol", symbol)
-                    .addKeyValue("exitPrice", exitPrice)
-                    .addKeyValue("pnl", pnl)
-                    .log("Trade closed");
-            } else {
-                logger.warn("No open trade found to close for symbol: {}", symbol);
+        try {
+            var lots = new java.util.ArrayList<Lot>();
+            try (var sel = connection.prepareStatement(selectSql)) {
+                sel.setString(1, symbol);
+                sel.setString(2, broker);
+                try (var rs = sel.executeQuery()) {
+                    while (rs.next()) {
+                        lots.add(new Lot(rs.getInt("id"), rs.getDouble("entry_price"), rs.getDouble("quantity")));
+                    }
+                }
             }
+
+            if (lots.isEmpty()) {
+                logger.warn("No open trade found to close for symbol: {}", symbol);
+                return;
+            }
+
+            double totalPnl = 0.0;
+            try (var upd = connection.prepareStatement(updateSql)) {
+                for (Lot lot : lots) {
+                    double lotPnl = (exitPrice - lot.entryPrice()) * lot.quantity();
+                    totalPnl += lotPnl;
+                    upd.setString(1, exitTime.toString());
+                    upd.setDouble(2, exitPrice);
+                    upd.setDouble(3, lotPnl);
+                    upd.setInt(4, lot.id());
+                    upd.addBatch();
+                }
+                upd.executeBatch();
+            }
+
+            logger.atInfo()
+                .addKeyValue("symbol", symbol)
+                .addKeyValue("exitPrice", exitPrice)
+                .addKeyValue("pnl", totalPnl)
+                .addKeyValue("lots", lots.size())
+                .log("Trade closed");
         } catch (SQLException e) {
             logger.error("Failed to close trade for {}", symbol, e);
             throw new RuntimeException("Database write failed", e);

@@ -100,7 +100,7 @@ class ProfileManagerEntryCapTest {
     }
 
     @Test
-    @DisplayName("countOpenTrades drops below cap after partial close")
+    @DisplayName("closeTrade drains all open lots — cap fully reset")
     void cap_afterClose_belowCap() {
         db.recordTrade("QQQ", "RSI", "TRADIER", "tradier",
             Instant.now(), 640.0, 31.0, 634.0, 656.0);
@@ -108,8 +108,10 @@ class ProfileManagerEntryCapTest {
             Instant.now(), 645.0, 20.0, 639.0, 661.0);
         db.closeTrade("QQQ", Instant.now(), 660.0, 310.0, "tradier");
 
-        assertEquals(1, db.countOpenTrades("QQQ", "tradier"),
-            "After one close, count drops to 1 — add allowed again");
+        // Full-position sells close every lot in one go (see TradeDatabase.closeTrade).
+        // No partial-close path exists in the bot, so after a sell the cap is fully reset.
+        assertEquals(0, db.countOpenTrades("QQQ", "tradier"),
+            "closeTrade closes all open lots — cap resets to 0");
     }
 
     // ── Restore: getOpenTradeRecords returns correct data ─────────────────────

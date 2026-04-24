@@ -156,4 +156,33 @@ class TradeDatabaseEntryCapTest {
         assertEquals(2, wins);
         assertEquals(1, losses);
     }
+
+    // ── closeTrade on multi-lot positions ──────────────────────────────────────
+
+    @Test
+    @DisplayName("closeTrade closes ALL open lots for the (symbol, broker) pair")
+    void closeTrade_closesAllLotsForMultiEntry() {
+        db.recordTrade("AAPL", "RSI", "ALPACA", "alpaca", Instant.now(), 271.23, 0.4024, 268.5, 279.4);
+        db.recordTrade("AAPL", "RSI", "ALPACA", "alpaca", Instant.now(), 271.33, 0.2557, 268.6, 279.5);
+        db.recordTrade("AAPL", "RSI", "TRADIER", "tradier", Instant.now(), 271.00, 1.0, 268.0, 279.0);
+
+        assertEquals(2, db.countOpenTrades("AAPL", "alpaca"), "precondition: two Alpaca lots");
+
+        db.closeTrade("AAPL", Instant.now(), 270.86, 0.0 /* ignored, recomputed per lot */, "alpaca");
+
+        assertEquals(0, db.countOpenTrades("AAPL", "alpaca"), "all Alpaca lots must be closed");
+        assertEquals(1, db.countOpenTrades("AAPL", "tradier"), "Tradier lot must remain untouched");
+
+        var closed = db.getRecentClosedTrades(10);
+        var alpacaClosed = closed.stream()
+            .filter(t -> "AAPL".equals(t.get("symbol")) && "alpaca".equals(t.get("broker")))
+            .toList();
+        assertEquals(2, alpacaClosed.size(), "both lots recorded as CLOSED with P&L");
+
+        double totalPnl = alpacaClosed.stream()
+            .mapToDouble(t -> ((Number) t.get("pnl")).doubleValue())
+            .sum();
+        double expected = (270.86 - 271.23) * 0.4024 + (270.86 - 271.33) * 0.2557;
+        assertEquals(expected, totalPnl, 0.001, "sum of per-lot P&L matches recomputed aggregate");
+    }
 }

@@ -104,6 +104,26 @@ public final class MarketHoursFilter {
     }
 
     /**
+     * Returns true if {@code now} falls within the first {@code windowMinutes} after
+     * the regular session open (9:30 ET). Used to block fresh entries during the noisy
+     * opening auction. Weekends/holidays return false (already blocked elsewhere).
+     */
+    public static boolean isInOpeningWindow(ZonedDateTime now, int windowMinutes) {
+        if (windowMinutes <= 0) return false;
+        ZonedDateTime ny = now.withZoneSameInstant(EST);
+        if (ny.getDayOfWeek() == DayOfWeek.SATURDAY || ny.getDayOfWeek() == DayOfWeek.SUNDAY) return false;
+        if (isNyseHoliday(ny.toLocalDate())) return false;
+        LocalTime t = ny.toLocalTime();
+        LocalTime windowEnd = MARKET_OPEN.plusMinutes(windowMinutes);
+        return !t.isBefore(MARKET_OPEN) && t.isBefore(windowEnd);
+    }
+
+    /** Convenience overload using the current clock. */
+    public boolean isInOpeningWindow(int windowMinutes) {
+        return isInOpeningWindow(ZonedDateTime.now(EST), windowMinutes);
+    }
+
+    /**
      * Check if current time is within market hours.
      */
     public boolean isMarketOpen() {

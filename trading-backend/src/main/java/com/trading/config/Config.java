@@ -1493,4 +1493,115 @@ public class Config {
         String env = System.getenv(key);
         return env != null ? env : getProperty(key, defaultValue);
     }
+
+    // ==================== Profitability Improvement Knobs (2026-04 batch) ====================
+    // Per-symbol post-loss cooldown
+    public long getPostLossCooldownMs() {
+        return getLongProperty("POST_LOSS_COOLDOWN_MS", 24L * 60 * 60 * 1000); // 24h default
+    }
+    public long getPostLossCooldownExtendedMs() {
+        return getLongProperty("POST_LOSS_COOLDOWN_EXTENDED_MS", 72L * 60 * 60 * 1000); // 72h after 2+ consecutive
+    }
+    public boolean isPerSymbolCooldownEnabled() {
+        return getBooleanProperty("PER_SYMBOL_COOLDOWN_ENABLED", true);
+    }
+
+    // ATR-scaled stops
+    public boolean isAtrStopsEnabled() {
+        return getBooleanProperty("ATR_STOPS_ENABLED", true);
+    }
+    public int getAtrPeriodBars() {
+        return getIntProperty("ATR_PERIOD_BARS", 14);
+    }
+    public double getAtrStopMultiplier() {
+        return getDoubleProperty("ATR_STOP_MULTIPLIER", 2.0);
+    }
+    public double getAtrTakeProfitMultiplier() {
+        return getDoubleProperty("ATR_TAKE_PROFIT_MULTIPLIER", 4.0);
+    }
+    public double getAtrStopFloorPercent() {
+        return getDoubleProperty("ATR_STOP_FLOOR_PERCENT", 0.5); // never tighter than 0.5%
+    }
+    public double getAtrStopCeilingPercent() {
+        return getDoubleProperty("ATR_STOP_CEILING_PERCENT", 5.0); // never wider than 5%
+    }
+
+    // Volatility-targeted (ATR-based) sizing
+    public boolean isAtrSizingEnabled() {
+        return getBooleanProperty("ATR_SIZING_ENABLED", true);
+    }
+    public double getAtrSizingRiskPercent() {
+        return getDoubleProperty("ATR_SIZING_RISK_PERCENT", 0.01); // 1% of equity per trade
+    }
+
+    // Correlation cap
+    public boolean isCorrelationCapEnabled() {
+        return getBooleanProperty("CORRELATION_CAP_ENABLED", true);
+    }
+    public double getCorrelationCapThreshold() {
+        return getDoubleProperty("CORRELATION_CAP_THRESHOLD", 0.75);
+    }
+    public int getCorrelationCapMaxConcurrent() {
+        return getIntProperty("CORRELATION_CAP_MAX_CONCURRENT", 2);
+    }
+
+    // Earnings blackout
+    public boolean isEarningsBlackoutEnabled() {
+        return getBooleanProperty("EARNINGS_BLACKOUT_ENABLED", true);
+    }
+    public int getEarningsBlackoutHoursBefore() {
+        return getIntProperty("EARNINGS_BLACKOUT_HOURS_BEFORE", 24);
+    }
+    public int getEarningsBlackoutHoursAfter() {
+        return getIntProperty("EARNINGS_BLACKOUT_HOURS_AFTER", 24);
+    }
+    public long getEarningsCacheTtlMs() {
+        return getLongProperty("EARNINGS_CACHE_TTL_MS", 24L * 60 * 60 * 1000); // 24h
+    }
+
+    // Scale-out at 1R
+    public boolean isScaleOutEnabled() {
+        return getBooleanProperty("SCALE_OUT_ENABLED", true);
+    }
+    public double getScaleOutTriggerR() {
+        return getDoubleProperty("SCALE_OUT_TRIGGER_R", 1.0);
+    }
+    public double getScaleOutFraction() {
+        return getDoubleProperty("SCALE_OUT_FRACTION", 0.5); // sell half at 1R
+    }
+
+    // Time-based stop (drift-out)
+    public boolean isTimeStopEnabled() {
+        return getBooleanProperty("TIME_STOP_ENABLED", true);
+    }
+    public int getTimeStopBars() {
+        return getIntProperty("TIME_STOP_BARS", 3); // daily bars
+    }
+    public double getTimeStopMaxMoveR() {
+        return getDoubleProperty("TIME_STOP_MAX_MOVE_R", 0.5); // if move <0.5R after N bars, exit
+    }
+
+    // Strategy-by-regime: tighten the routing (separate from existing default)
+    public boolean isRegimeStrictRoutingEnabled() {
+        return getBooleanProperty("REGIME_STRICT_ROUTING_ENABLED", true);
+    }
+
+    // No-trade window at the open (9:30-10:00 ET)
+    public boolean isNoTradeOpenWindowEnabled() {
+        return getBooleanProperty("NO_TRADE_OPEN_WINDOW_ENABLED", true);
+    }
+    public int getNoTradeOpenWindowMinutes() {
+        return getIntProperty("NO_TRADE_OPEN_WINDOW_MINUTES", 30);
+    }
+
+    // Equity-curve circuit breaker
+    public boolean isCircuitBreakerEnabled() {
+        return getBooleanProperty("CIRCUIT_BREAKER_ENABLED", true);
+    }
+    public int getCircuitBreakerConsecutiveLosses() {
+        return getIntProperty("CIRCUIT_BREAKER_CONSECUTIVE_LOSSES", 3);
+    }
+    public double getCircuitBreakerSessionDrawdownPercent() {
+        return getDoubleProperty("CIRCUIT_BREAKER_SESSION_DRAWDOWN_PERCENT", 5.0);
+    }
 }

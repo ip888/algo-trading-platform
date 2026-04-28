@@ -21,6 +21,13 @@ interface BotBehavior {
   vixLevel: number;
   marketRegime: string;
   targetSymbols: string;
+  postLossCooldowns?: Array<{ symbol: string; expiresAt: number; remainingHours: number }>;
+  circuitBreakers?: Record<string, {
+    tripped: boolean;
+    tripReason: string | null;
+    consecutiveLosses: number;
+    sessionDrawdownPct: number;
+  }>;
   timestamp: number;
 }
 
@@ -246,6 +253,54 @@ export const BotBehaviorMonitor = () => {
               <span style={{ color: '#888' }}>{cd.remainingMinutes}m left</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Tier 1.1 Post-Loss cooldowns (24h base / 72h escalated) */}
+      {data.postLossCooldowns && data.postLossCooldowns.length > 0 && (
+        <div style={{ marginTop: '10px', background: '#1a1500', borderRadius: '6px', padding: '8px 10px', border: '1px solid #eab30844' }}>
+          <div style={{ fontSize: '11px', color: '#eab308', fontWeight: 700, marginBottom: '4px' }}>
+            ⏳ POST-LOSS COOLDOWNS (Tier 1.1)
+          </div>
+          {data.postLossCooldowns.map(cd => (
+            <div key={cd.symbol} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', padding: '2px 0', borderBottom: '1px solid #333' }}>
+              <span style={{ color: '#eab308', fontWeight: 700 }}>{cd.symbol}</span>
+              <span style={{ color: '#888' }}>{cd.remainingHours}h left</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Tier 3.10 — Per-broker circuit breakers */}
+      {data.circuitBreakers && Object.keys(data.circuitBreakers).length > 0 && (
+        <div style={{ marginTop: '10px' }}>
+          <div style={{ fontSize: '11px', color: '#888', marginBottom: '4px' }}>SESSION CIRCUIT BREAKERS (Tier 3.10)</div>
+          {Object.entries(data.circuitBreakers).map(([broker, cb]) => {
+            const color = cb.tripped ? '#ef4444' : cb.consecutiveLosses >= 2 ? '#eab308' : '#22c55e';
+            return (
+              <div key={broker} style={{
+                background: '#1a1a2e',
+                borderRadius: '6px',
+                padding: '6px 9px',
+                marginBottom: '4px',
+                borderLeft: `3px solid ${color}`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 700, fontSize: '11px', color: '#ddd' }}>
+                    {broker.toUpperCase()} {cb.tripped && <span style={{ color: '#ef4444' }}>· TRIPPED</span>}
+                  </span>
+                  <span style={{ fontSize: '10px', color }}>
+                    {cb.consecutiveLosses}L · {(cb.sessionDrawdownPct * 100).toFixed(2)}% DD
+                  </span>
+                </div>
+                {cb.tripped && cb.tripReason && (
+                  <div style={{ fontSize: '10px', color: '#ef4444', marginTop: '2px' }}>
+                    Reason: {cb.tripReason.replace('_', ' ')}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

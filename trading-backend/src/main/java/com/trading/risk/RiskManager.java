@@ -173,12 +173,68 @@ public final class RiskManager {
     public double calculateStopLoss(double entryPrice) {
         return entryPrice * (1.0 - stopLossPct);
     }
-    
+
     /**
      * Calculate take-profit price (configured % above entry for longs).
      */
     public double calculateTakeProfit(double entryPrice) {
         return entryPrice * (1.0 + takeProfitPct);
+    }
+
+    /**
+     * ATR-scaled stop-loss for longs: entry − atrMultiplier × atr,
+     * clamped to [floorPct, ceilingPct] of entry so dust ATRs don't yield 0.05% stops
+     * and crash-day ATRs don't yield 15% stops.
+     */
+    public static double calculateAtrStopLoss(double entryPrice, double atr,
+                                              double atrMultiplier,
+                                              double floorPct, double ceilingPct) {
+        if (entryPrice <= 0 || atr <= 0 || atrMultiplier <= 0) {
+            return entryPrice * (1.0 - floorPct / 100.0);
+        }
+        double rawDist = atr * atrMultiplier;
+        double minDist = entryPrice * (floorPct / 100.0);
+        double maxDist = entryPrice * (ceilingPct / 100.0);
+        double dist = Math.max(minDist, Math.min(rawDist, maxDist));
+        return entryPrice - dist;
+    }
+
+    /**
+     * ATR-scaled take-profit for longs: entry + atrMultiplier × atr.
+     * No upper clamp — trending names should let TP run.
+     */
+    public static double calculateAtrTakeProfit(double entryPrice, double atr,
+                                                double atrMultiplier,
+                                                double floorPct) {
+        if (entryPrice <= 0 || atr <= 0 || atrMultiplier <= 0) {
+            return entryPrice * (1.0 + floorPct / 100.0);
+        }
+        double dist = atr * atrMultiplier;
+        double minDist = entryPrice * (floorPct / 100.0);
+        return entryPrice + Math.max(minDist, dist);
+    }
+
+    /**
+     * Volatility-targeted position size: risk_per_trade$ / risk_per_share.
+     * Risk-per-share = entry − stop, so total $-risk equals risk_per_trade × equity
+     * regardless of underlying volatility. This caps tail-risk losses on high-vol names.
+     *
+     * @param equity              account equity ($)
+     * @param entryPrice          ($)
+     * @param stopPrice           ($, must be < entry for longs)
+     * @param riskPerTradeDecimal e.g. 0.01 for 1% of equity
+     * @return shares (>= 0)
+     */
+    public static double calculateVolTargetedSize(double equity, double entryPrice,
+                                                  double stopPrice, double riskPerTradeDecimal) {
+        if (equity <= 0 || entryPrice <= 0 || stopPrice <= 0
+                || stopPrice >= entryPrice || riskPerTradeDecimal <= 0) {
+            return 0.0;
+        }
+        double riskPerShare = entryPrice - stopPrice;
+        double dollarRisk = equity * riskPerTradeDecimal;
+        double shares = dollarRisk / riskPerShare;
+        return Math.max(0.0, shares);
     }
     
     /**

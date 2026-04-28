@@ -145,10 +145,46 @@
       "Bash(curl -s \"https://trading-bot-igor-waw.fly.dev/api/orders/history?limit=15\")",
       "Bash(fly logs *)",
       "Read(//tmp/**)",
-      "Bash(mvn -B compile)"
+      "Bash(mvn -B compile)",
+      "Bash(curl -sS -o /dev/null -w \"HTTP %{http_code}\\\\n\" \"https://trading-bot-igor-waw.fly.dev/api/system/status\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/system/status\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/trades/by-broker\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/brokers/status\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/brokers\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/positions\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/orders/history?limit=50\")",
+      "Bash(curl -sfS -o /dev/null \"https://trading-bot-igor-waw.fly.dev/api/system/status\")",
+      "Bash(awk '{print $1, $2}')",
+      "Bash(grep -oE \"\\\\b[A-Z]{2,5}\\\\b: \\(Timeframes|Signal\\)\")",
+      "Bash(awk -F: '{print $1}')",
+      "Bash(grep -oE \"[A-Z]{2,5}: Timeframes not aligned\" /tmp/fly-logs5.txt)",
+      "Bash(awk '{print $1}')",
+      "Bash(grep -oE \"[A-Z]{2,5}: Timeframes not aligned \\\\\\([0-9]/[0-9]\\\\\\)\" /tmp/fly-logs7.txt)",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/symbols/target\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/symbols/watchlist\")",
+      "Bash(curl -sS \"https://trading-bot-igor-waw.fly.dev/api/watchlist\")",
+      "Bash(mvn -B test -Dtest=TradeDatabaseEntryCapTest)",
+      "Bash(curl -s https://trading-bot-igor-waw.fly.dev/api/trades/recent?limit=20)",
+      "Bash(curl -s 'https://trading-bot-igor-waw.fly.dev/api/trades?broker=alpaca&symbol=AAPL')",
+      "Bash(curl -s 'https://trading-bot-igor-waw.fly.dev/api/technical/AAPL?broker=alpaca')",
+      "Bash(curl -s 'https://trading-bot-igor-waw.fly.dev/api/system/regime')",
+      "Bash(curl -s 'https://trading-bot-igor-waw.fly.dev/api/account?broker=alpaca')",
+      "Bash(grep -E \"\\\\.java$\")",
+      "Bash(grep -E \"\\\\.tsx?$\")",
+      "Bash(mvn -q -pl . compile -DskipTests)",
+      "Bash(mvn compile *)",
+      "Bash(mvn test *)",
+      "Bash(mvn -q compile)",
+      "Bash(mvn -q compile -f trading-backend/pom.xml)",
+      "Bash(npx tsc *)",
+      "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml test)",
+      "Bash(mvn -q -DfailOnError=false -e compile -Dmaven.compiler.compilerArgs=\"\")",
+      "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml clean compile)",
+      "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml clean test)"
     ],
     "additionalDirectories": [
-      "/Users/igor/.claude/plans"
+      "/Users/igor/.claude/plans",
+      "/tmp"
     ]
   }
 }

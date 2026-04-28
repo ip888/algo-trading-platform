@@ -83,8 +83,15 @@ public class ExitStrategyManager {
         PDT_PARTIAL,      // Feature #17
         VELOCITY_DROP,    // Feature #21
         EOD_LOCK,         // Feature #23
-        QUICK_SCALP       // Feature #25
+        QUICK_SCALP,      // Feature #25
+        // Tier 2 / Tier 3 (Apr 2026)
+        SCALE_OUT_1R,     // Tier 2.6 — partial profit at +1R
+        TIME_STOP         // Tier 2.7 — N bars with no progress → exit
     }
+
+    // Bitmask slot used by markPartialExit to track that the 1R scale-out has been done.
+    // 1/2/3 are taken by the percentage-of-target partials; we use slot 4.
+    private static final int SCALE_OUT_1R_LEVEL = 4;
     
     /**
      * Evaluate all exit strategies and return the highest priority exit decision.
@@ -104,10 +111,28 @@ public class ExitStrategyManager {
                 "Take profit target hit", currentPrice);
         }
         
+        // Priority 2.5: Scale-out at +1R (Tier 2.6).
+        // Banking part of the position at +1R locks in a guaranteed profit and dramatically
+        // improves expectancy by neutralizing the back-half if price reverses to break-even.
+        ExitDecision scaleOut = evaluateScaleOutAtR(position, currentPrice);
+        if (scaleOut.type() != ExitType.NONE) {
+            return scaleOut;
+        }
+
         // Priority 3: Partial profit taking
         ExitDecision partialExit = evaluatePartialExit(position, currentPrice);
         if (partialExit.type() != ExitType.NONE) {
             return partialExit;
+        }
+
+        // Priority 3.5: Time-based stop (Tier 2.7).
+        // If a position has been open ≥ N bars (default 3 daily bars ≈ 3 trading days)
+        // and price hasn't moved more than X * R in either direction, abandon — the
+        // setup is dead, free the capital. Distinct from time-decay which only
+        // touches profitable positions.
+        ExitDecision timeStop = evaluateTimeStop(position, currentPrice);
+        if (timeStop.type() != ExitType.NONE) {
+            return timeStop;
         }
         
         // Priority 4: Volatility spike exit
@@ -243,6 +268,68 @@ public class ExitStrategyManager {
         return ExitDecision.noExit();
     }
     
+    /**
+     * Tier 2.6 — Scale-out at +1R.
+     *
+     * R is the per-share risk at entry: R = entry − stop. When price reaches entry + R,
+     * sell {@code config.getScaleOutFraction()} of the position (default 50%). The remaining
+     * shares ride toward the take-profit with the trailing stop now covering full risk.
+     *
+     * Fires at most once per position; tracked via {@code SCALE_OUT_1R_LEVEL} bitmask slot.
+     */
+    private ExitDecision evaluateScaleOutAtR(TradePosition position, double currentPrice) {
+        if (!config.isScaleOutEnabled()) return ExitDecision.noExit();
+        if (position.hasPartialExit(SCALE_OUT_1R_LEVEL)) return ExitDecision.noExit();
+
+        double r = position.entryPrice() - position.stopLoss();
+        if (r <= 0) return ExitDecision.noExit();
+
+        double trigger = position.entryPrice() + config.getScaleOutTriggerR() * r;
+        if (currentPrice < trigger) return ExitDecision.noExit();
+
+        double fraction = config.getScaleOutFraction();
+        return new ExitDecision(
+            ExitType.SCALE_OUT_1R,
+            fraction,
+            String.format("Scale-out at +%.2fR ($%.2f → $%.2f, locking %.0f%%)",
+                config.getScaleOutTriggerR(), position.entryPrice(), currentPrice, fraction * 100),
+            true,
+            currentPrice,
+            SCALE_OUT_1R_LEVEL
+        );
+    }
+
+    /**
+     * Tier 2.7 — Time-based stop.
+     *
+     * If a position has been open for at least {@code config.getTimeStopBars()} trading
+     * days and price hasn't moved more than {@code config.getTimeStopMaxMoveR()} × R
+     * in either direction, exit — the setup is dead, the capital is better deployed
+     * elsewhere. This catches the 'limped sideways for a week' scenario that the
+     * existing TIME_DECAY check (which requires profitability) misses.
+     */
+    private ExitDecision evaluateTimeStop(TradePosition position, double currentPrice) {
+        if (!config.isTimeStopEnabled()) return ExitDecision.noExit();
+
+        // Approximate "bars" as trading days held. 24h hold = ~1 daily bar.
+        long hoursHeld = Duration.between(position.entryTime(), Instant.now()).toHours();
+        long requiredHours = config.getTimeStopBars() * 24L;
+        if (hoursHeld < requiredHours) return ExitDecision.noExit();
+
+        double r = position.entryPrice() - position.stopLoss();
+        if (r <= 0) return ExitDecision.noExit();
+
+        double moveAbs = Math.abs(currentPrice - position.entryPrice());
+        double moveInR = moveAbs / r;
+        if (moveInR > config.getTimeStopMaxMoveR()) return ExitDecision.noExit();
+
+        double profitPercent = position.getProfitPercent(currentPrice);
+        return ExitDecision.fullExit(ExitType.TIME_STOP,
+            String.format("Time stop: %dh held, only %.2fR move (%.2f%% pnl) — abandoning",
+                hoursHeld, moveInR, profitPercent * 100),
+            currentPrice);
+    }
+
     /**
      * Get summary of exit strategy configuration.
      */

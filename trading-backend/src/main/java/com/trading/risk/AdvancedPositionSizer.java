@@ -150,12 +150,50 @@ public class AdvancedPositionSizer {
     private double calculateVolatilitySize(double equity, double currentPrice, double volatility) {
         // Target risk per trade
         double targetRisk = equity * config.getPositionSizingVolatilityRiskPercent();
-        
+
         // Adjust for volatility (higher vol = smaller position)
         double volatilityMultiplier = 1.0 / (1.0 + volatility * 10);
-        
+
         double positionValue = targetRisk * volatilityMultiplier;
         return positionValue / currentPrice;
+    }
+
+    /**
+     * ATR-aware sizing: shares = (equity × risk%) / (entry − stop).
+     * Total $-risk is capped regardless of underlying volatility — high-vol names
+     * get smaller share counts because their ATR-derived stops sit further away.
+     *
+     * Returns 0 if {@code stopPrice} is invalid (>= entry); caller should fall back
+     * to the conventional sizing path or skip the trade.
+     *
+     * Result is still capped by max-position-percent and min-position-percent so a
+     * tight stop on a small ATR can't blow past portfolio limits.
+     */
+    public double calculateAtrPositionSize(String symbol, double equity,
+                                           double currentPrice, double stopPrice) {
+        double deployable = calculateDeployableCapital(equity);
+        double riskPct = config.getAtrSizingRiskPercent();
+        double raw = RiskManager.calculateVolTargetedSize(deployable, currentPrice, stopPrice, riskPct);
+        if (raw <= 0) return 0.0;
+
+        double maxPercent = adaptiveManager != null
+            ? adaptiveManager.getAdaptiveMaxPositionPercent()
+            : config.getPositionSizingMaxPercent();
+        double maxSize = (deployable * maxPercent) / currentPrice;
+        double minSize = (deployable * config.getPositionSizingMinPercent()) / currentPrice;
+
+        double sized = Math.min(raw, maxSize);
+        sized = Math.max(sized, minSize);
+
+        logger.debug("{}: ATR sizing - risk={}%, entry={}, stop={}, raw={}, capped={} shares",
+            symbol,
+            String.format("%.2f", riskPct * 100),
+            String.format("%.2f", currentPrice),
+            String.format("%.2f", stopPrice),
+            String.format("%.2f", raw),
+            String.format("%.2f", sized));
+
+        return sized;
     }
     
     /**

@@ -1287,6 +1287,53 @@ public final class DashboardController {
             response.put("marketRegime", regime);
             response.put("targetSymbols", targetSyms);
 
+            // --- Per-symbol post-loss cooldown registry (Tier 1.1) ---
+            var postLossCooldowns = com.trading.portfolio.ProfileManager.getPostLossCooldowns();
+            List<Map<String, Object>> postLossList = new ArrayList<>();
+            for (var entry : postLossCooldowns.entrySet()) {
+                long remainingHours = Math.max(0, (entry.getValue() - now) / 3_600_000L);
+                postLossList.add(Map.of(
+                    "symbol", entry.getKey(),
+                    "expiresAt", entry.getValue(),
+                    "remainingHours", remainingHours
+                ));
+            }
+            response.put("postLossCooldowns", postLossList);
+            checks.add(Map.of(
+                "name", "Post-Loss Cooldowns (Tier 1.1)",
+                "status", postLossList.isEmpty() ? "GREEN" : "YELLOW",
+                "detail", postLossList.isEmpty()
+                    ? "No symbols in post-loss cooldown"
+                    : postLossList.size() + " symbol(s) cooling down: "
+                        + postLossList.stream()
+                            .map(c -> c.get("symbol") + " (" + c.get("remainingHours") + "h)")
+                            .toList()
+            ));
+
+            // --- Per-broker circuit breaker (Tier 3.10) ---
+            var cbSnap = com.trading.portfolio.ProfileManager.getCircuitBreakerSnapshot();
+            response.put("circuitBreakers", cbSnap);
+            boolean anyCbTripped = com.trading.portfolio.ProfileManager.isAnyCircuitBreakerTripped();
+            String cbDetail;
+            if (cbSnap.isEmpty()) {
+                cbDetail = "No broker circuit breakers active yet";
+            } else if (anyCbTripped) {
+                cbDetail = cbSnap.entrySet().stream()
+                    .filter(e -> Boolean.TRUE.equals(e.getValue().get("tripped")))
+                    .map(e -> e.getKey() + " TRIPPED (" + e.getValue().get("tripReason") + ")")
+                    .collect(java.util.stream.Collectors.joining(", "));
+            } else {
+                cbDetail = cbSnap.entrySet().stream()
+                    .map(e -> e.getKey() + ": " + e.getValue().get("consecutiveLosses") + "L streak, "
+                        + String.format("%.1f%%", ((Number) e.getValue().get("sessionDrawdownPct")).doubleValue() * 100) + " DD")
+                    .collect(java.util.stream.Collectors.joining(" | "));
+            }
+            checks.add(Map.of(
+                "name", "Session Circuit Breaker (Tier 3.10)",
+                "status", anyCbTripped ? "RED" : "GREEN",
+                "detail", cbDetail
+            ));
+
             // --- Portfolio Stop Loss Gate ---
             boolean portfolioHalt = com.trading.portfolio.ProfileManager.isPortfolioStopLossHaltActive();
             boolean drawdownHalt = com.trading.portfolio.ProfileManager.isMaxDrawdownHaltActive();

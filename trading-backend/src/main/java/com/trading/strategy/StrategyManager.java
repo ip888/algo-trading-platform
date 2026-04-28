@@ -183,6 +183,15 @@ public final class StrategyManager {
                 // RSI<30 on SH means the market has been RISING (inverse ETF fell) — wrong time to buy.
                 // Use MACD for all symbols in bear regime: it reads trend direction correctly on both
                 // regular stocks AND inverse ETFs.
+                //
+                // Tier 3.8 strict mode: in WEAK_BEAR, only manage existing longs — don't open new
+                // ones on a non-momentum asset. MACD can fire a BUY on a counter-trend bounce that
+                // historically hasn't paid here. If the user disables strict mode, fall back to the
+                // old behaviour (MACD for all positionQty values).
+                if (config != null && config.isRegimeStrictRoutingEnabled() && positionQty == 0 && !isMomentumAsset) {
+                    activeStrategy = "Bear Block (Weak Bear, strict)";
+                    yield new TradingSignal.Hold("WEAK_BEAR strict — no new longs on non-momentum asset");
+                }
                 activeStrategy = "MACD Trend (Weak Bear)";
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }

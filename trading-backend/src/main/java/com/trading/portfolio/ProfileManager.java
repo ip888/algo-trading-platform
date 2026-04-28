@@ -6,12 +6,17 @@ import com.trading.ai.SentimentAnalyzer;
 import com.trading.ai.SignalPredictor;
 import com.trading.api.ResilientBrokerClient;
 import com.trading.api.PDTRejectedException;
+import com.trading.analysis.AtrCalculator;
 import com.trading.analysis.MarketAnalyzer;
 import com.trading.config.Config;
+import com.trading.earnings.EarningsCalendarService;
 import com.trading.filters.MarketHoursFilter;
 import com.trading.filters.VolatilityFilter;
 import com.trading.persistence.TradeDatabase;
 import com.trading.protection.PDTProtection;
+import com.trading.risk.AdvancedPositionSizer;
+import com.trading.risk.CircuitBreakerState;
+import com.trading.risk.PostLossCooldownTracker;
 import com.trading.risk.RiskManager;
 import com.trading.risk.PortfolioRiskManager;
 import com.trading.risk.TradePosition;
@@ -135,6 +140,19 @@ public class ProfileManager implements Runnable {
     // STATIC: Track why buys were most recently blocked per symbol (gap-down, price gate, etc.)
     // Key = symbol, Value = reason string. Cleared when the buy is eventually allowed.
     private static final java.util.concurrent.ConcurrentHashMap<String, String> blockedBuys
+        = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // STATIC: Per-symbol post-loss cooldown shared across profiles & brokers — Tier 1.1.
+    // When MAIN closes TLT at a loss, EXPERIMENTAL must also see the cooldown so the bot
+    // can't churn the same losing name on the second profile.
+    private static volatile PostLossCooldownTracker postLossCooldown;
+
+    // STATIC: Earnings calendar — Tier 2.5. Single instance for cache reuse across profiles.
+    private static volatile EarningsCalendarService earningsCalendar;
+
+    // STATIC: Per-broker session circuit breakers — Tier 3.10. Map keyed by broker name so
+    // Alpaca and Tradier maintain independent loss streaks / drawdowns.
+    private static final java.util.concurrent.ConcurrentHashMap<String, CircuitBreakerState> circuitBreakers
         = new java.util.concurrent.ConcurrentHashMap<>();
 
     public static java.util.Map<String, String> getUrgentExitQueue() {
@@ -269,6 +287,31 @@ public class ProfileManager implements Runnable {
         this.orderTypeSelector = new SmartOrderTypeSelector();
         this.lendingTracker = new com.trading.lending.StockLendingTracker(config);
         this.optionsManager = new com.trading.options.OptionsStrategyManager(config);
+
+        // Initialize cross-profile singletons lazily (first profile to start wins; others reuse).
+        if (postLossCooldown == null) {
+            synchronized (ProfileManager.class) {
+                if (postLossCooldown == null) {
+                    postLossCooldown = new PostLossCooldownTracker(
+                        config.getPostLossCooldownMs(),
+                        config.getPostLossCooldownExtendedMs(),
+                        2);
+                }
+            }
+        }
+        if (earningsCalendar == null) {
+            synchronized (ProfileManager.class) {
+                if (earningsCalendar == null) {
+                    String key = System.getenv("ALPHA_VANTAGE_API_KEY");
+                    earningsCalendar = new EarningsCalendarService(
+                        key == null ? "" : key,
+                        config.getEarningsCacheTtlMs());
+                }
+            }
+        }
+        circuitBreakers.computeIfAbsent(brokerName, b -> new CircuitBreakerState(
+            config.getCircuitBreakerConsecutiveLosses(),
+            config.getCircuitBreakerSessionDrawdownPercent() / 100.0));
 
         // Cycle interval: MAIN reads MAIN_CYCLE_INTERVAL_MS, others read EXP_CYCLE_INTERVAL_MS
         // Defaults: MAIN=20s, EXPERIMENTAL=40s — reduces API calls vs old 10s for both
@@ -430,6 +473,27 @@ public class ProfileManager implements Runnable {
         if (com.trading.bot.TradingBot.isTradingPaused()) {
             logger.info("{} TRADING PAUSED — skipping new entries this cycle", profilePrefix);
             return;
+        }
+
+        // ========== EQUITY-CURVE CIRCUIT BREAKER (Tier 3.10) ==========
+        // Per-broker session breaker: trips on N consecutive losses or session drawdown.
+        // Auto-resets at NY day rollover. Skips new entries until the next session.
+        if (config.isCircuitBreakerEnabled()) {
+            CircuitBreakerState cb = circuitBreakers.get(brokerName);
+            if (cb != null) {
+                cb.rolloverIfNewDay(accountEquity);
+                cb.updateEquity(accountEquity);
+                if (cb.shouldHaltEntries()) {
+                    logger.warn("{} 🚨 CIRCUIT BREAKER {} — halting new entries (consec losses={}, dd={}%)",
+                        profilePrefix, cb.tripReason(), cb.getConsecutiveLosses(),
+                        String.format("%.2f", cb.getSessionDrawdownPct() * 100.0));
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] 🚨 CIRCUIT BREAKER %s — entries halted (resets next session)",
+                            profile.name(), cb.tripReason()),
+                        "ERROR");
+                    return;
+                }
+            }
         }
 
         // ========== PORTFOLIO-LEVEL STOP LOSS CHECK ==========
@@ -903,6 +967,67 @@ public class ProfileManager implements Runnable {
             return;
         }
 
+        // ========== PER-SYMBOL POST-LOSS COOLDOWN (Tier 1.1) ==========
+        // Distinct from the legacy minute-scale cooldown above: this is a 24h–72h block
+        // applied after losses on the *same* symbol, escalating after consecutive losses.
+        // Aimed at the TLT-loses-4x pattern. Other symbols keep trading.
+        if (config.isPerSymbolCooldownEnabled() && postLossCooldown != null) {
+            long now = System.currentTimeMillis();
+            if (postLossCooldown.isInCooldown(symbol, now)) {
+                long remHours = postLossCooldown.remainingMs(symbol, now) / (60L * 60 * 1000);
+                int losses = postLossCooldown.getConsecutiveLosses(symbol);
+                String reason = String.format("post-loss cooldown: %dh remaining (%d consec losses)", remHours, losses);
+                blockedBuys.put(symbol, reason);
+                logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⛔ %s post-loss cooldown: %dh left (%d consec losses)",
+                        profile.name(), symbol, remHours, losses),
+                    "WARN");
+                return;
+            }
+        }
+
+        // ========== NO-TRADE OPEN WINDOW (Tier 3.9) ==========
+        // Block fresh entries during the noisy first N minutes of the regular session
+        // (default 30m). Opening auction prints have a poor signal-to-noise ratio.
+        if (config.isNoTradeOpenWindowEnabled()
+                && marketHoursFilter.isInOpeningWindow(config.getNoTradeOpenWindowMinutes())) {
+            String reason = "opening-window block: first " + config.getNoTradeOpenWindowMinutes() + "min";
+            blockedBuys.put(symbol, reason);
+            logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] ⛔ %s blocked: first %d min after open",
+                    profile.name(), symbol, config.getNoTradeOpenWindowMinutes()),
+                "INFO");
+            return;
+        }
+
+        // ========== EARNINGS BLACKOUT (Tier 2.5) ==========
+        // Avoid entering positions within ±N hours of an earnings announcement.
+        // Earnings days are gap-risk events and our backtests show negative EV around them.
+        if (config.isEarningsBlackoutEnabled() && earningsCalendar != null) {
+            try {
+                boolean inBlackout = earningsCalendar.isInBlackout(
+                    symbol,
+                    java.time.Instant.now(),
+                    config.getEarningsBlackoutHoursBefore(),
+                    config.getEarningsBlackoutHoursAfter());
+                if (inBlackout) {
+                    String reason = String.format("earnings blackout: ±%d/±%dh window",
+                        config.getEarningsBlackoutHoursBefore(),
+                        config.getEarningsBlackoutHoursAfter());
+                    blockedBuys.put(symbol, reason);
+                    logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⛔ %s earnings blackout active", profile.name(), symbol),
+                        "WARN");
+                    return;
+                }
+            } catch (Exception e) {
+                logger.debug("{} Earnings check failed for {}: {}", profilePrefix, symbol, e.getMessage());
+            }
+        }
+
         // ========== PRICE IMPROVEMENT CHECK ==========
         // After a loss exit, only re-enter if price has dropped at least 1% from exit price.
         // Prevents buying back at the same price you just sold at a loss.
@@ -999,18 +1124,55 @@ public class ProfileManager implements Runnable {
         // ========== POSITION LIMIT CHECK ==========
         // Check position limit BEFORE calculating position size or running AI
         if (portfolio.getActivePositionCount() >= config.getMaxPositionsAtOnce()) {
-            logger.warn("{} ⚠️ Max positions reached ({}/{}), skipping new entry for {}", 
-                profilePrefix, 
+            logger.warn("{} ⚠️ Max positions reached ({}/{}), skipping new entry for {}",
+                profilePrefix,
                 portfolio.getActivePositionCount(),
                 config.getMaxPositionsAtOnce(),
                 symbol);
-            
+
             TradingWebSocketHandler.broadcastActivity(
                 String.format("[%s] ⚠️ SKIPPED: %s (max %d positions reached)",
                     profile.name(), symbol, config.getMaxPositionsAtOnce()),
                 "WARN"
             );
             return;
+        }
+
+        // ========== CORRELATION / CONCENTRATION CAP (Tier 2.4) ==========
+        // Block entry if we'd exceed N concurrent positions whose pairwise correlation
+        // is above {threshold}. A loss event in correlated names compounds (SPY+QQQ+VTI
+        // all dump together), so cap concentration rather than relying on diversification.
+        if (config.isCorrelationCapEnabled() && portfolio.getActivePositionCount() > 0) {
+            try {
+                java.util.List<String> openSymbols = new java.util.ArrayList<>(portfolio.getActiveStoredSymbols());
+                if (!openSymbols.contains(symbol)) {
+                    java.util.List<String> probe = new java.util.ArrayList<>(openSymbols);
+                    probe.add(symbol);
+                    var analysis = correlationCalculator.analyzePortfolio(probe);
+                    double thr = config.getCorrelationCapThreshold();
+                    int maxConc = config.getCorrelationCapMaxConcurrent();
+                    int relatedHits = 0;
+                    for (var pair : analysis.highCorrelations()) {
+                        if ((pair.symbol1().equalsIgnoreCase(symbol) || pair.symbol2().equalsIgnoreCase(symbol))
+                                && Math.abs(pair.correlation()) >= thr) {
+                            relatedHits++;
+                        }
+                    }
+                    if (relatedHits >= maxConc) {
+                        String reason = String.format("correlation cap: %d existing positions ≥%.2f corr (max %d)",
+                            relatedHits, thr, maxConc);
+                        blockedBuys.put(symbol, reason);
+                        logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] ⛔ %s correlation cap: %d ≥%.2f (max %d)",
+                                profile.name(), symbol, relatedHits, thr, maxConc),
+                            "WARN");
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                logger.debug("{} Correlation cap check failed for {}: {}", profilePrefix, symbol, e.getMessage());
+            }
         }
 
         // ========== PENDING ORDER CHECK ==========
@@ -1299,10 +1461,68 @@ public class ProfileManager implements Runnable {
 
         logger.info("{} {}: 🎯 Final position sizing: {} shares",
             profilePrefix, symbol, positionSize);
-        
-        // Create position with profile-specific risk parameters
-        var stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
-        var takeProfit = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+
+        // ========== ATR-SCALED STOP / TAKE-PROFIT (Tier 1.2) ==========
+        // Replaces flat % stops with ATR-derived stops so volatile names get wider stops
+        // (don't get noise-stopped) and quiet names get tighter ones (don't bleed slowly).
+        // Falls back to profile flat % if ATR can't be computed (insufficient bars).
+        double stopLoss;
+        double takeProfit;
+        double atr = 0.0;
+        if (config.isAtrStopsEnabled()) {
+            try {
+                int period = config.getAtrPeriodBars();
+                var atrBars = client.getBars(symbol, "1Day", period + 5);
+                atr = AtrCalculator.atr(atrBars, period);
+            } catch (Exception e) {
+                logger.debug("{} ATR fetch failed for {}: {}", profilePrefix, symbol, e.getMessage());
+            }
+        }
+        if (atr > 0.0) {
+            stopLoss = RiskManager.calculateAtrStopLoss(
+                currentPrice, atr,
+                config.getAtrStopMultiplier(),
+                config.getAtrStopFloorPercent(),
+                config.getAtrStopCeilingPercent());
+            takeProfit = RiskManager.calculateAtrTakeProfit(
+                currentPrice, atr,
+                config.getAtrTakeProfitMultiplier(),
+                config.getAtrStopFloorPercent());
+            logger.info("{} {}: ATR={} (n={}) → stop=${} ({}%) tp=${} ({}%)",
+                profilePrefix, symbol,
+                String.format("%.4f", atr),
+                config.getAtrPeriodBars(),
+                String.format("%.2f", stopLoss),
+                String.format("%.2f", (currentPrice - stopLoss) / currentPrice * 100.0),
+                String.format("%.2f", takeProfit),
+                String.format("%.2f", (takeProfit - currentPrice) / currentPrice * 100.0));
+        } else {
+            stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
+            takeProfit = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+        }
+
+        // ========== ATR-BASED VOL-TARGETED SIZING (Tier 1.3) ==========
+        // Override the earlier sizing if ATR-based stop is available: ensures total $-risk is
+        // capped at risk_per_trade × equity regardless of per-name volatility.
+        if (config.isAtrSizingEnabled() && atr > 0.0 && stopLoss > 0.0 && stopLoss < currentPrice) {
+            try {
+                AdvancedPositionSizer atrSizer = new AdvancedPositionSizer(config, database);
+                atrSizer.setAdaptiveManager(adaptiveManager);
+                double volTargetedSize = atrSizer.calculateAtrPositionSize(
+                    symbol, availableCapital, currentPrice, stopLoss);
+                if (volTargetedSize > 0) {
+                    double prev = positionSize;
+                    positionSize = Math.min(positionSize, volTargetedSize);
+                    logger.info("{} {}: ATR vol-targeted sizing: {} → {} shares (risk={}%)",
+                        profilePrefix, symbol,
+                        String.format("%.3f", prev),
+                        String.format("%.3f", positionSize),
+                        String.format("%.2f", config.getAtrSizingRiskPercent() * 100.0));
+                }
+            } catch (Exception e) {
+                logger.debug("{} ATR sizing failed for {}: {}", profilePrefix, symbol, e.getMessage());
+            }
+        }
         
         var newPosition = new TradePosition(
             symbol,
@@ -1491,12 +1711,24 @@ public class ProfileManager implements Runnable {
             lastExitPrices.put(symbol, currentPrice);
             logger.info("{} {} recorded loss exit at ${} — re-entry requires {}% price improvement",
                 profilePrefix, symbol, String.format("%.2f", currentPrice), MIN_PRICE_IMPROVEMENT_PERCENT);
+            // Tier 1.1: feed per-symbol post-loss cooldown (escalates after consecutive losses).
+            if (postLossCooldown != null) {
+                long applied = postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+                logger.info("{} {} post-loss cooldown applied: {}h ({} consec losses)",
+                    profilePrefix, symbol, applied / (60L * 60 * 1000),
+                    postLossCooldown.getConsecutiveLosses(symbol));
+            }
         } else {
             // Profitable exit — allow free re-entry at any price, reset consecutive SL counter.
             lastExitPrices.remove(symbol);
             consecutiveStopLosses.remove(symbol);
+            if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
             logger.debug("{} {} consecutive SL counter reset after profitable exit", profilePrefix, symbol);
         }
+
+        // Tier 3.10: feed circuit breaker (per-broker session breaker on consecutive $-losses).
+        CircuitBreakerState cb = circuitBreakers.get(brokerName);
+        if (cb != null) cb.recordTrade(pnl);
 
         // Track day trades locally for non-Alpaca brokers (Alpaca syncs from broker API each cycle).
         // A day trade = position opened and closed on the same calendar day (ET timezone).
@@ -1638,9 +1870,17 @@ public class ProfileManager implements Runnable {
                                 // Set re-entry cooldown after full exit
                                 stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                                 // Record exit price if loss — require price improvement before re-entry
+                                double tradePnl = (currentPrice - entryPrice) * qty;
                                 if (currentPrice < entryPrice) {
                                     lastExitPrices.put(symbol, currentPrice);
+                                    if (postLossCooldown != null) {
+                                        postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+                                    }
+                                } else if (postLossCooldown != null) {
+                                    postLossCooldown.recordWin(symbol);
                                 }
+                                CircuitBreakerState cbExit = circuitBreakers.get(brokerName);
+                                if (cbExit != null) cbExit.recordTrade(tradePnl);
                             }
                             
                             TradingWebSocketHandler.broadcastActivity(
@@ -1690,10 +1930,9 @@ public class ProfileManager implements Runnable {
                         // Use direct order for max-loss exit (bypass circuit breaker - critical protective exit)
                         client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                         portfolio.setPosition(symbol, Optional.empty());
-                        // Set re-entry cooldown after max-loss exit
-                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
-                        // Record exit price — require price improvement before re-entry
-                        lastExitPrices.put(symbol, currentPrice);
+                        // Set re-entry cooldown + per-symbol cooldown + circuit-breaker tracking.
+                        applyPostExitCooldown(symbol, currentPrice, (currentPrice - entryPrice) * qty,
+                            profilePrefix, "MAX_LOSS_UNTRACKED");
                         logger.info("{} ✅ Max loss exit order placed for untracked position {}",
                             profilePrefix, symbol);
                         
@@ -1779,7 +2018,14 @@ public class ProfileManager implements Runnable {
         stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
         if (pnl < 0) {
             lastExitPrices.put(symbol, exitPrice);
+            if (postLossCooldown != null) {
+                postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+            }
+        } else if (pnl > 0 && postLossCooldown != null) {
+            postLossCooldown.recordWin(symbol);
         }
+        CircuitBreakerState cb = circuitBreakers.get(brokerName);
+        if (cb != null) cb.recordTrade(pnl);
         logger.info("{} {} placed on {}-minute re-entry cooldown after {} exit (pnl=${})",
             profilePrefix, symbol, cooldownMs / 60000, exitKind, String.format("%.2f", pnl));
     }
@@ -2404,6 +2650,9 @@ public class ProfileManager implements Runnable {
                         stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                         consecutiveStopLosses.remove(symbol);
                         lastExitPrices.remove(symbol);
+                        if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
+                        CircuitBreakerState cbTp = circuitBreakers.get(brokerName);
+                        if (cbTp != null) cbTp.recordTrade(pnlDollars);
 
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
@@ -2485,6 +2734,12 @@ public class ProfileManager implements Runnable {
                         stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
                         // Record exit price — require price improvement before re-entry
                         lastExitPrices.put(symbol, currentPrice);
+                        // Tier 1.1 + 3.10: feed per-symbol post-loss cooldown and session circuit breaker.
+                        if (postLossCooldown != null) {
+                            postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+                        }
+                        CircuitBreakerState cbSl = circuitBreakers.get(brokerName);
+                        if (cbSl != null) cbSl.recordTrade(pnlDollars);
                         logger.warn("{} {} placed on {}-minute COOLDOWN after stop loss - no re-entry until {}",
                             profilePrefix, symbol, cooldownMs / 60000,
                             java.time.Instant.ofEpochMilli(System.currentTimeMillis() + cooldownMs));
@@ -2751,6 +3006,36 @@ public class ProfileManager implements Runnable {
     public static double getLatestVixSnapshot() { return latestVixSnapshot; }
     public static String getLatestRegimeSnapshot() { return latestRegimeSnapshot; }
     public static String getLatestTargetSymbolsSnapshot() { return latestTargetSymbolsSnapshot; }
+
+    /** Per-symbol post-loss cooldown registry (Tier 1.1). Empty map if disabled / no cooldowns. */
+    public static java.util.Map<String, Long> getPostLossCooldowns() {
+        if (postLossCooldown == null) return java.util.Map.of();
+        long now = System.currentTimeMillis();
+        var snap = postLossCooldown.snapshot();
+        var live = new java.util.LinkedHashMap<String, Long>();
+        snap.forEach((sym, exp) -> { if (exp > now) live.put(sym, exp); });
+        return live;
+    }
+
+    /** Per-broker circuit breaker snapshot for dashboard (Tier 3.10). */
+    public static java.util.Map<String, java.util.Map<String, Object>> getCircuitBreakerSnapshot() {
+        var out = new java.util.LinkedHashMap<String, java.util.Map<String, Object>>();
+        circuitBreakers.forEach((broker, cb) -> {
+            var info = new java.util.HashMap<String, Object>();
+            info.put("tripped", cb.shouldHaltEntries());
+            var reason = cb.tripReason();
+            info.put("tripReason", reason == null ? null : reason.name());
+            info.put("consecutiveLosses", cb.getConsecutiveLosses());
+            info.put("sessionDrawdownPct", cb.getSessionDrawdownPct());
+            out.put(broker, info);
+        });
+        return out;
+    }
+
+    /** True iff any broker's circuit breaker is currently tripped. */
+    public static boolean isAnyCircuitBreakerTripped() {
+        return circuitBreakers.values().stream().anyMatch(CircuitBreakerState::shouldHaltEntries);
+    }
 
     /**
      * Returns milliseconds until the PDT day-trade count resets.

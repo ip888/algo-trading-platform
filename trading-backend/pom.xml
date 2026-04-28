@@ -166,9 +166,6 @@
                 <configuration>
                     <source>25</source>
                     <target>25</target>
-                    <compilerArgs>
-                        <arg>--enable-preview</arg>
-                    </compilerArgs>
                 </configuration>
             </plugin>
             <plugin>
@@ -221,7 +218,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
                 <configuration>
-                    <argLine>--enable-preview -Xmx512m</argLine>
+                    <argLine>-Xmx512m</argLine>
                 </configuration>
             </plugin>
             

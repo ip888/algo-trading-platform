@@ -246,9 +246,32 @@ public class ProfileManager implements Runnable {
         var initialVix = volatilityFilter.getCurrentVIX();
         var initialSymbols = symbolSelector.selectSymbols(initialVix);
         
-        this.portfolio = new PortfolioManager(initialSymbols, capital);        
+        this.portfolio = new PortfolioManager(initialSymbols, capital);
         // Sync existing positions from Alpaca using profile-specific risk settings
         portfolio.syncWithAlpaca(client.getDelegate(), profile.takeProfitPercent(), profile.stopLossPercent());
+
+        // Override sync-time profile defaults with persisted DB stops/TPs/entry-times where available.
+        // Without this, every restart silently relaxes stops on fractional positions to the profile
+        // default (the META incident: real ~1.5% stop replaced with 2% default after deploy).
+        try {
+            for (var rec : database.getOpenTradeRecords(brokerName)) {
+                var existing = portfolio.getPosition(rec.symbol());
+                if (existing.isEmpty()) continue; // sync didn't pick it up — likely closed at broker
+                var prev = existing.get();
+                var restored = new TradePosition(
+                    rec.symbol(), prev.entryPrice(), prev.quantity(),
+                    rec.stopLoss(), rec.takeProfit(), rec.entryTime(),
+                    prev.entryPrice(), rec.partialExitsExecuted()
+                );
+                portfolio.setPosition(rec.symbol(), Optional.of(restored));
+                logger.info("[{}] Restored persisted stops for {}: SL=${} TP=${} partialMask={}",
+                    profile.name(), rec.symbol(),
+                    String.format("%.2f", rec.stopLoss()), String.format("%.2f", rec.takeProfit()),
+                    rec.partialExitsExecuted());
+            }
+        } catch (Exception e) {
+            logger.warn("[{}] Failed to restore persisted stops from DB: {}", profile.name(), e.getMessage());
+        }
         
         // Create adaptive parameter manager for autonomous tuning
         this.adaptiveManager = new com.trading.autonomous.AdaptiveParameterManager(config, database);
@@ -1630,8 +1653,14 @@ public class ProfileManager implements Runnable {
                     logger.info("{} {}: ✅ Native GTC stop-loss placed at ${} (crash-safe)",
                         profilePrefix, symbol, String.format("%.2f", stopLoss));
                 } catch (Exception stopEx) {
-                    logger.warn("{} {}: ⚠️ Could not place native stop-loss ({}), using client-side only",
+                    // Loud signal — fractional position with no broker-side stop is the META-incident
+                    // failure mode (only client-side polling stands between this position and unbounded loss).
+                    logger.error("{} {}: 🚨 NATIVE STOP FAILED on fractional position ({}). Position is protected ONLY by client-side polling — restart or outage = unbounded loss exposure.",
                         profilePrefix, symbol, stopEx.getMessage());
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] 🚨 BROKER STOP FAILED: %s (fractional) — only client-side stop active. Investigate immediately.",
+                            profile.name(), symbol),
+                        "ERROR");
                 }
 
                 TradingWebSocketHandler.broadcastActivity(
@@ -1762,9 +1791,10 @@ public class ProfileManager implements Runnable {
         // Only update if stop-loss actually changed
         if (updatedPosition.stopLoss() > position.stopLoss()) {
             portfolio.setPosition(symbol, Optional.of(updatedPosition));
-            
+            database.updateStop(symbol, brokerName, updatedPosition.stopLoss());
+
             logger.info("{} {}: Trailing stop updated: ${} -> ${}",
-                profilePrefix, symbol, 
+                profilePrefix, symbol,
                 String.format("%.2f", position.stopLoss()),
                 String.format("%.2f", updatedPosition.stopLoss()));
         }
@@ -1861,8 +1891,9 @@ public class ProfileManager implements Runnable {
                                     profilePrefix, symbol, String.format("%.1f", exitDecision.quantity() * 100));
                                 // Mark the partial exit level so it won't re-trigger next cycle
                                 if (exitDecision.partialLevel() > 0) {
-                                    portfolio.setPosition(symbol,
-                                        Optional.of(position.markPartialExit(exitDecision.partialLevel())));
+                                    var marked = position.markPartialExit(exitDecision.partialLevel());
+                                    portfolio.setPosition(symbol, Optional.of(marked));
+                                    database.updatePartialExits(symbol, brokerName, marked.partialExitsExecuted());
                                 }
                             } else {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
@@ -1918,9 +1949,76 @@ public class ProfileManager implements Runnable {
                     continue; // Position handled by enhanced strategy
                 }
                 
-                // Fallback: Handle untracked positions with simple max loss logic
+                // First sight of an untracked position: register it (with DB-persisted stops if available,
+                // or freshly reconstructed tight stops otherwise) AND attempt a native broker stop. This
+                // closes the META-incident hole where fractional fills + post-restart drift left positions
+                // completely unprotected. Falls through to the loss-threshold safety net below.
+                var existingDbRecord = database.getOpenTradeRecords(brokerName).stream()
+                    .filter(r -> r.symbol().equals(symbol)).findFirst();
+
+                double recoveredStop;
+                double recoveredTp;
+                java.time.Instant recoveredEntryTime;
+                if (existingDbRecord.isPresent()) {
+                    var rec = existingDbRecord.get();
+                    recoveredStop = rec.stopLoss();
+                    recoveredTp = rec.takeProfit();
+                    recoveredEntryTime = rec.entryTime();
+                    logger.info("{} {}: untracked position — restored stops from DB (SL=${} TP=${})",
+                        profilePrefix, symbol,
+                        String.format("%.2f", recoveredStop), String.format("%.2f", recoveredTp));
+                } else {
+                    double profileSlFraction = Math.max(profile.stopLossPercent(), 1.0) / 100.0;
+                    double profileTpFraction = Math.max(profile.takeProfitPercent(), 2.0) / 100.0;
+                    double idealStop = Math.max(entryPrice * (1.0 - profileSlFraction), currentPrice * 0.985);
+                    recoveredStop = Math.min(idealStop, currentPrice * 0.999);
+                    recoveredTp = entryPrice * (1.0 + profileTpFraction);
+                    recoveredEntryTime = java.time.Instant.now().minus(java.time.Duration.ofHours(24));
+                    database.recordTrade(symbol, profile.strategyType(), profile.name(), brokerName,
+                        recoveredEntryTime, entryPrice, qty, recoveredStop, recoveredTp);
+                    logger.warn("{} {}: untracked position with no DB record — reconstructed SL=${} TP=${}",
+                        profilePrefix, symbol,
+                        String.format("%.2f", recoveredStop), String.format("%.2f", recoveredTp));
+                }
+
+                boolean hasOpenStop = false;
+                try {
+                    var openOrders = client.getOpenOrders(symbol);
+                    if (openOrders != null && openOrders.isArray()) {
+                        for (var ord : openOrders) {
+                            String otype = ord.has("type") ? ord.get("type").asText("").toLowerCase() : "";
+                            if (otype.contains("stop")) { hasOpenStop = true; break; }
+                        }
+                    }
+                } catch (Exception ignored) { /* best-effort detection */ }
+
+                if (!hasOpenStop) {
+                    try {
+                        client.placeNativeStopOrder(symbol, qty, recoveredStop);
+                        logger.warn("{} {}: ⚠️ orphan position recovered — native GTC stop placed @ ${}",
+                            profilePrefix, symbol, String.format("%.2f", recoveredStop));
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] ⚠️ Recovered orphan %s — native stop @ $%.2f",
+                                profile.name(), symbol, recoveredStop),
+                            "WARN");
+                    } catch (Exception stopEx) {
+                        logger.error("{} {}: 🚨 ORPHAN POSITION WITHOUT BROKER STOP ({}). Client-side max-loss is the only safety net.",
+                            profilePrefix, symbol, stopEx.getMessage());
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] 🚨 UNPROTECTED orphan %s — broker stop FAILED (%s)",
+                                profile.name(), symbol, stopEx.getMessage()),
+                            "ERROR");
+                    }
+                }
+
+                int recoveredPartialMask = existingDbRecord.map(TradeDatabase.OpenTradeRecord::partialExitsExecuted).orElse(0);
+                portfolio.setPosition(symbol,
+                    Optional.of(new TradePosition(symbol, entryPrice, qty, recoveredStop, recoveredTp,
+                        recoveredEntryTime, entryPrice, recoveredPartialMask)));
+
+                // Loss-threshold safety net (also runs after registration as belt-and-suspenders).
                 double lossPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-                
+
                 if (lossPercent <= -config.getMaxLossPercent()) {
                     logger.warn("{} ⚠️ MAX LOSS EXIT (untracked): {} down {}% (limit: -{}%)",
                         profilePrefix, symbol, String.format("%.2f", Math.abs(lossPercent)), String.format("%.1f", config.getMaxLossPercent()));

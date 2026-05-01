@@ -89,6 +89,9 @@ public class TradeDatabase {
         // Broker index must be created AFTER the broker column migration above
         runMigration("CREATE INDEX IF NOT EXISTS idx_broker_status ON trades(broker, status)",
             "Schema migration: Added idx_broker_status index");
+
+        runMigration("ALTER TABLE trades ADD COLUMN partial_exits_executed INTEGER DEFAULT 0",
+            "Schema migration: Added 'partial_exits_executed' column (bitmask of partial-exit levels fired)");
     }
 
     /**
@@ -280,7 +283,55 @@ public class TradeDatabase {
 
     /** A minimal record for restoring in-memory portfolio from the database on restart. */
     public record OpenTradeRecord(String symbol, double entryPrice, double quantity,
-                                   double stopLoss, double takeProfit, java.time.Instant entryTime) {}
+                                   double stopLoss, double takeProfit, java.time.Instant entryTime,
+                                   int partialExitsExecuted) {}
+
+    /**
+     * Update the stop-loss on the most recent OPEN trade for (symbol, broker).
+     * Used to persist trailing-stop trail-ups so they survive a restart — without this,
+     * a restart silently resets the position to the original entry-time stop, undoing every
+     * trail-up that locked profit.
+     */
+    public void updateStop(String symbol, String broker, double newStopLoss) {
+        String sql = """
+            UPDATE trades SET stop_loss = ?
+            WHERE id = (SELECT id FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN'
+                        ORDER BY entry_time DESC LIMIT 1)
+            """;
+        long stamp = lock.writeLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setDouble(1, newStopLoss);
+            stmt.setString(2, symbol);
+            stmt.setString(3, broker);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            logger.error("updateStop failed for {} ({}): {}", symbol, broker, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /**
+     * Persist the partial-exit bitmask so a restart doesn't re-fire already-executed scale-outs.
+     */
+    public void updatePartialExits(String symbol, String broker, int partialExitsExecuted) {
+        String sql = """
+            UPDATE trades SET partial_exits_executed = ?
+            WHERE id = (SELECT id FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN'
+                        ORDER BY entry_time DESC LIMIT 1)
+            """;
+        long stamp = lock.writeLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, partialExitsExecuted);
+            stmt.setString(2, symbol);
+            stmt.setString(3, broker);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            logger.error("updatePartialExits failed for {} ({}): {}", symbol, broker, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
 
     /**
      * Return all OPEN trades for a broker so the in-memory portfolio can be restored on startup.
@@ -290,11 +341,12 @@ public class TradeDatabase {
     public java.util.List<OpenTradeRecord> getOpenTradeRecords(String broker) {
         String sql = """
             SELECT symbol,
-                   SUM(quantity)    AS total_qty,
-                   AVG(entry_price) AS avg_entry,
-                   MIN(stop_loss)   AS min_sl,
-                   MAX(take_profit) AS max_tp,
-                   MAX(entry_time)  AS last_entry
+                   SUM(quantity)               AS total_qty,
+                   AVG(entry_price)            AS avg_entry,
+                   MIN(stop_loss)              AS min_sl,
+                   MAX(take_profit)            AS max_tp,
+                   MAX(entry_time)             AS last_entry,
+                   MAX(partial_exits_executed) AS partial_exits
             FROM trades
             WHERE broker = ? AND status = 'OPEN'
             GROUP BY symbol
@@ -315,7 +367,8 @@ public class TradeDatabase {
                         rs.getDouble("total_qty"),
                         rs.getDouble("min_sl"),
                         rs.getDouble("max_tp"),
-                        entryTime
+                        entryTime,
+                        rs.getInt("partial_exits")
                     ));
                 }
             }

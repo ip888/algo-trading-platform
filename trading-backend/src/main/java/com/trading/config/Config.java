@@ -553,11 +553,13 @@ public class Config {
     }
     
     /**
-     * Get maximum loss percent before auto-exit.
-     * Default: 10.0 (10%)
+     * Get maximum loss percent before auto-exit on UNTRACKED positions
+     * (positions where the bot has no in-memory TradePosition / stop info).
+     * Tightened from 10% → 3% after the META incident: a 10% threshold was
+     * silently relaxing every restart's stops from ~1.5% to ~10%.
      */
     public double getMaxLossPercent() {
-        return getDoubleProperty("MAX_LOSS_PERCENT", 10.0);
+        return getDoubleProperty("MAX_LOSS_PERCENT", 3.0);
     }
     
     /**

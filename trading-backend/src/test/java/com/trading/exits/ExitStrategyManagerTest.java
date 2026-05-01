@@ -121,10 +121,10 @@ class ExitStrategyManagerTest {
                 ENTRY_PRICE * 1.10,
                 Instant.now()
             );
-            double priceAt5PctLoss = ENTRY_PRICE * 0.95;  // -5% loss, below default 7% threshold
+            double priceAt3PctLoss = ENTRY_PRICE * 0.97;  // -3% loss, below default 5% threshold
 
             ExitDecision decision = exitStrategyManager.evaluateExit(
-                position, priceAt5PctLoss, NORMAL_VOLATILITY, new HashMap<>()
+                position, priceAt3PctLoss, NORMAL_VOLATILITY, new HashMap<>()
             );
 
             assertNotEquals(ExitType.CATASTROPHIC_LOSS, decision.type(),

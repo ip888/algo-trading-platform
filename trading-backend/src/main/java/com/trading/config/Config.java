@@ -568,11 +568,11 @@ public class Config {
      * this threshold, the bot force-sells regardless of trailing-stop, time-stop,
      * scale-out, or any strategy state. Last-line defense against the META scenario
      * (broker-side stop failed silently, position drifted past the strategy stop).
-     * Default: 7%. Set higher than the per-strategy stop-loss percent so it only
+     * Default: 5%. Set higher than the per-strategy stop-loss percent so it only
      * fires when normal stops fail to trigger.
      */
     public double getCatastrophicLossPercent() {
-        return getDoubleProperty("CATASTROPHIC_LOSS_PERCENT", 7.0);
+        return getDoubleProperty("CATASTROPHIC_LOSS_PERCENT", 5.0);
     }
 
     public boolean isCatastrophicLossExitEnabled() {

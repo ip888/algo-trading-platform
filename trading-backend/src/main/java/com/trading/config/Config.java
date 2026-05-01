@@ -561,7 +561,38 @@ public class Config {
     public double getMaxLossPercent() {
         return getDoubleProperty("MAX_LOSS_PERCENT", 3.0);
     }
-    
+
+    /**
+     * Per-position catastrophic-loss exit threshold (percent, positive number).
+     * Trumps every other exit rule — if a tracked position's unrealized loss reaches
+     * this threshold, the bot force-sells regardless of trailing-stop, time-stop,
+     * scale-out, or any strategy state. Last-line defense against the META scenario
+     * (broker-side stop failed silently, position drifted past the strategy stop).
+     * Default: 7%. Set higher than the per-strategy stop-loss percent so it only
+     * fires when normal stops fail to trigger.
+     */
+    public double getCatastrophicLossPercent() {
+        return getDoubleProperty("CATASTROPHIC_LOSS_PERCENT", 7.0);
+    }
+
+    public boolean isCatastrophicLossExitEnabled() {
+        return getBooleanProperty("CATASTROPHIC_LOSS_EXIT_ENABLED", true);
+    }
+
+    /**
+     * Hours before a known earnings announcement to force-exit any open position
+     * in that symbol. Distinct from {@link #getEarningsBlackoutHoursBefore()},
+     * which only blocks new ENTRIES. Default 24h — set to 0 to disable the
+     * pre-earnings exit while keeping entry blackout intact.
+     */
+    public int getPreEarningsExitHoursBefore() {
+        return getIntProperty("PRE_EARNINGS_EXIT_HOURS_BEFORE", 24);
+    }
+
+    public boolean isPreEarningsExitEnabled() {
+        return getBooleanProperty("PRE_EARNINGS_EXIT_ENABLED", true);
+    }
+
     /**
      * Get maximum hold time in hours before auto-exit.
      * Default: 48 hours (2 days)

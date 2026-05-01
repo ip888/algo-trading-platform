@@ -86,7 +86,10 @@ public class ExitStrategyManager {
         QUICK_SCALP,      // Feature #25
         // Tier 2 / Tier 3 (Apr 2026)
         SCALE_OUT_1R,     // Tier 2.6 — partial profit at +1R
-        TIME_STOP         // Tier 2.7 — N bars with no progress → exit
+        TIME_STOP,        // Tier 2.7 — N bars with no progress → exit
+        // META-incident hardening
+        CATASTROPHIC_LOSS, // Trumps everything: position loss ≥ catastrophicLossPercent
+        EARNINGS_PROTECTION // Pre-earnings force-exit (≥ N hours before announcement)
     }
 
     // Bitmask slot used by markPartialExit to track that the 1R scale-out has been done.
@@ -96,9 +99,24 @@ public class ExitStrategyManager {
     /**
      * Evaluate all exit strategies and return the highest priority exit decision.
      */
-    public ExitDecision evaluateExit(TradePosition position, double currentPrice, 
+    public ExitDecision evaluateExit(TradePosition position, double currentPrice,
                                      double currentVolatility, Map<String, Double> portfolioPositions) {
-        
+
+        // Priority 0: Catastrophic loss (trumps everything).
+        // Last-line defense for the META scenario — a broker-side stop that silently
+        // failed (e.g. fractional position) would let a position drift far past the
+        // strategy stop. This check forces a market exit regardless of other rules.
+        if (config.isCatastrophicLossExitEnabled()) {
+            double lossPercent = position.getProfitPercent(currentPrice) * 100.0;
+            double threshold = config.getCatastrophicLossPercent();
+            if (lossPercent <= -threshold) {
+                return ExitDecision.fullExit(ExitType.CATASTROPHIC_LOSS,
+                    String.format("Catastrophic loss %.2f%% (≥ %.1f%% threshold)",
+                        Math.abs(lossPercent), threshold),
+                    currentPrice);
+            }
+        }
+
         // Priority 1: Stop loss (always highest priority)
         if (position.isStopLossHit(currentPrice)) {
             return ExitDecision.fullExit(ExitType.STOP_LOSS, 

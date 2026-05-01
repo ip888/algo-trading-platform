@@ -86,6 +86,53 @@ class ExitStrategyManagerTest {
     }
     
     @Nested
+    @DisplayName("Catastrophic Loss Tests")
+    class CatastrophicLossTests {
+
+        @Test
+        @DisplayName("Catastrophic loss trumps strategy state when SL never fired")
+        void catastrophicLossOverridesEvenWhenStopLossNotHit() {
+            // Position with a far-away (never-hit) stop loss to simulate the META scenario:
+            // broker-side stop failed silently, position bled past the strategy stop.
+            TradePosition position = new TradePosition(
+                SYMBOL, ENTRY_PRICE, QUANTITY,
+                ENTRY_PRICE * 0.50,  // SL at -50% — never reached on this test
+                ENTRY_PRICE * 1.10,
+                Instant.now()
+            );
+            double priceAt8PctLoss = ENTRY_PRICE * 0.92;  // -8% loss
+
+            ExitDecision decision = exitStrategyManager.evaluateExit(
+                position, priceAt8PctLoss, NORMAL_VOLATILITY, new HashMap<>()
+            );
+
+            assertEquals(ExitType.CATASTROPHIC_LOSS, decision.type(),
+                "Loss past catastrophic threshold must force exit even with SL well below");
+            assertFalse(decision.isPartial(), "Catastrophic exit is always full");
+            assertEquals(1.0, decision.quantity());
+        }
+
+        @Test
+        @DisplayName("Catastrophic loss does not trigger above threshold")
+        void catastrophicLossDoesNotFireBelowThreshold() {
+            TradePosition position = new TradePosition(
+                SYMBOL, ENTRY_PRICE, QUANTITY,
+                ENTRY_PRICE * 0.50,
+                ENTRY_PRICE * 1.10,
+                Instant.now()
+            );
+            double priceAt5PctLoss = ENTRY_PRICE * 0.95;  // -5% loss, below default 7% threshold
+
+            ExitDecision decision = exitStrategyManager.evaluateExit(
+                position, priceAt5PctLoss, NORMAL_VOLATILITY, new HashMap<>()
+            );
+
+            assertNotEquals(ExitType.CATASTROPHIC_LOSS, decision.type(),
+                "Loss below catastrophic threshold should not trigger this exit");
+        }
+    }
+
+    @Nested
     @DisplayName("Take Profit Tests")
     class TakeProfitTests {
         

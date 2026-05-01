@@ -1862,10 +1862,60 @@ public class ProfileManager implements Runnable {
                 // Use enhanced exit strategy if position is tracked
                 if (trackedPos.isPresent()) {
                     TradePosition position = trackedPos.get();
-                    
+
                     // Calculate current volatility (simplified - using price movement)
                     double volatility = Math.abs(currentPrice - entryPrice) / entryPrice;
-                    
+
+                    // Pre-earnings force-exit. Tier 2.5 only blocks new ENTRIES; an open position
+                    // would otherwise ride straight into the announcement (the META scenario:
+                    // bought 2026-04-27, held through 2026-04-30 earnings, gapped down ~10%).
+                    if (config.isPreEarningsExitEnabled() && earningsCalendar != null
+                            && config.getPreEarningsExitHoursBefore() > 0) {
+                        try {
+                            boolean approachingEarnings = earningsCalendar.isInBlackout(
+                                symbol, java.time.Instant.now(),
+                                config.getPreEarningsExitHoursBefore(), 0);
+                            if (approachingEarnings) {
+                                var exitDecision = com.trading.exits.ExitStrategyManager.ExitDecision.fullExit(
+                                    com.trading.exits.ExitStrategyManager.ExitType.EARNINGS_PROTECTION,
+                                    String.format("earnings within %dh — pre-emptive exit",
+                                        config.getPreEarningsExitHoursBefore()),
+                                    currentPrice);
+                                logger.warn("{} {} 🗓️ PRE-EARNINGS EXIT — {}",
+                                    profilePrefix, symbol, exitDecision.reason());
+                                try {
+                                    cancelExistingOrders(profilePrefix, symbol);
+                                    client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
+                                    portfolio.setPosition(symbol, Optional.empty());
+                                    applyPostExitCooldown(symbol, currentPrice,
+                                        (currentPrice - entryPrice) * qty,
+                                        profilePrefix, "PRE_EARNINGS");
+                                    TradingWebSocketHandler.broadcastActivity(
+                                        String.format("[%s] 🗓️ PRE-EARNINGS EXIT: %s — %s",
+                                            profile.name(), symbol, exitDecision.reason()),
+                                        "WARN");
+                                    pendingExitOrders.put(symbol, System.currentTimeMillis());
+                                    continue;
+                                } catch (PDTRejectedException e) {
+                                    pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
+                                    staticPdtBlockedUntil = pdtBlockedUntil;
+                                    logger.warn("{} PDT rejected pre-earnings exit for {}",
+                                        profilePrefix, symbol);
+                                    continue;
+                                } catch (Exception e) {
+                                    logger.error("{} Failed pre-earnings exit for {}",
+                                        profilePrefix, symbol, e);
+                                    urgentExitQueue.put(urgentKey(brokerName, symbol),
+                                        new UrgentExit(brokerName, symbol, qty,
+                                            "pre-earnings", System.currentTimeMillis()));
+                                }
+                            }
+                        } catch (Exception e) {
+                            logger.debug("{} Earnings check failed for {}: {}",
+                                profilePrefix, symbol, e.getMessage());
+                        }
+                    }
+
                     // Evaluate exit decision using enhanced strategy
                     var exitDecision = exitStrategyManager.evaluateExit(
                         position, currentPrice, volatility, portfolioPositions

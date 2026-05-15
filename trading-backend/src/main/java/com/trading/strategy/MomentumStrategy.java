@@ -30,6 +30,7 @@ public final class MomentumStrategy implements TradingStrategy {
     private static final int MOMENTUM_PERIOD = 10;
     private static final int SMA_PERIOD = 20;
     private static final int SMA_PERIOD_FAST = 9;
+    private static final int SMA_PERIOD_MACRO = 50;
     private static final int ATR_PERIOD = 14;
     
     // CONFIGURABLE parameters (read from config or use defaults)
@@ -77,20 +78,22 @@ public final class MomentumStrategy implements TradingStrategy {
     }
 
     public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty, List<Double> history) {
-        if (history.size() < Math.max(RSI_PERIOD + 1, SMA_PERIOD + 5)) {
+        if (history.size() < Math.max(RSI_PERIOD + 1, SMA_PERIOD_MACRO + 5)) {
             return new TradingSignal.Hold("Insufficient history for Momentum Strategy");
         }
 
         double rsi = calculateRSI(history, RSI_PERIOD);
         double rsiPrev = calculateRSI(history.subList(0, history.size() - 1), RSI_PERIOD);
         boolean rsiRising = rsi > rsiPrev;
-        
+
         double momentum = calculateMomentum(history, MOMENTUM_PERIOD);
         boolean momentumConsistent = isMomentumConsistent(history, momentumConfirmationBars);
-        
+
         double sma20 = calculateSMA(history, SMA_PERIOD);
+        double sma50 = calculateSMA(history, SMA_PERIOD_MACRO);
         double sma9 = calculateSMA(history, SMA_PERIOD_FAST);
         boolean priceAboveSMA = currentPrice > sma20;
+        boolean priceAboveSMA50 = currentPrice > sma50;
         boolean fastAboveSlow = sma9 > sma20; // SMA9 > SMA20 = bullish crossover
         double percentAboveSMA = ((currentPrice - sma20) / sma20) * 100;
         
@@ -98,12 +101,13 @@ public final class MomentumStrategy implements TradingStrategy {
         double atrPercent = calculateATRPercent(history, ATR_PERIOD, currentPrice);
         boolean volatilityOK = atrPercent < maxAtrPercent;
 
-        logger.debug("{} Momentum: Price=${} RSI={}({}) Mom={}%({}) AboveSMA={}% ATR={}%",
+        logger.debug("{} Momentum: Price=${} RSI={}({}) Mom={}%({}) AboveSMA20={}% AboveSMA50={} ATR={}%",
             symbol,
             String.format("%.2f", currentPrice),
             String.format("%.1f", rsi), rsiRising ? "↑" : "↓",
             String.format("%.2f", momentum * 100), momentumConsistent ? "consistent" : "weak",
             String.format("%.2f", percentAboveSMA),
+            priceAboveSMA50 ? "yes" : "NO",
             String.format("%.2f", atrPercent));
 
         // EXIT: RSI overbought - take profit (exit earlier at 72 instead of 75)
@@ -139,15 +143,15 @@ public final class MomentumStrategy implements TradingStrategy {
             boolean rsiInSweetSpot = rsi >= rsiBuyMin && rsi <= rsiBuyMax;
             boolean hasPositiveMomentum = momentum >= momentumMin;
             
-            // IMPROVED ENTRY: Require ALL conditions
+            // ENTRY: Require ALL conditions
             // 1. RSI in sweet spot AND rising
             // 2. Momentum positive AND consistent
-            // 3. Price above SMA20
+            // 3. Price above SMA20 AND SMA50 (macro trend must be up)
             // 4. SMA9 > SMA20 (trend confirmation)
             // 5. Not too far above SMA (avoid chasing)
-            if (rsiInSweetSpot && rsiRising && 
-                hasPositiveMomentum && momentumConsistent && 
-                priceAboveSMA && fastAboveSlow &&
+            if (rsiInSweetSpot && rsiRising &&
+                hasPositiveMomentum && momentumConsistent &&
+                priceAboveSMA && priceAboveSMA50 && fastAboveSlow &&
                 percentAboveSMA < maxAboveSmaPercent) { // Don't buy if already too far above SMA
                 
                 String reason = String.format("Momentum Buy: RSI=%.1f↑, Mom=+%.2f%% (consistent), %.1f%% above SMA", 
@@ -162,6 +166,8 @@ public final class MomentumStrategy implements TradingStrategy {
                     logger.debug("{}: No entry - RSI not rising ({}→{})", symbol, rsiPrev, rsi);
                 } else if (!momentumConsistent) {
                     logger.debug("{}: No entry - Momentum not consistent", symbol);
+                } else if (!priceAboveSMA50) {
+                    logger.debug("{}: No entry - Price below 50-SMA (macro downtrend)", symbol);
                 } else if (!fastAboveSlow) {
                     logger.debug("{}: No entry - SMA9 < SMA20 (bearish)", symbol);
                 } else if (percentAboveSMA >= maxAboveSmaPercent) {

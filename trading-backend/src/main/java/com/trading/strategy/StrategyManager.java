@@ -25,7 +25,6 @@ public final class StrategyManager {
     
     private final BrokerClient client;
     private final Config config;
-    private final RSIStrategy rsiStrategy;
     private final MACDStrategy macdStrategy;
     private final MeanReversionStrategy meanReversionStrategy;
     private final MomentumStrategy momentumStrategy;
@@ -44,7 +43,6 @@ public final class StrategyManager {
     public StrategyManager(BrokerClient client, MultiTimeframeAnalyzer multiTimeframeAnalyzer, Config config) {
         this.client = client;
         this.config = config;
-        this.rsiStrategy = new RSIStrategy();
         this.macdStrategy = new MACDStrategy();
         this.meanReversionStrategy = new MeanReversionStrategy();
         this.momentumStrategy = config != null ? new MomentumStrategy(config) : new MomentumStrategy();
@@ -173,9 +171,10 @@ public final class StrategyManager {
                     activeStrategy = "Momentum (Weak Bull)";
                     yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
                 } else {
-                    // Regular assets: RSI with confirmation
-                    activeStrategy = "RSI Confirmation";
-                    yield rsiStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    // RSI oversold (<30) = catching falling knives in weak markets.
+                    // MACD trend-following is safer: it requires a real crossover, not just "fallen far enough".
+                    activeStrategy = "MACD Trend (Weak Bull)";
+                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
                 }
             }
             case WEAK_BEAR -> {
@@ -346,19 +345,6 @@ public final class StrategyManager {
         return sum / (to - from);
     }
 
-    private double calculateSMA(List<Double> prices) {
-        return prices.stream()
-                .mapToDouble(Double::doubleValue)
-                .average()
-                .orElse(0.0);
-    }
-
-    private double calculateVolatility(List<Double> prices, double mean) {
-        var sumSqDiff = prices.stream()
-                .mapToDouble(p -> Math.pow(p - mean, 2))
-                .sum();
-        return Math.sqrt(sumSqDiff / prices.size());
-    }
 
     public MarketRegime getCurrentRegime() {
         return currentRegime;

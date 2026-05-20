@@ -9,6 +9,23 @@ const toNumber = (val: unknown): number => {
   return 0;
 };
 
+// Format hold duration and return color based on proximity to 10-day absolute cap
+const holdInfo = (entryTime: string): { label: string; color: string; title: string } => {
+  if (!entryTime) return { label: '—', color: 'var(--text-muted)', title: '' };
+  const ms = Date.now() - new Date(entryTime).getTime();
+  const hours = ms / 3_600_000;
+  const days = Math.floor(hours / 24);
+  const remHours = Math.floor(hours % 24);
+  const label = days > 0 ? `${days}d ${remHours}h` : `${remHours}h`;
+  // 10-day cap = 240h. Warn at 7d (168h), alert at 9d (216h).
+  const color = hours >= 216 ? '#ef4444' : hours >= 168 ? '#f59e0b' : 'var(--text-dim)';
+  const hoursLeft = Math.max(0, 240 - hours);
+  const title = hours >= 168
+    ? `Force-exit in ~${Math.floor(hoursLeft)}h (10-day cap)`
+    : `Held ${label}`;
+  return { label, color, title };
+};
+
 export const PositionsTable = () => {
   const { positions, setPositions, marketData, connected } = useTradingStore();
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
@@ -93,6 +110,7 @@ export const PositionsTable = () => {
             const pnlPercent = pos.unrealized_plpc !== undefined ? toNumber(pos.unrealized_plpc) * 100 : (entryPrice > 0 ? ((marketPrice - entryPrice) / entryPrice) * 100 : 0);
             
             const mobileBroker = (pos as any).broker || 'alpaca';
+            const mobileHold = holdInfo(pos.entryTime);
             return (
               <div key={pos.symbol} className="overview-item" style={{ marginBottom: '12px', border: '1px solid var(--border-light)' }}>
                 <div className="position-header" style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border-light)', paddingBottom: '8px', marginBottom: '8px' }}>
@@ -117,6 +135,9 @@ export const PositionsTable = () => {
                 <div style={{ fontSize: '13px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                   <div style={{ color: 'var(--text-muted)' }}>QTY: {quantity.toFixed(4)}</div>
                   <div style={{ color: 'var(--text-muted)' }}>PROFIT: ${pnl.toFixed(2)}</div>
+                  <div style={{ color: mobileHold.color, fontFamily: 'monospace' }} title={mobileHold.title}>
+                    HELD: {mobileHold.label}{mobileHold.color === '#ef4444' ? ' 🔴' : mobileHold.color === '#f59e0b' ? ' ⚠️' : ''}
+                  </div>
                 </div>
               </div>
             );
@@ -150,6 +171,7 @@ export const PositionsTable = () => {
               <th>Quantity</th>
               <th>Reference</th>
               <th>Current</th>
+              <th>Hold</th>
               <th>Net P&L</th>
               <th>Safety Bounds</th>
             </tr>
@@ -172,6 +194,7 @@ export const PositionsTable = () => {
               const distanceToSL = stopLoss > 0 ? ((marketPrice - stopLoss) / marketPrice * 100).toFixed(2) : null;
               
               const broker = (pos as any).broker || 'alpaca';
+              const hold = holdInfo(pos.entryTime);
               return (
                 <tr key={pos.symbol}>
                   <td className="font-bold">
@@ -194,6 +217,11 @@ export const PositionsTable = () => {
                   <td>{quantity.toFixed(4)}</td>
                   <td>${entryPrice.toFixed(2)}</td>
                   <td>${marketPrice.toFixed(2)}</td>
+                  <td style={{ color: hold.color, fontFamily: 'monospace', fontSize: '11px', whiteSpace: 'nowrap' }} title={hold.title}>
+                    {hold.label}
+                    {hold.color === '#ef4444' && <span style={{ marginLeft: '4px' }}>🔴</span>}
+                    {hold.color === '#f59e0b' && <span style={{ marginLeft: '4px' }}>⚠️</span>}
+                  </td>
                   <td className={pnl >= 0 ? 'positive' : 'negative'} style={{ fontWeight: 600 }}>
                     {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} ({pnlPercent.toFixed(2)}%)
                   </td>

@@ -1999,6 +1999,15 @@ public class ProfileManager implements Runnable {
                     continue; // Position handled by enhanced strategy
                 }
                 
+                // Settlement-lag guard: when a position is closed the broker may still report the
+                // shares as held for up to ~15 minutes (T+0 settlement lag). Skip orphan registration
+                // in that window to prevent phantom orphan → immediate force-close sequences.
+                if (database.wasRecentlyClosed(symbol, brokerName, 15 * 60 * 1000L)) {
+                    logger.info("{} {}: skipping orphan registration — trade closed within 15 min (settlement lag)",
+                        profilePrefix, symbol);
+                    continue;
+                }
+
                 // First sight of an untracked position: register it (with DB-persisted stops if available,
                 // or freshly reconstructed tight stops otherwise) AND attempt a native broker stop. This
                 // closes the META-incident hole where fractional fills + post-restart drift left positions
@@ -2029,6 +2038,19 @@ public class ProfileManager implements Runnable {
                     logger.warn("{} {}: untracked position with no DB record — reconstructed SL=${} TP=${}",
                         profilePrefix, symbol,
                         String.format("%.2f", recoveredStop), String.format("%.2f", recoveredTp));
+                }
+
+                // Guard: recovered SL must always be strictly below entry price.
+                // A profitable position (currentPrice > entryPrice) can produce an SL above entry
+                // via the "tight 1.5% below current" formula, creating a phantom stop trigger.
+                if (recoveredStop >= entryPrice) {
+                    double slFraction = Math.max(profile.stopLossPercent(), 1.0) / 100.0;
+                    double corrected = entryPrice * (1.0 - slFraction);
+                    logger.warn("{} {}: SL ${} was at or above entry ${} — clamped to ${}",
+                        profilePrefix, symbol,
+                        String.format("%.2f", recoveredStop), String.format("%.2f", entryPrice),
+                        String.format("%.2f", corrected));
+                    recoveredStop = corrected;
                 }
 
                 boolean hasOpenStop = false;

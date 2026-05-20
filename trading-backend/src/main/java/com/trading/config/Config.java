@@ -600,6 +600,15 @@ public class Config {
     public int getMaxHoldTimeHours() {
         return getIntProperty("MAX_HOLD_TIME_HOURS", 48);
     }
+
+    /**
+     * Hard cap: close ANY position (profitable or losing) after this many hours.
+     * Prevents indefinite hold of stalled losers that never trigger SL.
+     * Default: 240 hours (10 days)
+     */
+    public int getMaxAbsoluteHoldHours() {
+        return getIntProperty("MAX_ABSOLUTE_HOLD_HOURS", 240);
+    }
     
     /**
      * Check if portfolio stop loss is enabled.

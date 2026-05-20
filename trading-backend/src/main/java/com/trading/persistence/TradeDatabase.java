@@ -250,6 +250,45 @@ public class TradeDatabase {
     }
 
     /**
+     * Returns true if a CLOSED trade for this symbol/broker exists with an exit_time
+     * within {@code withinMillis} milliseconds of now.
+     * Used to suppress orphan registration during broker settlement lag (T+0 to T+1 window):
+     * when a position was just closed the broker may still report the shares as held.
+     */
+    public boolean wasRecentlyClosed(String symbol, String broker, long withinMillis) {
+        String sql = "SELECT COUNT(*) as cnt FROM trades WHERE symbol = ? AND broker = ? " +
+                     "AND status = 'CLOSED' AND exit_time >= ?";
+        java.time.Instant cutoff = java.time.Instant.now().minusMillis(withinMillis);
+        long stamp = lock.tryOptimisticRead();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            stmt.setString(2, broker);
+            stmt.setString(3, cutoff.toString());
+            try (var rs = stmt.executeQuery()) {
+                int count = rs.next() ? rs.getInt("cnt") : 0;
+                if (lock.validate(stamp)) return count > 0;
+            }
+        } catch (SQLException e) {
+            logger.debug("wasRecentlyClosed optimistic query failed for {}: {}", symbol, e.getMessage());
+        }
+        // Fallback with read lock
+        stamp = lock.readLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            stmt.setString(2, broker);
+            stmt.setString(3, cutoff.toString());
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() && rs.getInt("cnt") > 0;
+            }
+        } catch (SQLException e) {
+            logger.error("wasRecentlyClosed fallback failed for {}: {}", symbol, e.getMessage());
+            return false;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    /**
      * Count OPEN trades for a symbol/broker combination.
      * Used to enforce the per-symbol entry cap.
      */

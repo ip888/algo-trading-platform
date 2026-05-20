@@ -46,10 +46,11 @@ class MomentumStrategyTest {
         @Test
         @DisplayName("blocks entry when ATR exceeds maxAtrPercent (default 3%)")
         void highAtrBlocksEntry() {
-            // Huge swings: 10% alternating → very high ATR
+            // Huge swings: 10% alternating → very high ATR.
+            // 60 bars ensures we clear the SMA50 + 5 minimum history requirement.
             List<Double> prices = new ArrayList<>();
             double p = 100.0;
-            for (int i = 0; i < 40; i++) {
+            for (int i = 0; i < 60; i++) {
                 prices.add(p);
                 p *= (i % 2 == 0) ? 1.10 : 0.90; // 10% swings
             }
@@ -115,15 +116,15 @@ class MomentumStrategyTest {
             // Use two series: one with 0.1% daily moves, one with 5% daily moves
             // Verify through the strategy that high volatility is detected (not via private method)
 
-            // Low vol: 0.1% daily moves
+            // Low vol: 0.1% daily moves — 60 bars clears the SMA50+5 minimum requirement.
             List<Double> lowVol = new ArrayList<>();
             double p = 100.0;
-            for (int i = 0; i < 40; i++) { lowVol.add(p); p *= 1.001; }
+            for (int i = 0; i < 60; i++) { lowVol.add(p); p *= 1.001; }
 
             // High vol: 5% daily moves
             List<Double> highVol = new ArrayList<>();
             p = 100.0;
-            for (int i = 0; i < 40; i++) { highVol.add(p); p *= (i % 2 == 0 ? 1.05 : 0.95); }
+            for (int i = 0; i < 60; i++) { highVol.add(p); p *= (i % 2 == 0 ? 1.05 : 0.95); }
 
             // High vol should be blocked by ATR filter for new entries
             var lowVolSignal = strategy.evaluateWithHistory("GLD", lowVol.get(lowVol.size()-1), 0.0, lowVol);

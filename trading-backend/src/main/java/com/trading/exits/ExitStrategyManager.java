@@ -181,10 +181,21 @@ public class ExitStrategyManager {
     private ExitDecision evaluatePartialExit(TradePosition position, double currentPrice) {
         double profitPercent = position.getProfitPercent(currentPrice);
         double targetProfit = (position.takeProfit() - position.entryPrice()) / position.entryPrice();
-        
+
+        if (targetProfit <= 0) return ExitDecision.noExit();
+
         // Calculate how far we are to profit target (0.0 to 1.0)
         double progressToTarget = profitPercent / targetProfit;
-        
+
+        // Level 1 trigger price = entry + 25% of (TP - entry)
+        double level1Price = position.entryPrice() + PARTIAL_EXIT_LEVEL_1 * (position.takeProfit() - position.entryPrice());
+        logger.debug("{}: partial-exit progress={:.1f}% (price=${} L1-trigger=${} exits=[{},{},{}])",
+            position.symbol(),
+            progressToTarget * 100,
+            String.format("%.2f", currentPrice),
+            String.format("%.2f", level1Price),
+            position.hasPartialExit(1), position.hasPartialExit(2), position.hasPartialExit(3));
+
         // Check if we've hit any partial exit levels
         if (progressToTarget >= PARTIAL_EXIT_LEVEL_3 && !position.hasPartialExit(3)) {
             return ExitDecision.partialProfitExit(3, PARTIAL_EXIT_SIZE_3,
@@ -203,7 +214,7 @@ public class ExitStrategyManager {
                 String.format("Partial exit at 25%% profit target (%.1f%% profit)", profitPercent * 100),
                 currentPrice);
         }
-        
+
         return ExitDecision.noExit();
     }
     
@@ -239,7 +250,17 @@ public class ExitStrategyManager {
     private ExitDecision evaluateTimeDecayExit(TradePosition position, double currentPrice) {
         Duration holdTime = Duration.between(position.entryTime(), Instant.now());
         double profitPercent = position.getProfitPercent(currentPrice);
-        
+
+        // Hard cap: force-close any position held beyond MAX_ABSOLUTE_HOLD_HOURS regardless of P&L.
+        // Prevents indefinite hold of stalled losers that never hit their stop-loss.
+        long maxAbsoluteHoldHours = config.getMaxAbsoluteHoldHours();
+        if (holdTime.toHours() >= maxAbsoluteHoldHours) {
+            return ExitDecision.fullExit(ExitType.TIME_DECAY,
+                String.format("Absolute hold cap: %d days held (%.1f%% P&L) — force exit",
+                    holdTime.toDays(), profitPercent * 100),
+                currentPrice);
+        }
+
         // Exit PROFITABLE positions after configured max hold time (lock in gains)
         // Do NOT sell losing positions on time alone — let them recover.
         // Losers are still protected by stop-loss (emergency at -2.5%) and strategy SELL signals.

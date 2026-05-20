@@ -74,8 +74,10 @@ public final class StrategyManager {
             boolean isMeanReversion = (regime == MarketRegime.RANGE_BOUND);
 
             // Check multi-timeframe alignment if enabled
+            MultiTimeframeAnalysis latestMtfAnalysis = null;
             if (multiTimeframeAnalyzer != null) {
                 MultiTimeframeAnalysis mtfAnalysis = multiTimeframeAnalyzer.analyze(symbol);
+                latestMtfAnalysis = mtfAnalysis;
 
                 logger.debug("Multi-timeframe: {}", mtfAnalysis.getSummary());
 
@@ -88,24 +90,35 @@ public final class StrategyManager {
 
                 // Use multi-timeframe recommendation if confidence is high
                 if (mtfAnalysis.confidence() > 0.7) {
-                    var mtfSignal = switch (mtfAnalysis.recommendation()) {
-                        case BUY -> new TradingSignal.Buy("Multi-timeframe BUY signal");
-                        case SELL -> new TradingSignal.Sell("Multi-timeframe SELL signal");
-                        case HOLD -> new TradingSignal.Hold("Multi-timeframe HOLD");
-                    };
-
-                    if (mtfSignal instanceof TradingSignal.Buy && !isMeanReversion) {
-                        if (isShortTermDowntrend(closes, currentPrice)) {
-                            logger.info("{}: Blocked MTF BUY — downtrend (price below declining SMA)", symbol);
-                            return new TradingSignal.Hold("Downtrend — blocking BUY");
-                        }
-                        if (!isVolumeConfirming(volumes)) {
-                            logger.info("{}: Blocked MTF BUY — low volume (below 70% of 20-bar avg)", symbol);
-                            return new TradingSignal.Hold("Low volume — BUY not confirmed");
-                        }
+                    // SELL and HOLD are always authoritative — exit or wait immediately.
+                    if (mtfAnalysis.recommendation() != MultiTimeframeAnalyzer.SignalType.BUY) {
+                        return switch (mtfAnalysis.recommendation()) {
+                            case SELL -> new TradingSignal.Sell("Multi-timeframe SELL signal");
+                            default   -> new TradingSignal.Hold("Multi-timeframe HOLD");
+                        };
                     }
 
-                    return mtfSignal;
+                    // MTF says BUY. For non-range-bound regimes, momentum assets need their
+                    // own strict entry conditions (RSI sweet spot, SMA50, ATR, momentum consistency).
+                    // MTF BUY is a necessary gate, not sufficient — fall through to evaluateWithHistory().
+                    if (!isMeanReversion && momentumAssets.contains(symbol)) {
+                        logger.info("{}: MTF BUY ({}%) deferred to MomentumStrategy for full entry validation",
+                            symbol, (int)(mtfAnalysis.confidence() * 100));
+                        // fall through to evaluateWithHistory() below
+                    } else {
+                        // Non-momentum assets and range-bound regime: use MTF BUY directly.
+                        if (!isMeanReversion) {
+                            if (isShortTermDowntrend(closes, currentPrice)) {
+                                logger.info("{}: Blocked MTF BUY — downtrend (price below declining SMA)", symbol);
+                                return new TradingSignal.Hold("Downtrend — blocking BUY");
+                            }
+                            if (!isVolumeConfirming(volumes)) {
+                                logger.info("{}: Blocked MTF BUY — low volume (below 70% of 20-bar avg)", symbol);
+                                return new TradingSignal.Hold("Low volume — BUY not confirmed");
+                            }
+                        }
+                        return new TradingSignal.Buy("Multi-timeframe BUY signal");
+                    }
                 }
             }
 
@@ -121,6 +134,21 @@ public final class StrategyManager {
                 if (!isVolumeConfirming(volumes)) {
                     logger.info("{}: Blocked {} BUY — low volume", symbol, activeStrategy);
                     return new TradingSignal.Hold("Low volume — BUY not confirmed");
+                }
+                // 3. MTF confidence gradient veto (0.6–0.7): strategy says BUY but MTF is leaning
+                //    SELL/HOLD at medium confidence — don't fight a conflicting signal.
+                //    Below 0.6 we already returned HOLD above; above 0.7 MTF was authoritative.
+                //    This window specifically catches the ambiguous middle zone.
+                if (latestMtfAnalysis != null) {
+                    double conf = latestMtfAnalysis.confidence();
+                    if (conf >= 0.6 && conf <= 0.7
+                            && latestMtfAnalysis.recommendation() != MultiTimeframeAnalyzer.SignalType.BUY) {
+                        logger.info("{}: MTF gradient veto — strategy BUY blocked by MTF {} at {}% confidence",
+                            symbol, latestMtfAnalysis.recommendation(), (int)(conf * 100));
+                        return new TradingSignal.Hold(
+                            String.format("MTF gradient veto (%s at %.0f%% confidence)",
+                                latestMtfAnalysis.recommendation(), conf * 100));
+                    }
                 }
             }
 

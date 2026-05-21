@@ -164,7 +164,7 @@ class ProfileManagerPDTAndCooldownTest {
     }
 
     private TradingProfile createMainProfile() {
-        return new TradingProfile("MAIN", 0.60, 3.0, 1.5, 1.0,
+        return new TradingProfile("MAIN", true, 0.60, 3.0, 1.5, 1.0,
             List.of("SPY","QQQ","DIA"), List.of("SH","PSQ"),
             20.0, 2.0, "MACD", Duration.ofMinutes(0), Duration.ofDays(7));
     }

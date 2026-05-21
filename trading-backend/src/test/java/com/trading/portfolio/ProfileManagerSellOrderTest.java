@@ -123,6 +123,7 @@ class ProfileManagerSellOrderTest {
     private TradingProfile createMainProfile() {
         return new TradingProfile(
                 "MAIN",
+                true,      // main profile
                 0.60,      // capitalPercent
                 1.5,       // takeProfitPercent
                 0.8,       // stopLossPercent

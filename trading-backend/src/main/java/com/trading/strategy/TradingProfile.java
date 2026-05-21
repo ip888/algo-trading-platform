@@ -10,6 +10,7 @@ import java.util.List;
  */
 public record TradingProfile(
     String name,
+    boolean main,           // true = primary profile responsible for all exits
     double capitalPercent,
     double takeProfitPercent,
     double stopLossPercent,
@@ -34,6 +35,7 @@ public record TradingProfile(
     public static TradingProfile main(Config config) {
         return new TradingProfile(
             "MAIN",
+            true,
             config.getMainProfileCapitalPercent(),
             config.getMainTakeProfitPercent(),
             config.getMainStopLossPercent(),
@@ -59,6 +61,7 @@ public record TradingProfile(
     public static TradingProfile experimental(Config config) {
         return new TradingProfile(
             "EXPERIMENTAL",
+            false,
             config.getExperimentalProfileCapitalPercent(),
             config.getExperimentalTakeProfitPercent(),
             config.getExperimentalStopLossPercent(),
@@ -73,9 +76,9 @@ public record TradingProfile(
         );
     }
     
-    /** True if this is the primary (MAIN) profile responsible for executing all exits. */
+    /** True if this is the primary profile responsible for executing all exits. */
     public boolean isMainProfile() {
-        return "MAIN".equals(name);
+        return main;
     }
 
     /**

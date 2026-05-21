@@ -75,7 +75,7 @@ class ProfileManagerOrphanGuardTest {
 
     private TradingProfile createMainProfile() {
         return new TradingProfile(
-            "MAIN", 0.60, 3.0, 1.5, 0.7,
+            "MAIN", true, 0.60, 3.0, 1.5, 0.7,
             List.of("SPY", "QQQ"), List.of("SH"),
             20.0, 2.0, "MACD",
             Duration.ofHours(4), Duration.ofDays(5)

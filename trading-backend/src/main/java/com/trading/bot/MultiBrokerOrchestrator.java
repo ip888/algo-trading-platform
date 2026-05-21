@@ -154,6 +154,7 @@ public final class MultiBrokerOrchestrator {
                 : TradingProfile.experimental(config);
             TradingProfile profile = new TradingProfile(
                 brokerName.toUpperCase(),
+                base.main(),  // carry the isMain flag so exit guards work regardless of display name
                 base.capitalPercent(), base.takeProfitPercent(), base.stopLossPercent(),
                 base.trailingStopPercent(), base.bullishSymbols(), base.bearishSymbols(),
                 base.vixThreshold(), base.vixHysteresis(), base.strategyType(),

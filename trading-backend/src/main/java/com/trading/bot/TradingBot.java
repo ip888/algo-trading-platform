@@ -894,7 +894,13 @@ public final class TradingBot {
     public static com.trading.api.BrokerClient createBrokerClient(Config config) {
         String broker = System.getenv().getOrDefault("BROKER", "alpaca").toLowerCase();
         return switch (broker) {
-            case "tradier"   -> new com.trading.api.TradierClient(config);
+            case "tradier" -> {
+                if (!config.isTradierEnabled()) {
+                    throw new IllegalStateException(
+                        "Tradier is disabled (TRADIER_ENABLED=false). Set TRADIER_ENABLED=true to re-enable.");
+                }
+                yield new com.trading.api.TradierClient(config);
+            }
             case "tradovate" -> new com.trading.api.TradovateClient(config);
             case "ibkr"      -> new com.trading.api.IBKRClient(config);
             default          -> new AlpacaClient(config);

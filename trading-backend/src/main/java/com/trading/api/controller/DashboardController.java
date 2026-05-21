@@ -66,7 +66,8 @@ public final class DashboardController {
         this.alpacaClient = alpacaClient;
         this.cachedAlpacaClient = new com.trading.api.AlpacaClient(config);
         String brokersAlloc = config.getBrokersAllocation();
-        this.cachedTradierClient = (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier"))
+        this.cachedTradierClient = (config.isTradierEnabled()
+                && brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier"))
             ? new com.trading.api.TradierClient(config) : null;
     }
     

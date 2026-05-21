@@ -1492,6 +1492,13 @@ public class Config {
         return "true".equalsIgnoreCase(env) || getBooleanProperty("TRADIER_SANDBOX", false);
     }
 
+    /** Explicit opt-in gate — defaults false. Must be true for any Tradier code path to run. */
+    public boolean isTradierEnabled() {
+        String env = System.getenv("TRADIER_ENABLED");
+        if (env != null) return "true".equalsIgnoreCase(env);
+        return getBooleanProperty("TRADIER_ENABLED", false);
+    }
+
     // ==================== Tradovate Broker Configuration ====================
 
     public String getTradovateUsername() { return getProperty("TRADOVATE_USERNAME", ""); }

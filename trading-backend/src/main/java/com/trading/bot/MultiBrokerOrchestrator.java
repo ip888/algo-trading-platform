@@ -237,7 +237,13 @@ public final class MultiBrokerOrchestrator {
 
     private BrokerClient createBrokerClient(String brokerName) {
         return switch (brokerName.toLowerCase()) {
-            case "tradier"   -> new TradierClient(config);
+            case "tradier" -> {
+                if (!config.isTradierEnabled()) {
+                    throw new IllegalStateException(
+                        "Tradier is disabled (TRADIER_ENABLED=false). Set TRADIER_ENABLED=true to re-enable.");
+                }
+                yield new TradierClient(config);
+            }
             case "tradovate" -> new TradovateClient(config);
             case "ibkr"      -> new IBKRClient(config);
             default          -> new AlpacaClient(config);   // "alpaca" or unknown

@@ -705,10 +705,11 @@ public class Config {
     
     /**
      * Get minimum number of timeframes that must align.
-     * Default: 2
+     * Default: 1 — daily trend confirming direction is sufficient; 15M used for entry timing.
+     * Setting 2 blocks all entries in slow grind-up markets (daily up, intraday choppy).
      */
     public int getMultiTimeframeMinAligned() {
-        return getIntProperty("MULTI_TIMEFRAME_MIN_ALIGNED", 2);
+        return getIntProperty("MULTI_TIMEFRAME_MIN_ALIGNED", 1);
     }
     
     /**

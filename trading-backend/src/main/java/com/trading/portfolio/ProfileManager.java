@@ -1304,11 +1304,16 @@ public class ProfileManager implements Runnable {
             try {
                 var bars = client.getBars(symbol, "15Min", 50);
                 if (!volumeProfileAnalyzer.isGoodEntryPrice(symbol, currentPrice, bars)) {
-                    logger.info("{} {}: ⚠️ PHASE 3 - Price not near volume support, proceeding with caution", 
+                    logger.info("{} {}: ❌ PHASE 3 FILTER - Price not near volume support, skipping",
                         profilePrefix, symbol);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⛔ %s skipped: price not at volume support", profile.name(), symbol),
+                        "INFO"
+                    );
+                    return;
                 }
             } catch (Exception e) {
-                logger.debug("{} {}: Volume profile check failed: {}", 
+                logger.debug("{} {}: Volume profile check failed: {}",
                     profilePrefix, symbol, e.getMessage());
             }
         }
@@ -1507,10 +1512,14 @@ public class ProfileManager implements Runnable {
                 config.getAtrStopMultiplier(),
                 config.getAtrStopFloorPercent(),
                 config.getAtrStopCeilingPercent());
-            takeProfit = RiskManager.calculateAtrTakeProfit(
+            double atrTp = RiskManager.calculateAtrTakeProfit(
                 currentPrice, atr,
                 config.getAtrTakeProfitMultiplier(),
                 config.getAtrStopFloorPercent());
+            // Cap ATR TP at the profile's configured target — ATR widens for volatility
+            // but should never produce a target harder to reach than the configured goal.
+            double profileTp = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+            takeProfit = Math.min(atrTp, profileTp);
             logger.info("{} {}: ATR={} (n={}) → stop=${} ({}%) tp=${} ({}%)",
                 profilePrefix, symbol,
                 String.format("%.4f", atr),

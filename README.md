@@ -155,6 +155,11 @@ MIN_HOLD_TIME_HOURS=4
 - API keys stored in `config.properties` (git-ignored)
 - Use `config.properties.template` as reference
 
+## 📄 Profit Optimization & Modernization
+
+- Profit optimization evaluation plan: [`docs/PROFITABILITY_EVALUATION_PLAN.md`](docs/PROFITABILITY_EVALUATION_PLAN.md)
+- Modernization assessment and prioritized upgrade checklist: [`docs/PROFIT_OPTIMIZATION_MODERNIZATION.md`](docs/PROFIT_OPTIMIZATION_MODERNIZATION.md)
+
 ---
 
 ## 👨‍💻 Author

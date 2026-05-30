@@ -2464,7 +2464,7 @@ public class ProfileManager implements Runnable {
             // orphaned rows are closed with actual P&L (not CANCELLED with $0).
             // This fixes the "CANCELLED with pnl=0" problem caused by restarts or broker-side stops.
             try {
-                var orderHistory = client.getOrderHistory(null, 50);
+                var orderHistory = client.getDelegate().getOrderHistory(null, 50);
                 if (orderHistory != null && orderHistory.isArray()) {
                     for (var order : orderHistory) {
                         String side = order.path("side").asText("");

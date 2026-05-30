@@ -34,9 +34,13 @@ Transcript file (local): `.claude/projects/.../f2a6edac-d025-440d-8f24-4144af5a4
 **27 new unit tests added (commit `e78af8e8`)** covering all 9 fixes above.
 
 #### Scheduled tasks
-| Routine | Date | Action |
-|---------|------|--------|
-| [Disable PDT protection](https://claude.ai/code/routines/trig_01XGJTP21jjbPqAANpU783cN) | June 4, 2026 9:00 AM ET | Sets `PDT_PROTECTION_ENABLED=false`, commits, pushes. **Then run `fly deploy --remote-only` manually.** |
+
+| Routine | Fires | What it does |
+|---------|-------|-------------|
+| [PDT abolition prep](https://claude.ai/code/routines/trig_01XGJTP21jjbPqAANpU783cN) | June 3, 2026 5:00 PM ET | Applies all 4 config changes, commits, pushes, attempts deploy. See [full plan](docs/JUNE3_PDT_PLAN.md). |
+
+**After the routine fires on June 3:** check https://claude.ai/code/routines/trig_01XGJTP21jjbPqAANpU783cN for result.
+If deploy wasn't done automatically, run: `cd trading-backend && ~/.fly/bin/fly deploy --remote-only --app trading-bot-igor-waw`
 
 #### Current bot state
 - **App:** `trading-bot-igor-waw` on Fly.io (region: iad)

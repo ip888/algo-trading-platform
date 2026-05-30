@@ -114,6 +114,14 @@ public class ProfileManager implements Runnable {
     // Entries are removed when the position disappears from Alpaca (order filled).
     private static java.util.concurrent.ConcurrentHashMap<String, Long> pendingExitOrders = new java.util.concurrent.ConcurrentHashMap<>();
 
+    // STATIC: Prevent duplicate buy orders placed within the same or back-to-back evaluation cycles.
+    // The DB gate (hasOpenTrade) only fires AFTER recordTrade() completes, which is after order placement.
+    // During the ~90s window between order placement and DB write, a second cycle can fire another BUY.
+    // Key = "broker:symbol", value = timestamp of the in-flight buy.
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> pendingBuySymbols
+        = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long PENDING_BUY_TTL_MS = 5 * 60 * 1000L; // 5 minutes
+
     // STATIC: Shared across profiles. Track consecutive stop-loss hits per symbol.
     // Key = symbol, Value = count of consecutive SL hits (reset on successful trade or manual clear)
     private static java.util.concurrent.ConcurrentHashMap<String, Integer> consecutiveStopLosses = new java.util.concurrent.ConcurrentHashMap<>();
@@ -952,6 +960,34 @@ public class ProfileManager implements Runnable {
     private void handleBuy(String symbol, double currentPrice, double equity,
                           double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
         
+        // ========== DOUBLE-ENTRY RACE GUARD ==========
+        // The DB gate (hasOpenTrade) fires only after recordTrade() which is called after order
+        // placement. During the ~90s window a second evaluation cycle can fire another BUY for
+        // the same symbol before the DB write completes. This in-memory flag closes that gap.
+        String pendingBuyKey = brokerName + ":" + symbol;
+        if (pendingBuySymbols.containsKey(pendingBuyKey)) {
+            logger.debug("{} {} BUY skipped — buy already in flight (placed {}s ago)",
+                profilePrefix, symbol,
+                (System.currentTimeMillis() - pendingBuySymbols.get(pendingBuyKey)) / 1000);
+            return;
+        }
+
+        // ========== DAILY LOSS CIRCUIT BREAKER ==========
+        if (config.isDailyMaxLossEnabled()) {
+            double maxLoss = -Math.abs(equity * config.getDailyMaxLossPercent() / 100.0);
+            if (todayPnL < maxLoss) {
+                logger.warn("{} {} BUY BLOCKED — daily loss limit hit (today=${}, limit={}%)",
+                    profilePrefix, symbol,
+                    String.format("%.2f", todayPnL),
+                    String.format("%.1f", config.getDailyMaxLossPercent()));
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] 🛑 DAILY LOSS LIMIT: no new entries (today=$%.2f)",
+                        profile.name(), todayPnL),
+                    "WARN");
+                return;
+            }
+        }
+
         // ========== PDT RESERVATION CHECK ==========
         // Reserve the last PDT day-trade slot for protective exits (stop-loss/take-profit).
         // A new buy requires a same-day sell capability — if we're at 2/3 trades, a new
@@ -1556,6 +1592,21 @@ public class ProfileManager implements Runnable {
             }
         }
         
+        // ========== HARD NOTIONAL CAP (belt-and-suspenders) ==========
+        // Belt-and-suspenders: every sizing path above should already respect the tier max,
+        // but this catches any edge case where Kelly / adaptive / ATR sizing computes a value
+        // larger than the account tier allows (the April QQQ/TLT $19K-on-$1.2K incident).
+        double tierMaxNotional = equity * com.trading.risk.CapitalTierManager.getParameters(equity).maxPositionPercent();
+        double orderNotional = positionSize * currentPrice;
+        if (orderNotional > tierMaxNotional && tierMaxNotional > 0) {
+            double capped = tierMaxNotional / currentPrice;
+            logger.warn("{} {}: ⚠️ Hard cap fired — sizing {} → {} shares (${} → ${})",
+                profilePrefix, symbol,
+                String.format("%.3f", positionSize), String.format("%.3f", capped),
+                String.format("%.2f", orderNotional), String.format("%.2f", tierMaxNotional));
+            positionSize = capped;
+        }
+
         var newPosition = new TradePosition(
             symbol,
             currentPrice,
@@ -1564,7 +1615,7 @@ public class ProfileManager implements Runnable {
             takeProfit,
             java.time.Instant.now()
         );
-        
+
         logger.info("{} {}: Position tracked: Entry=${}, StopLoss=${}, TakeProfit={}",
             profilePrefix, symbol, currentPrice, stopLoss, takeProfit);
         
@@ -1606,6 +1657,10 @@ public class ProfileManager implements Runnable {
             );
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
             Double entryLimitPrice = orderDecision.limitPrice();
+
+            // Mark this symbol as having a buy in-flight BEFORE placing the order.
+            // Cleared after portfolio + DB are updated; prevents duplicate orders from back-to-back cycles.
+            pendingBuySymbols.put(pendingBuyKey, System.currentTimeMillis());
 
             // Place bracket order and check if server-side protection was applied
             var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
@@ -1704,6 +1759,8 @@ public class ProfileManager implements Runnable {
             stopLoss,
             takeProfit
         );
+        // Portfolio and DB are now consistent — release the in-flight lock.
+        pendingBuySymbols.remove(pendingBuyKey);
         
         // Broadcast trade event
         TradingWebSocketHandler.broadcastTradeEvent(
@@ -1781,7 +1838,8 @@ public class ProfileManager implements Runnable {
 
         // Close trade in database
         database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
-        
+        updateDailyPnL(profilePrefix, pnl);
+
         // Broadcast trade event
         TradingWebSocketHandler.broadcastTradeEvent(
             symbol, "SELL", currentPrice, position.quantity(),
@@ -1840,7 +1898,13 @@ public class ProfileManager implements Runnable {
             for (var pos : allPositions) {
                 portfolioPositions.put(pos.symbol(), pos.marketValue());
             }
-            
+
+            // Fetch open DB records once and index by symbol — avoids N full table scans per cycle.
+            var openDbRecords = database.getOpenTradeRecords(brokerName);
+            var openDbRecordsBySymbol = openDbRecords.stream()
+                .collect(java.util.stream.Collectors.toMap(
+                    r -> r.symbol(), r -> r, (a, b) -> a));
+
             for (var alpacaPos : allPositions) {
                 String symbol = alpacaPos.symbol();
                 double qty = alpacaPos.quantity();
@@ -2007,7 +2071,58 @@ public class ProfileManager implements Runnable {
                     }
                     continue; // Position handled by enhanced strategy
                 }
-                
+
+                // ========== REGIME-AWARE EXIT / STOP TIGHTENING ==========
+                // If regime flips to WEAK_BEAR or STRONG_BEAR while holding a bullish position,
+                // tighten the stop to breakeven (profitable) or exit immediately (losing).
+                // Bearish ETFs (inverse funds) are excluded — they benefit from a falling market.
+                boolean isBearishEtf = profile.bearishSymbols().contains(symbol);
+                boolean isInBearishRegime = latestRegime == MarketRegime.WEAK_BEAR
+                    || latestRegime == MarketRegime.STRONG_BEAR;
+                if (!isBearishEtf && isInBearishRegime) {
+                    double pnlPct = (currentPrice - entryPrice) / entryPrice * 100.0;
+                    if (pnlPct > 0 && position.stopLoss() < entryPrice) {
+                        // Profitable long in a bearish regime → tighten stop to breakeven
+                        double breakevenStop = entryPrice * 1.001; // 0.1% above entry
+                        var tightened = new com.trading.risk.TradePosition(
+                            position.symbol(), position.entryPrice(), position.quantity(),
+                            breakevenStop, position.takeProfit(), position.entryTime(),
+                            position.highestPrice(), position.partialExitsExecuted());
+                        portfolio.setPosition(symbol, Optional.of(tightened));
+                        logger.info("{} {} 📉 REGIME→BEARISH: tightened SL to breakeven ${} (+{}%)",
+                            profilePrefix, symbol,
+                            String.format("%.2f", tightened.stopLoss()),
+                            String.format("%.2f", pnlPct));
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] 📉 %s stop tightened to breakeven — regime is %s",
+                                profile.name(), symbol, latestRegime.name()),
+                            "WARN");
+                    } else if (pnlPct <= -0.5) {
+                        // Losing long in a bearish regime → exit now, don't wait for SL
+                        logger.warn("{} {} 📉 REGIME→BEARISH: exiting losing position ({}%)",
+                            profilePrefix, symbol, String.format("%.2f", pnlPct));
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] 📉 REGIME EXIT: %s (%.2f%%) — regime is %s",
+                                profile.name(), symbol, pnlPct, latestRegime.name()),
+                            "WARN");
+                        try {
+                            cancelExistingOrders(profilePrefix, symbol);
+                            client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
+                            double pnl = (currentPrice - entryPrice) * qty;
+                            portfolio.setPosition(symbol, Optional.empty());
+                            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
+                            updateDailyPnL(profilePrefix, pnl);
+                            applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
+                            pendingExitOrders.put(symbol, System.currentTimeMillis());
+                        } catch (Exception e) {
+                            logger.error("{} Failed regime exit for {}: {}", profilePrefix, symbol, e.getMessage());
+                            urgentExitQueue.put(urgentKey(brokerName, symbol),
+                                new UrgentExit(brokerName, symbol, qty, "regime-bearish", System.currentTimeMillis()));
+                        }
+                        continue;
+                    }
+                }
+
                 // Settlement-lag guard: when a position is closed the broker may still report the
                 // shares as held for up to ~15 minutes (T+0 settlement lag). Skip orphan registration
                 // in that window to prevent phantom orphan → immediate force-close sequences.
@@ -2021,8 +2136,7 @@ public class ProfileManager implements Runnable {
                 // or freshly reconstructed tight stops otherwise) AND attempt a native broker stop. This
                 // closes the META-incident hole where fractional fills + post-restart drift left positions
                 // completely unprotected. Falls through to the loss-threshold safety net below.
-                var existingDbRecord = database.getOpenTradeRecords(brokerName).stream()
-                    .filter(r -> r.symbol().equals(symbol)).findFirst();
+                var existingDbRecord = Optional.ofNullable(openDbRecordsBySymbol.get(symbol));
 
                 double recoveredStop;
                 double recoveredTp;
@@ -2183,6 +2297,7 @@ public class ProfileManager implements Runnable {
     private void cleanupExpiredCooldowns() {
         long now = System.currentTimeMillis();
         stopLossCooldowns.entrySet().removeIf(entry -> entry.getValue() < now);
+        pendingBuySymbols.entrySet().removeIf(entry -> now - entry.getValue() > PENDING_BUY_TTL_MS);
     }
 
     /**
@@ -2345,9 +2460,35 @@ public class ProfileManager implements Runnable {
             }
 
             // Clean up ghost OPEN DB records for symbols no longer held at this broker.
-            // Each broker owns its own rows (filtered by brokerName), so this is safe to
-            // run per-broker in multi-broker mode. Min age = 2 minutes to avoid closing
-            // records for positions currently being opened this cycle.
+            // First attempt to recover real fill prices from Alpaca order history so that
+            // orphaned rows are closed with actual P&L (not CANCELLED with $0).
+            // This fixes the "CANCELLED with pnl=0" problem caused by restarts or broker-side stops.
+            try {
+                var orderHistory = client.getOrderHistory(null, 50);
+                if (orderHistory != null && orderHistory.isArray()) {
+                    for (var order : orderHistory) {
+                        String side = order.path("side").asText("");
+                        String status = order.path("status").asText("");
+                        String sym = order.path("symbol").asText("");
+                        if (!"sell".equals(side) || !"filled".equals(status)) continue;
+                        if (brokerSymbols.contains(sym)) continue; // still held
+                        if (!database.hasOpenTrade(sym, brokerName)) continue; // no orphan to close
+                        double fillPrice = order.path("filled_avg_price").asDouble(0);
+                        String filledAtStr = order.path("filled_at").asText("");
+                        if (fillPrice <= 0) continue;
+                        java.time.Instant fillTime = filledAtStr.isEmpty()
+                            ? java.time.Instant.now()
+                            : java.time.Instant.parse(filledAtStr);
+                        database.closeTrade(sym, fillTime, fillPrice, 0, brokerName);
+                        logger.info("{} Orphan recovery: closed {} with real fill price ${} from order history",
+                            profilePrefix, sym, String.format("%.2f", fillPrice));
+                    }
+                }
+            } catch (Exception e) {
+                logger.debug("{} Order history fetch for orphan recovery failed: {}", profilePrefix, e.getMessage());
+            }
+            // Mark any remaining orphans (no fill price found) as CANCELLED.
+            // Min age = 2 minutes to avoid closing records for positions currently being opened.
             database.closeOrphanedOpenTrades(brokerName, brokerSymbols, 2 * 60 * 1000L);
 
             // Ensure every live broker position has a matching OPEN record in the trade DB.
@@ -2394,7 +2535,7 @@ public class ProfileManager implements Runnable {
                     var position = new com.trading.risk.TradePosition(
                         trade.symbol(), trade.entryPrice(), trade.quantity(),
                         trade.stopLoss(), trade.takeProfit(), trade.entryTime(),
-                        trade.entryPrice(), 0
+                        trade.entryPrice(), trade.partialExitsExecuted()
                     );
                     portfolio.setPosition(trade.symbol(), java.util.Optional.of(position));
                     restored++;

@@ -1071,9 +1071,18 @@ public class Config {
     public boolean isDailyProfitTargetEnabled() {
         return getBooleanProperty("DAILY_PROFIT_TARGET_ENABLED", false);
     }
-    
+
     public double getDailyProfitTarget() {
         return getDoubleProperty("DAILY_PROFIT_TARGET", 15.0);
+    }
+
+    public boolean isDailyMaxLossEnabled() {
+        return getBooleanProperty("DAILY_MAX_LOSS_ENABLED", true);
+    }
+
+    // Stop new entries when today's realized losses exceed this % of equity (default 3%).
+    public double getDailyMaxLossPercent() {
+        return getDoubleProperty("DAILY_MAX_LOSS_PERCENT", 3.0);
     }
     
     public boolean isStopTradingWhenTargetHit() {

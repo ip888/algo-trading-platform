@@ -524,6 +524,18 @@ public class TradeDatabase {
      * Get total P&L with optimistic read.
      * This is the key advantage of StampedLock - reads don't block each other or writers.
      */
+    public double getTodayPnL() {
+        String sql = "SELECT COALESCE(SUM(pnl), 0) as total FROM trades " +
+                     "WHERE status = 'CLOSED' AND DATE(exit_time) = DATE('now')";
+        long stamp = lock.tryOptimisticRead();
+        double result = queryDouble(sql, "total");
+        if (!lock.validate(stamp)) {
+            stamp = lock.readLock();
+            try { result = queryDouble(sql, "total"); } finally { lock.unlockRead(stamp); }
+        }
+        return result;
+    }
+
     public double getTotalPnL() {
         String sql = "SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE status = 'CLOSED'";
         

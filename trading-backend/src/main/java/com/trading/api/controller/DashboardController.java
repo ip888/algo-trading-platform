@@ -565,10 +565,11 @@ public final class DashboardController {
     }
     
     private void getTradeStats(Context ctx) {
+        var dbStats = database.getTradeStatistics();
         var stats = new HashMap<String, Object>();
-        stats.put("totalTrades", database.getTotalTrades());
-        stats.put("totalPnL", database.getTotalPnL());
-        stats.put("winRate", portfolio.getWinRate());
+        stats.put("totalTrades", dbStats.totalTrades());
+        stats.put("totalPnL", dbStats.totalPnL());
+        stats.put("winRate", dbStats.winRate());
         ctx.json(stats);
     }
     
@@ -791,7 +792,7 @@ public final class DashboardController {
             analytics.put("returnPercent", capital > 0 ? (pnl / capital) * 100 : 0);
             
             // Daily P&L (approximate)
-            analytics.put("todayPnL", pnl); // TODO: Filter by today's date
+            analytics.put("todayPnL", database.getTodayPnL());
             
             ctx.json(analytics);
         } catch (Exception e) {

@@ -2069,58 +2069,56 @@ public class ProfileManager implements Runnable {
                             );
                         }
                     }
-                    continue; // Position handled by enhanced strategy
-                }
-
-                // ========== REGIME-AWARE EXIT / STOP TIGHTENING ==========
-                // If regime flips to WEAK_BEAR or STRONG_BEAR while holding a bullish position,
-                // tighten the stop to breakeven (profitable) or exit immediately (losing).
-                // Bearish ETFs (inverse funds) are excluded — they benefit from a falling market.
-                boolean isBearishEtf = profile.bearishSymbols().contains(symbol);
-                boolean isInBearishRegime = latestRegime == MarketRegime.WEAK_BEAR
-                    || latestRegime == MarketRegime.STRONG_BEAR;
-                if (!isBearishEtf && isInBearishRegime) {
-                    double pnlPct = (currentPrice - entryPrice) / entryPrice * 100.0;
-                    if (pnlPct > 0 && position.stopLoss() < entryPrice) {
-                        // Profitable long in a bearish regime → tighten stop to breakeven
-                        double breakevenStop = entryPrice * 1.001; // 0.1% above entry
-                        var tightened = new com.trading.risk.TradePosition(
-                            position.symbol(), position.entryPrice(), position.quantity(),
-                            breakevenStop, position.takeProfit(), position.entryTime(),
-                            position.highestPrice(), position.partialExitsExecuted());
-                        portfolio.setPosition(symbol, Optional.of(tightened));
-                        logger.info("{} {} 📉 REGIME→BEARISH: tightened SL to breakeven ${} (+{}%)",
-                            profilePrefix, symbol,
-                            String.format("%.2f", tightened.stopLoss()),
-                            String.format("%.2f", pnlPct));
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] 📉 %s stop tightened to breakeven — regime is %s",
-                                profile.name(), symbol, latestRegime.name()),
-                            "WARN");
-                    } else if (pnlPct <= -0.5) {
-                        // Losing long in a bearish regime → exit now, don't wait for SL
-                        logger.warn("{} {} 📉 REGIME→BEARISH: exiting losing position ({}%)",
-                            profilePrefix, symbol, String.format("%.2f", pnlPct));
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] 📉 REGIME EXIT: %s (%.2f%%) — regime is %s",
-                                profile.name(), symbol, pnlPct, latestRegime.name()),
-                            "WARN");
-                        try {
-                            cancelExistingOrders(profilePrefix, symbol);
-                            client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
-                            double pnl = (currentPrice - entryPrice) * qty;
-                            portfolio.setPosition(symbol, Optional.empty());
-                            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
-                            updateDailyPnL(profilePrefix, pnl);
-                            applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
-                            pendingExitOrders.put(symbol, System.currentTimeMillis());
-                        } catch (Exception e) {
-                            logger.error("{} Failed regime exit for {}: {}", profilePrefix, symbol, e.getMessage());
-                            urgentExitQueue.put(urgentKey(brokerName, symbol),
-                                new UrgentExit(brokerName, symbol, qty, "regime-bearish", System.currentTimeMillis()));
+                    // ========== REGIME-AWARE EXIT / STOP TIGHTENING ==========
+                    // If regime flips to WEAK_BEAR or STRONG_BEAR while holding a bullish position,
+                    // tighten the stop to breakeven (profitable) or exit immediately (losing).
+                    // Bearish ETFs (inverse funds) are excluded — they benefit from a falling market.
+                    boolean isBearishEtf = profile.bearishSymbols().contains(symbol);
+                    boolean isInBearishRegime = latestRegime == MarketRegime.WEAK_BEAR
+                        || latestRegime == MarketRegime.STRONG_BEAR;
+                    if (!isBearishEtf && isInBearishRegime) {
+                        double pnlPct = (currentPrice - entryPrice) / entryPrice * 100.0;
+                        if (pnlPct > 0 && position.stopLoss() < entryPrice) {
+                            double breakevenStop = entryPrice * 1.001;
+                            var tightened = new com.trading.risk.TradePosition(
+                                position.symbol(), position.entryPrice(), position.quantity(),
+                                breakevenStop, position.takeProfit(), position.entryTime(),
+                                position.highestPrice(), position.partialExitsExecuted());
+                            portfolio.setPosition(symbol, Optional.of(tightened));
+                            logger.info("{} {} 📉 REGIME→BEARISH: tightened SL to breakeven ${} (+{}%)",
+                                profilePrefix, symbol,
+                                String.format("%.2f", tightened.stopLoss()),
+                                String.format("%.2f", pnlPct));
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] 📉 %s stop tightened to breakeven — regime is %s",
+                                    profile.name(), symbol, latestRegime.name()),
+                                "WARN");
+                        } else if (pnlPct <= -0.5) {
+                            logger.warn("{} {} 📉 REGIME→BEARISH: exiting losing position ({}%)",
+                                profilePrefix, symbol, String.format("%.2f", pnlPct));
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] 📉 REGIME EXIT: %s (%.2f%%) — regime is %s",
+                                    profile.name(), symbol, pnlPct, latestRegime.name()),
+                                "WARN");
+                            try {
+                                cancelExistingOrders(profilePrefix, symbol);
+                                client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
+                                double pnl = (currentPrice - entryPrice) * qty;
+                                portfolio.setPosition(symbol, Optional.empty());
+                                database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
+                                updateDailyPnL(profilePrefix, pnl);
+                                applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
+                                pendingExitOrders.put(symbol, System.currentTimeMillis());
+                            } catch (Exception e) {
+                                logger.error("{} Failed regime exit for {}: {}", profilePrefix, symbol, e.getMessage());
+                                urgentExitQueue.put(urgentKey(brokerName, symbol),
+                                    new UrgentExit(brokerName, symbol, qty, "regime-bearish", System.currentTimeMillis()));
+                            }
+                            continue;
                         }
-                        continue;
                     }
+
+                    continue; // Position handled by enhanced strategy
                 }
 
                 // Settlement-lag guard: when a position is closed the broker may still report the

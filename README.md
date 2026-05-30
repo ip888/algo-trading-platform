@@ -2,6 +2,59 @@
 
 **Algorithmic trading engine for US Stocks via Alpaca API, with modern cloud deployment.**
 
+---
+
+## 🗂 Active Development Session
+
+> **To continue this work from another machine**, open Claude Code and load this project. The conversation below summarises all recent context — paste it as your first message, or just read it and start asking questions.
+
+### Last session: May 29–30, 2026
+
+**Session transcript (Claude Code VSCode, project: algo-trading-platform)**
+Session ID: `f2a6edac-d025-440d-8f24-4144af5a4567`
+Transcript file (local): `.claude/projects/.../f2a6edac-d025-440d-8f24-4144af5a4567.jsonl`
+
+#### What was built in this session
+
+**9 bot fixes deployed (commit `a9cac015` + `8f5f2d1b` + `6c6ae98e`):**
+1. Double-entry race guard — `pendingBuySymbols` map prevents duplicate orders in back-to-back cycles
+2. Position sizing hard cap — notional never exceeds `equity × tierMaxPositionPercent` before order placement
+3. Orphan P&L recovery — fetches Alpaca order history before marking trades CANCELLED, records real fill price
+4. Daily loss circuit breaker — `DAILY_MAX_LOSS_ENABLED=true`, `DAILY_MAX_LOSS_PERCENT=3.0` (stops new entries if 3% lost today)
+5. Regime-aware exits — in WEAK_BEAR/STRONG_BEAR: tightens profitable longs to breakeven, exits losing longs >0.5%
+6. Win rate dashboard fix — `/api/trades/stats` was always returning 0% win rate
+7. Partial-exit mask restored on restart — `partialExitsExecuted` field now survives redeploys
+8. N×DB queries reduced — `getOpenTradeRecords()` hoisted outside the exit loop (1 query/cycle not N)
+9. `getTodayPnL()` — analytics endpoint now shows today's P&L, not all-time total
+
+**Volume profile + ATR TP cap fixes (commit `09d6872d`):**
+- Volume profile check is now a hard entry block (was warn-only)
+- ATR TP capped at `min(ATR-based TP, profile.takeProfitPercent%)` — was producing 8.5% TP instead of configured 3%
+
+**27 new unit tests added (commit `e78af8e8`)** covering all 9 fixes above.
+
+#### Scheduled tasks
+| Routine | Date | Action |
+|---------|------|--------|
+| [Disable PDT protection](https://claude.ai/code/routines/trig_01XGJTP21jjbPqAANpU783cN) | June 4, 2026 9:00 AM ET | Sets `PDT_PROTECTION_ENABLED=false`, commits, pushes. **Then run `fly deploy --remote-only` manually.** |
+
+#### Current bot state
+- **App:** `trading-bot-igor-waw` on Fly.io (region: iad)
+- **Broker:** Alpaca only (`BROKERS=alpaca:100`), Tradier hard-disabled
+- **Account:** ~$1,175 live equity, SMALL tier (35% max per position, 3 positions max)
+- **Regime:** WEAK_BEAR (62% confidence) as of May 30
+- **Open position:** SPY ×2 lots, entry ~$753.48, SL $738.91, TP $776.11
+- **Win rate:** 11.8% (6W/45L) — strategy under review
+- **PDT:** Currently enabled; being removed June 4 when FINRA rule abolished
+
+#### Next optimization priorities (PDT-related — see below)
+1. Reduce `MIN_HOLD_TIME_HOURS` from 4 → 1 after June 4
+2. Enable `EOD_EXIT_ENABLED=true` for intraday profit-locking
+3. Consider tighter stops (1.0% vs 1.5%) since same-day re-entry is free post-PDT
+4. Review MACD strategy win rate — 11.8% is too low regardless of PDT
+
+---
+
 ![Status](https://img.shields.io/badge/Status-Production-green?style=flat-square)
 ![Java](https://img.shields.io/badge/Java-25%20LTS-orange?style=flat-square)
 ![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blue?style=flat-square)

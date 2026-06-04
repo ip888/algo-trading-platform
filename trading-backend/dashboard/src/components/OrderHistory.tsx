@@ -11,6 +11,7 @@ interface RestTrade {
   quantity?: number;
   pnl?: number;
   strategy?: string;
+  exitReason?: string;
 }
 
 const OrderHistoryComponent = () => {
@@ -95,9 +96,17 @@ const OrderHistoryComponent = () => {
                 padding: '6px 0',
                 borderBottom: '1px solid rgba(255,255,255,0.02)'
               }}>
-                <div style={{ display: 'flex', gap: '10px' }}>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                   <span style={{ color: 'var(--text-dim)' }}>[{displayTime}]</span>
                   <span style={{ fontWeight: 700 }}>{trade.symbol}</span>
+                  {trade.strategy === 'SCALP' && (
+                    <span style={{
+                      fontSize: '9px', fontWeight: 800, letterSpacing: '0.04em',
+                      background: 'rgba(255,200,0,0.15)', color: '#ffd700',
+                      border: '1px solid rgba(255,200,0,0.35)',
+                      borderRadius: '3px', padding: '1px 5px'
+                    }}>⚡ SCALP</span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                   {trade.entryPrice != null && trade.exitPrice != null && (

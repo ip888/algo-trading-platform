@@ -1663,4 +1663,27 @@ public class Config {
     public double getCircuitBreakerSessionDrawdownPercent() {
         return getDoubleProperty("CIRCUIT_BREAKER_SESSION_DRAWDOWN_PERCENT", 5.0);
     }
+
+    // ── Intraday Scalp Strategy ──────────────────────────────────────────────
+    public boolean isScalpStrategyEnabled() {
+        return getBooleanProperty("SCALP_STRATEGY_ENABLED", true);
+    }
+    public double getScalpStopLossPercent() {
+        return getDoubleProperty("SCALP_STOP_LOSS_PERCENT", 0.35);
+    }
+    public double getScalpTakeProfitPercent() {
+        return getDoubleProperty("SCALP_TAKE_PROFIT_PERCENT", 0.70);
+    }
+    public int getScalpMaxDailyTrades() {
+        return getIntProperty("SCALP_MAX_DAILY_TRADES", 4);
+    }
+    public double getScalpRsiBuyMin() {
+        return getDoubleProperty("SCALP_RSI_MIN", 45.0);
+    }
+    public double getScalpRsiBuyMax() {
+        return getDoubleProperty("SCALP_RSI_MAX", 58.0);
+    }
+    public double getScalpVolumeMultiplier() {
+        return getDoubleProperty("SCALP_VOLUME_MULTIPLIER", 1.3);
+    }
 }

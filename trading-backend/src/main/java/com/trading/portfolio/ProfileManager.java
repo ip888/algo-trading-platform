@@ -122,6 +122,11 @@ public class ProfileManager implements Runnable {
         = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long PENDING_BUY_TTL_MS = 5 * 60 * 1000L; // 5 minutes
 
+    // Scalp override: non-null while handleBuy is executing for a ScalpBuy signal.
+    // Carries [stopLossPercent, takeProfitPercent] to bypass the profile's swing-trade targets.
+    // Cleared in a finally block — never bleeds into subsequent normal entries.
+    private Double[] scalpOverrides = null;
+
     // STATIC: Shared across profiles. Track consecutive stop-loss hits per symbol.
     // Key = symbol, Value = count of consecutive SL hits (reset on successful trade or manual clear)
     private static java.util.concurrent.ConcurrentHashMap<String, Integer> consecutiveStopLosses = new java.util.concurrent.ConcurrentHashMap<>();
@@ -860,15 +865,28 @@ public class ProfileManager implements Runnable {
         var signal = strategyManager.evaluate(symbol, currentPrice, qty, regime);
         
         // Handle signal
-        if (signal instanceof TradingSignal.Buy buy) {
+        if (signal instanceof TradingSignal.ScalpBuy scalpBuy && qty == 0) {
+            // Scalp entry: tight SL/TP carried in the signal itself.
+            // Bypasses add-to-position logic — scalps are flat-in / flat-out only.
+            if (database.hasOpenTrade(symbol, brokerName)) {
+                logger.debug("{} {} skipping SCALP BUY — open DB record exists", profilePrefix, symbol);
+            } else {
+                scalpOverrides = new Double[]{scalpBuy.stopLossPercent(), scalpBuy.takeProfitPercent()};
+                try {
+                    handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
+                } finally {
+                    scalpOverrides = null;
+                }
+            }
+        } else if (signal instanceof TradingSignal.Buy buy) {
             // Only buy if symbol is target for current regime
             boolean isTarget = targetSymbols.contains(symbol);
             if (!isTarget && qty == 0) {
-                logger.debug("{} Skipping BUY for {} (not target for current VIX)", 
+                logger.debug("{} Skipping BUY for {} (not target for current VIX)",
                     profilePrefix, symbol);
                 return;
             }
-            
+
             // Allow buying if:
             // 1. We don't have a position (qty == 0) AND no open DB record, OR
             // 2. We have a position but BUY signal is strong AND position is under tier max
@@ -1530,43 +1548,56 @@ public class ProfileManager implements Runnable {
         // Replaces flat % stops with ATR-derived stops so volatile names get wider stops
         // (don't get noise-stopped) and quiet names get tighter ones (don't bleed slowly).
         // Falls back to profile flat % if ATR can't be computed (insufficient bars).
+        // Scalp entries bypass ATR — their tight fixed SL/TP are carried in scalpOverrides.
         double stopLoss;
         double takeProfit;
         double atr = 0.0;
-        if (config.isAtrStopsEnabled()) {
-            try {
-                int period = config.getAtrPeriodBars();
-                var atrBars = client.getBars(symbol, "1Day", period + 5);
-                atr = AtrCalculator.atr(atrBars, period);
-            } catch (Exception e) {
-                logger.debug("{} ATR fetch failed for {}: {}", profilePrefix, symbol, e.getMessage());
-            }
-        }
-        if (atr > 0.0) {
-            stopLoss = RiskManager.calculateAtrStopLoss(
-                currentPrice, atr,
-                config.getAtrStopMultiplier(),
-                config.getAtrStopFloorPercent(),
-                config.getAtrStopCeilingPercent());
-            double atrTp = RiskManager.calculateAtrTakeProfit(
-                currentPrice, atr,
-                config.getAtrTakeProfitMultiplier(),
-                config.getAtrStopFloorPercent());
-            // Cap ATR TP at the profile's configured target — ATR widens for volatility
-            // but should never produce a target harder to reach than the configured goal.
-            double profileTp = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
-            takeProfit = Math.min(atrTp, profileTp);
-            logger.info("{} {}: ATR={} (n={}) → stop=${} ({}%) tp=${} ({}%)",
+        if (scalpOverrides != null) {
+            // Scalp entry: use the tight SL/TP embedded in the ScalpBuy signal
+            stopLoss  = currentPrice * (1.0 - scalpOverrides[0] / 100.0);
+            takeProfit = currentPrice * (1.0 + scalpOverrides[1] / 100.0);
+            logger.info("{} {} SCALP: SL=${} ({}%) TP=${} ({}%)",
                 profilePrefix, symbol,
-                String.format("%.4f", atr),
-                config.getAtrPeriodBars(),
                 String.format("%.2f", stopLoss),
-                String.format("%.2f", (currentPrice - stopLoss) / currentPrice * 100.0),
+                String.format("%.2f", scalpOverrides[0]),
                 String.format("%.2f", takeProfit),
-                String.format("%.2f", (takeProfit - currentPrice) / currentPrice * 100.0));
+                String.format("%.2f", scalpOverrides[1]));
         } else {
-            stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
-            takeProfit = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+            if (config.isAtrStopsEnabled()) {
+                try {
+                    int period = config.getAtrPeriodBars();
+                    var atrBars = client.getBars(symbol, "1Day", period + 5);
+                    atr = AtrCalculator.atr(atrBars, period);
+                } catch (Exception e) {
+                    logger.debug("{} ATR fetch failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                }
+            }
+            if (atr > 0.0) {
+                stopLoss = RiskManager.calculateAtrStopLoss(
+                    currentPrice, atr,
+                    config.getAtrStopMultiplier(),
+                    config.getAtrStopFloorPercent(),
+                    config.getAtrStopCeilingPercent());
+                double atrTp = RiskManager.calculateAtrTakeProfit(
+                    currentPrice, atr,
+                    config.getAtrTakeProfitMultiplier(),
+                    config.getAtrStopFloorPercent());
+                // Cap ATR TP at the profile's configured target — ATR widens for volatility
+                // but should never produce a target harder to reach than the configured goal.
+                double profileTp = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+                takeProfit = Math.min(atrTp, profileTp);
+                logger.info("{} {}: ATR={} (n={}) → stop=${} ({}%) tp=${} ({}%)",
+                    profilePrefix, symbol,
+                    String.format("%.4f", atr),
+                    config.getAtrPeriodBars(),
+                    String.format("%.2f", stopLoss),
+                    String.format("%.2f", (currentPrice - stopLoss) / currentPrice * 100.0),
+                    String.format("%.2f", takeProfit),
+                    String.format("%.2f", (takeProfit - currentPrice) / currentPrice * 100.0));
+            } else {
+                stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
+                takeProfit = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+            }
         }
 
         // ========== ATR-BASED VOL-TARGETED SIZING (Tier 1.3) ==========
@@ -1747,11 +1778,12 @@ public class ProfileManager implements Runnable {
         // Update portfolio
         portfolio.setPosition(symbol, Optional.of(newPosition));
         
-        // Record trade
+        // Record trade — tag scalp entries so the dashboard can display them distinctly
+        String entryStrategyTag = scalpOverrides != null ? "SCALP" : profile.strategyType();
         database.recordTrade(
             symbol,
-            profile.strategyType(),
-            profile.name(),  // Add profile name for tracking
+            entryStrategyTag,
+            profile.name(),
             brokerName,
             newPosition.entryTime(),
             currentPrice,

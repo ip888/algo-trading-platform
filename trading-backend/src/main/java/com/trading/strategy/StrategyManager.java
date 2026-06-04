@@ -29,6 +29,7 @@ public final class StrategyManager {
     private final MeanReversionStrategy meanReversionStrategy;
     private final MomentumStrategy momentumStrategy;
     private final MultiTimeframeAnalyzer multiTimeframeAnalyzer;
+    private final ScalpStrategy scalpStrategy;
     private MarketRegime currentRegime = MarketRegime.RANGE_BOUND;
     private String activeStrategy = "None";
 
@@ -47,6 +48,7 @@ public final class StrategyManager {
         this.meanReversionStrategy = new MeanReversionStrategy();
         this.momentumStrategy = config != null ? new MomentumStrategy(config) : new MomentumStrategy();
         this.multiTimeframeAnalyzer = multiTimeframeAnalyzer;
+        this.scalpStrategy = (config != null && client != null) ? new ScalpStrategy(client, config) : null;
         this.momentumAssets = config != null ? config.getMomentumAssets()
             : java.util.Set.of("GLD","SLV","TLT","XLU","NVDA","TSLA","META","XLE","XLK","XOP","URA","GRID");
 
@@ -149,6 +151,22 @@ public final class StrategyManager {
                             String.format("MTF gradient veto (%s at %.0f%% confidence)",
                                 latestMtfAnalysis.recommendation(), conf * 100));
                     }
+                }
+            }
+
+            // Scalp overlay — check intraday conditions AFTER regime signal.
+            // Fires only when: positionQty==0, scalp window active, and not in a crash regime.
+            // ScalpBuy overrides a HOLD from the regime strategy, allowing fast intraday entries
+            // the daily-bar strategies miss. Does NOT override an existing SELL signal.
+            if (scalpStrategy != null
+                    && positionQty == 0
+                    && !(signal instanceof TradingSignal.Sell)
+                    && regime != MarketRegime.STRONG_BEAR
+                    && regime != MarketRegime.HIGH_VOLATILITY) {
+                var scalpSignal = scalpStrategy.evaluate(symbol, currentPrice, positionQty);
+                if (scalpSignal instanceof TradingSignal.ScalpBuy) {
+                    activeStrategy = "Scalp (15-min)";
+                    return scalpSignal;
                 }
             }
 

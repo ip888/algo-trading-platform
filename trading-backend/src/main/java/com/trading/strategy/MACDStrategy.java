@@ -44,12 +44,10 @@ public final class MACDStrategy implements TradingStrategy {
             currentPrice, String.format("%.2f", macdLine), String.format("%.2f", signalLine),
             String.format("%.2f", histogram), String.format("%.2f", prevHistogram));
 
-        // Bullish Crossover: MACD crosses ABOVE Signal
-        boolean bullishCrossover = prevMacdLine <= prevSignalLine && macdLine > signalLine;
-
         // Strong Uptrend: MACD above signal, histogram growing, AND was already positive last bar.
-        // Threshold raised to 0.10 (from 0.05) to filter weak signals.
-        // Requiring prevHistogram > 0 ensures 2+ consecutive bullish bars — avoids single-bar whipsaws.
+        // Two consecutive bars with a positive and expanding histogram = confirmed momentum, not a
+        // single-bar whipsaw. Single-bar crossovers are intentionally removed — they fire on every
+        // daily chop and produce the majority of false entries (historically ~79% loss rate).
         boolean strongUptrend = macdLine > signalLine
             && histogram > prevHistogram
             && histogram > 0.10
@@ -58,9 +56,8 @@ public final class MACDStrategy implements TradingStrategy {
         // Bearish Crossover: MACD crosses BELOW Signal
         boolean bearishCrossover = prevMacdLine >= prevSignalLine && macdLine < signalLine;
 
-        if ((bullishCrossover || strongUptrend) && positionQty == 0) {
-            String type = bullishCrossover ? "Crossover" : "Trend Follow";
-            var reason = String.format("MACD Buy (%s): %.2f / %.2f", type, macdLine, signalLine);
+        if (strongUptrend && positionQty == 0) {
+            var reason = String.format("MACD Buy (Confirmed Uptrend): %.2f / %.2f", macdLine, signalLine);
             logger.info("{}: BUY signal - {}", symbol, reason);
             return new TradingSignal.Buy(reason);
         } else if (bearishCrossover && positionQty > 0) {

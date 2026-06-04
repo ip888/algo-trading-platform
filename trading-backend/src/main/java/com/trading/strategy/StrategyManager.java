@@ -178,9 +178,11 @@ public final class StrategyManager {
                     activeStrategy = "Momentum (Strong Bull)";
                     yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
                 } else {
-                    // Regular assets: MACD Trend Following
+                    // Regular assets: MACD Trend Following, gated by RSI to prevent extended entries
                     activeStrategy = "MACD Trend";
-                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    yield rsiFilteredBuy(
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
+                        history, symbol, positionQty);
                 }
             }
             case STRONG_BEAR -> {
@@ -199,10 +201,12 @@ public final class StrategyManager {
                     activeStrategy = "Momentum (Weak Bull)";
                     yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
                 } else {
-                    // RSI oversold (<30) = catching falling knives in weak markets.
-                    // MACD trend-following is safer: it requires a real crossover, not just "fallen far enough".
+                    // MACD trend-following, gated by RSI to avoid entering already-extended moves.
+                    // RSI > 65 on a MACD BUY = late entry into a move that's about to retrace.
                     activeStrategy = "MACD Trend (Weak Bull)";
-                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    yield rsiFilteredBuy(
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
+                        history, symbol, positionQty);
                 }
             }
             case WEAK_BEAR -> {
@@ -276,6 +280,31 @@ public final class StrategyManager {
 
     public String getActiveStrategy() {
         return activeStrategy;
+    }
+
+    /**
+     * Gates any BUY signal from MACD with an RSI check.
+     * RSI > 65: move is already extended — entering here means buying near a short-term peak,
+     *           which the 1% stop will hit on the very next daily retrace.
+     * RSI < 35: momentum is broken — MACD crossover in a downtrend is a false signal.
+     * The sweet spot 35–65 is where MACD trend-following entries have positive expectancy.
+     * Has no effect on SELL or HOLD signals, or on exits (positionQty > 0).
+     */
+    private TradingSignal rsiFilteredBuy(TradingSignal signal, List<Double> history,
+                                         String symbol, double positionQty) {
+        if (!(signal instanceof TradingSignal.Buy) || positionQty > 0) return signal;
+        double rsi = RSIStrategy.calculateRSI(history, 14);
+        if (rsi > 65.0) {
+            logger.info("{}: MACD BUY blocked — RSI extended ({} > 65, don't chase)",
+                symbol, String.format("%.1f", rsi));
+            return new TradingSignal.Hold(String.format("MACD BUY filtered: RSI extended (%.1f > 65)", rsi));
+        }
+        if (rsi < 35.0) {
+            logger.info("{}: MACD BUY blocked — RSI weak ({} < 35, momentum not confirmed)",
+                symbol, String.format("%.1f", rsi));
+            return new TradingSignal.Hold(String.format("MACD BUY filtered: RSI too weak (%.1f < 35)", rsi));
+        }
+        return signal;
     }
 
     /**

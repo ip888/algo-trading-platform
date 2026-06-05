@@ -6,6 +6,9 @@ interface Phase2Status {
   capitalReserve: number;
   deployableCapital: number;
   tradingMode: string;
+  scalpEnabled: boolean;
+  scalpDailyCount: number;
+  scalpDailyMax: number;
 }
 
 export function Phase2StatusBar() {
@@ -25,7 +28,10 @@ export function Phase2StatusBar() {
         setStatus({
           capitalReserve: accountData.capitalReserve || 0,
           deployableCapital: accountData.deployableCapital || 0,
-          tradingMode: statusData.tradingMode || 'LIVE'
+          tradingMode: statusData.tradingMode || 'LIVE',
+          scalpEnabled: statusData.scalpEnabled ?? true,
+          scalpDailyCount: statusData.scalpDailyCount ?? 0,
+          scalpDailyMax: statusData.scalpDailyMax ?? 4,
         });
       } catch (error) {
         console.error('Failed to fetch Phase 2 status:', error);
@@ -54,6 +60,14 @@ export function Phase2StatusBar() {
           {status.tradingMode}
         </span>
       </div>
+      {status.scalpEnabled && (
+        <div className="status-pill" title={`Intraday scalp trades today: ${status.scalpDailyCount} / ${status.scalpDailyMax}`}>
+          <span className="pill-label">⚡ Scalp:</span>
+          <span className="pill-value" style={{ color: status.scalpDailyCount >= status.scalpDailyMax ? '#f59e0b' : '#a3e635' }}>
+            {status.scalpDailyCount}/{status.scalpDailyMax}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

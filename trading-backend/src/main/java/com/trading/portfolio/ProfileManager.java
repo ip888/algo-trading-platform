@@ -194,9 +194,14 @@ public class ProfileManager implements Runnable {
     // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
     private volatile long pdtBlockedUntil = 0;
 
-    // Static PDT state — exposed to dashboard (account-level, shared across profiles)
+    // Static PDT state — kept for backward-compat (always 0/false since PDT abolished June 4 2026)
     private static volatile long staticPdtBlockedUntil = 0;
     private static volatile int staticDayTradeCount = 0;
+
+    // Static scalp count — sum across all active ProfileManager instances (MAIN + EXPERIMENTAL)
+    private static final java.util.concurrent.atomic.AtomicInteger staticScalpDailyCount
+        = new java.util.concurrent.atomic.AtomicInteger(0);
+    private static volatile java.time.LocalDate scalpCountDate = java.time.LocalDate.now();
 
     // STATIC: Halt state snapshots — updated each cycle, exposed to dashboard
     private static volatile boolean portfolioStopLossHaltActive = false;
@@ -871,6 +876,13 @@ public class ProfileManager implements Runnable {
             if (database.hasOpenTrade(symbol, brokerName)) {
                 logger.debug("{} {} skipping SCALP BUY — open DB record exists", profilePrefix, symbol);
             } else {
+                // Reset static counter if day has rolled over
+                java.time.LocalDate today = java.time.LocalDate.now();
+                if (!today.equals(scalpCountDate)) {
+                    staticScalpDailyCount.set(0);
+                    scalpCountDate = today;
+                }
+                staticScalpDailyCount.incrementAndGet();
                 scalpOverrides = new Double[]{scalpBuy.stopLossPercent(), scalpBuy.takeProfitPercent()};
                 try {
                     handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
@@ -3341,9 +3353,19 @@ public class ProfileManager implements Runnable {
         return java.util.Collections.unmodifiableMap(consecutiveStopLosses);
     }
 
-    /** PDT state for dashboard — account-level, updated by the MAIN profile each cycle. */
+    /** PDT state — kept for backward-compat; always 0 since PDT abolished June 4 2026. */
     public static long getPdtBlockedUntil() { return staticPdtBlockedUntil; }
     public static int getPdtDayTradeCount() { return staticDayTradeCount; }
+
+    /** Scalp trades executed today across all profiles — resets at midnight. */
+    public static int getScalpDailyCount() {
+        java.time.LocalDate today = java.time.LocalDate.now();
+        if (!today.equals(scalpCountDate)) {
+            staticScalpDailyCount.set(0);
+            scalpCountDate = today;
+        }
+        return staticScalpDailyCount.get();
+    }
 
     /** Blocked buy reasons — symbols that failed entry gates (gap-down, price improvement). */
     public static java.util.Map<String, String> getBlockedBuys() {

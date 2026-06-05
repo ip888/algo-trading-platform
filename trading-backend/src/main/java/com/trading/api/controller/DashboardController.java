@@ -692,11 +692,15 @@ public final class DashboardController {
             status.put("vix", vix);
             status.put("tradingMode", config.getTradingMode());
             
-            // Phase 2 metrics
+            // PDT abolished June 4 2026 — kept for UI backward-compat, always false
             status.put("pdtProtectionEnabled", config.isPDTProtectionEnabled());
-            status.put("capitalReserveEnabled", true); // Always enabled in Phase 2
-            status.put("capitalReservePercent", 0.25); // 25% reserve
-            status.put("opportunityTrackingEnabled", true); // Always enabled in Phase 2
+            // Intraday scalp strategy
+            status.put("scalpEnabled", config.isScalpStrategyEnabled());
+            status.put("scalpDailyCount", com.trading.portfolio.ProfileManager.getScalpDailyCount());
+            status.put("scalpDailyMax", config.getScalpMaxDailyTrades());
+            status.put("capitalReserveEnabled", true);
+            status.put("capitalReservePercent", 0.25);
+            status.put("opportunityTrackingEnabled", true);
             
             // Active positions
             status.put("activePositions", portfolio.getActivePositionCount());
@@ -1229,24 +1233,37 @@ public final class DashboardController {
                 "detail", emergencyActive ? "EMERGENCY STOP ACTIVE — bot halted!" : "Normal — no emergency triggered"
             ));
 
-            // --- PDT (Pattern Day Trader) status ---
-            int pdtCount = com.trading.portfolio.ProfileManager.getPdtDayTradeCount();
-            long pdtBlockedUntil = com.trading.portfolio.ProfileManager.getPdtBlockedUntil();
-            boolean pdtBlocked = pdtBlockedUntil > now;
-            boolean pdtWarning = !pdtBlocked && pdtCount >= 2;
-            String pdtStatus = pdtBlocked ? "RED" : pdtWarning ? "YELLOW" : "GREEN";
-            String pdtDetail;
-            if (pdtBlocked) {
-                long minsLeft = (pdtBlockedUntil - now) / 60000;
-                pdtDetail = String.format("PDT EXHAUSTED — all sells blocked for %dm. Positions protected by native GTC stops.", minsLeft);
-            } else if (pdtWarning) {
-                pdtDetail = String.format("%d/3 day trades used — buys blocked, last slot reserved for exits", pdtCount);
+            // --- Intraday Scalp status (replaces obsolete PDT check — PDT abolished June 4 2026) ---
+            boolean scalpEnabled = config.isScalpStrategyEnabled();
+            int scalpMax = config.getScalpMaxDailyTrades();
+            int scalpCount = com.trading.portfolio.ProfileManager.getScalpDailyCount();
+            String scalpDetail;
+            if (!scalpEnabled) {
+                scalpDetail = "Scalp strategy disabled (set SCALP_STRATEGY_ENABLED=true to enable)";
             } else {
-                pdtDetail = pdtCount + "/3 day trades used today";
+                // Determine if we are currently inside a scalp window (9:45–11:30 or 14:00–15:00 ET)
+                java.time.LocalTime et = java.time.ZonedDateTime
+                    .now(java.time.ZoneId.of("America/New_York")).toLocalTime();
+                boolean inMorning   = !et.isBefore(java.time.LocalTime.of(9, 45))
+                                   && et.isBefore(java.time.LocalTime.of(11, 30));
+                boolean inAfternoon = !et.isBefore(java.time.LocalTime.of(14, 0))
+                                   && et.isBefore(java.time.LocalTime.of(15, 0));
+                boolean inWindow = inMorning || inAfternoon;
+                String windowLabel = inWindow ? "window ACTIVE" : "window inactive";
+                scalpDetail = String.format("⚡ %d/%d used today — SL=%.2f%% TP=%.2f%% | %s",
+                    scalpCount, scalpMax,
+                    config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent(),
+                    windowLabel);
             }
-            checks.add(Map.of("name", "PDT Day Trades", "status", pdtStatus, "detail", pdtDetail));
-            response.put("pdtDayTradeCount", pdtCount);
-            response.put("pdtBlockedUntilMs", pdtBlocked ? pdtBlockedUntil : 0);
+            String scalpStatus = !scalpEnabled ? "YELLOW"
+                : (scalpCount >= scalpMax ? "YELLOW" : "GREEN");
+            checks.add(Map.of("name", "Intraday Scalp", "status", scalpStatus, "detail", scalpDetail));
+            response.put("scalpEnabled", scalpEnabled);
+            response.put("scalpDailyCount", scalpCount);
+            response.put("scalpDailyMax", scalpMax);
+            // Keep for any existing consumers
+            response.put("pdtDayTradeCount", 0);
+            response.put("pdtBlockedUntilMs", 0);
 
             // Urgent exit queue: failed protective sells pending retry
             var urgentExits = com.trading.portfolio.ProfileManager.getUrgentExitQueue();

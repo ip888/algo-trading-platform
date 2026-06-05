@@ -164,9 +164,9 @@ export default function SmartFeaturesPanel() {
       <div className="feature-section">
         <h3>🛡️ Risk Management</h3>
         <div className="risk-grid">
-          <div className={`risk-item ${config.riskManagement.pdtProtectionEnabled ? 'active' : ''}`}>
-            <span className="icon">{config.riskManagement.pdtProtectionEnabled ? '✅' : '❌'}</span>
-            <span className="name">PDT Protection</span>
+          <div className="risk-item active">
+            <span className="icon">⚡</span>
+            <span className="name">Intraday Scalp (0.35% SL / 0.70% TP)</span>
           </div>
           <div className={`risk-item ${config.riskManagement.maxLossExitEnabled ? 'active' : ''}`}>
             <span className="icon">{config.riskManagement.maxLossExitEnabled ? '✅' : '❌'}</span>

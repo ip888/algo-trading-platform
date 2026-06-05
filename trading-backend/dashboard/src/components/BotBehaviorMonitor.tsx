@@ -44,7 +44,7 @@ const STATUS_ICONS: Record<string, string> = {
 };
 
 // Checks that are shown as a compact top-row summary strip (not full cards)
-const SUMMARY_CHECKS = new Set(['VIX / Market Regime', 'Market Hours', 'Entry Gates', 'PDT Day Trades']);
+const SUMMARY_CHECKS = new Set(['VIX / Market Regime', 'Market Hours', 'Entry Gates', 'Intraday Scalp']);
 
 export const BotBehaviorMonitor = () => {
   const [data, setData] = useState<BotBehavior | null>(null);

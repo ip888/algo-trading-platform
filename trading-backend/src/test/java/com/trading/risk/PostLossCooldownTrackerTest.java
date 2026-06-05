@@ -92,4 +92,30 @@ class PostLossCooldownTrackerTest {
         assertThrows(IllegalArgumentException.class,
             () -> new PostLossCooldownTracker(0, -1, 2));
     }
+
+    @Test
+    @DisplayName("restoreState: rehydrates expiry and consecutive count from persisted values")
+    void restoreStateRehydratesExactExpiry() {
+        var t = tracker();
+        long futureExpiry = System.currentTimeMillis() + 7_200_000L; // 2h from now
+        t.restoreState("SPY", futureExpiry, 2);
+
+        assertTrue(t.isInCooldown("SPY", System.currentTimeMillis()),
+            "Symbol should be in cooldown after restoreState");
+        assertEquals(2, t.getConsecutiveLosses("SPY"),
+            "Consecutive loss count must match what was persisted");
+        assertTrue(t.remainingMs("SPY", System.currentTimeMillis()) > 7_000_000L,
+            "Remaining time should be close to 2 hours");
+    }
+
+    @Test
+    @DisplayName("restoreState: expired entry is silently ignored (not restored)")
+    void restoreStateIgnoresExpiredEntry() {
+        var t = tracker();
+        long pastExpiry = System.currentTimeMillis() - 1_000L; // already expired
+        t.restoreState("NVDA", pastExpiry, 3);
+
+        assertFalse(t.isInCooldown("NVDA", System.currentTimeMillis()),
+            "Already-expired entry must not be treated as active cooldown");
+    }
 }

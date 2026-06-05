@@ -88,4 +88,15 @@ public final class PostLossCooldownTracker {
         cooldownExpiry.clear();
         consecutiveLosses.clear();
     }
+
+    /**
+     * Directly seed persisted state after a restart, bypassing duration recalculation.
+     * Called by ProfileManager.restorePostLossCooldownsFromDb() to restore the exact
+     * expiry timestamp and consecutive-loss count that were saved before the restart.
+     */
+    public void restoreState(String symbol, long expiryMs, int consecLosses) {
+        if (symbol == null || symbol.isBlank() || expiryMs <= System.currentTimeMillis()) return;
+        cooldownExpiry.put(symbol, expiryMs);
+        if (consecLosses > 0) consecutiveLosses.put(symbol, consecLosses);
+    }
 }

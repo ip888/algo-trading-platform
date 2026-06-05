@@ -28,7 +28,6 @@ import com.trading.strategy.TradingProfile;
 import com.trading.strategy.TradingSignal;
 import com.trading.execution.SmartOrderTypeSelector;
 import com.trading.execution.SmartOrderTypeSelector.OrderContext;
-import com.trading.execution.SmartOrderTypeSelector.OrderTypeDecision;
 import com.trading.testing.TestModeSimulator;
 import com.trading.websocket.TradingWebSocketHandler;
 import org.slf4j.Logger;
@@ -337,6 +336,8 @@ public class ProfileManager implements Runnable {
                         config.getPostLossCooldownMs(),
                         config.getPostLossCooldownExtendedMs(),
                         2);
+                    // Restore cooldown state from DB so restarts don't silently clear active cooldowns
+                    restorePostLossCooldownsFromDb(postLossCooldown);
                 }
             }
         }
@@ -1853,15 +1854,25 @@ public class ProfileManager implements Runnable {
             // Tier 1.1: feed per-symbol post-loss cooldown (escalates after consecutive losses).
             if (postLossCooldown != null) {
                 long applied = postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+                int consecLosses = postLossCooldown.getConsecutiveLosses(symbol);
                 logger.info("{} {} post-loss cooldown applied: {}h ({} consec losses)",
-                    profilePrefix, symbol, applied / (60L * 60 * 1000),
-                    postLossCooldown.getConsecutiveLosses(symbol));
+                    profilePrefix, symbol, applied / (60L * 60 * 1000), consecLosses);
+                // Persist so the cooldown survives a restart
+                long expiryMs = System.currentTimeMillis() + applied;
+                database.saveBotState("cooldown:" + symbol,
+                    expiryMs + "," + consecLosses);
+                database.saveBotState("consec_sl:" + symbol, String.valueOf(consecLosses));
             }
         } else {
             // Profitable exit — allow free re-entry at any price, reset consecutive SL counter.
             lastExitPrices.remove(symbol);
             consecutiveStopLosses.remove(symbol);
-            if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
+            if (postLossCooldown != null) {
+                postLossCooldown.recordWin(symbol);
+                // Clear persisted state for this symbol — no active cooldown
+                database.deleteBotState("cooldown:" + symbol);
+                database.deleteBotState("consec_sl:" + symbol);
+            }
             logger.debug("{} {} consecutive SL counter reset after profitable exit", profilePrefix, symbol);
         }
 
@@ -3356,6 +3367,46 @@ public class ProfileManager implements Runnable {
     /** PDT state — kept for backward-compat; always 0 since PDT abolished June 4 2026. */
     public static long getPdtBlockedUntil() { return staticPdtBlockedUntil; }
     public static int getPdtDayTradeCount() { return staticDayTradeCount; }
+
+    /**
+     * Restore PostLossCooldownTracker state from bot_state table after a restart.
+     * Loads all "cooldown:{symbol}" entries, skips expired ones, seeds the tracker.
+     * Also restores consecutiveStopLosses from "consec_sl:{symbol}" entries.
+     */
+    private void restorePostLossCooldownsFromDb(PostLossCooldownTracker tracker) {
+        try {
+            var cooldowns = database.loadBotStateWithPrefix("cooldown:");
+            long now = System.currentTimeMillis();
+            int restored = 0;
+            int expired = 0;
+            for (var entry : cooldowns.entrySet()) {
+                String symbol = entry.getKey().substring("cooldown:".length());
+                String[] parts = entry.getValue().split(",");
+                if (parts.length < 2) continue;
+                long expiryMs = Long.parseLong(parts[0].trim());
+                int consecLosses = Integer.parseInt(parts[1].trim());
+                if (expiryMs <= now) {
+                    database.deleteBotState(entry.getKey());
+                    database.deleteBotState("consec_sl:" + symbol);
+                    expired++;
+                    continue;
+                }
+                // Restore exact persisted state — no recalculation
+                tracker.restoreState(symbol, expiryMs, consecLosses);
+                consecutiveStopLosses.put(symbol, consecLosses);
+                logger.info("[{}] Restored post-loss cooldown for {} — expires in {}h ({} consec losses)",
+                    profile.name(), symbol,
+                    (expiryMs - now) / (60L * 60 * 1000), consecLosses);
+                restored++;
+            }
+            if (restored > 0 || expired > 0) {
+                logger.info("[{}] Post-loss cooldown restore: {} active, {} expired/cleaned",
+                    profile.name(), restored, expired);
+            }
+        } catch (Exception e) {
+            logger.warn("[{}] Failed to restore post-loss cooldowns from DB: {}", profile.name(), e.getMessage());
+        }
+    }
 
     /** Scalp trades executed today across all profiles — resets at midnight. */
     public static int getScalpDailyCount() {

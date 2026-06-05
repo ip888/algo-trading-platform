@@ -92,6 +92,17 @@ public class TradeDatabase {
 
         runMigration("ALTER TABLE trades ADD COLUMN partial_exits_executed INTEGER DEFAULT 0",
             "Schema migration: Added 'partial_exits_executed' column (bitmask of partial-exit levels fired)");
+
+        // bot_state: lightweight key-value store for in-memory state that must survive restarts.
+        // Covers: post-loss cooldowns, consecutive-loss counts, circuit-breaker drawdown.
+        // Keys use namespaced prefixes: "cooldown:{symbol}", "consec_sl:{symbol}", "circuit:{broker}"
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )""",
+            "Schema migration: Added bot_state table for restart-safe in-memory state");
     }
 
     /**
@@ -962,5 +973,86 @@ public class TradeDatabase {
             return "\"" + str.replace("\"", "\"\"") + "\"";
         }
         return str;
+    }
+
+    // ── bot_state persistence ────────────────────────────────────────────────
+
+    /** Upsert a single key into bot_state. Value is JSON or a plain number string. */
+    public void saveBotState(String key, String value) {
+        String sql = """
+            INSERT INTO bot_state (key, value, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """;
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, key);
+            ps.setString(2, value);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warn("saveBotState failed for key '{}': {}", key, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Load a single key. Returns null if missing. */
+    public String loadBotState(String key) {
+        String sql = "SELECT value FROM bot_state WHERE key = ?";
+        long stamp = lock.tryOptimisticRead();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, key);
+            try (var rs = ps.executeQuery()) {
+                String result = rs.next() ? rs.getString("value") : null;
+                if (lock.validate(stamp)) return result;
+            }
+        } catch (SQLException e) {
+            logger.warn("loadBotState failed for key '{}': {}", key, e.getMessage());
+        }
+        // Fallback to read lock
+        stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, key);
+            try (var rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString("value") : null;
+            }
+        } catch (SQLException e) {
+            logger.warn("loadBotState (read-lock) failed for key '{}': {}", key, e.getMessage());
+            return null;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    /** Load all keys matching a prefix. Returns a map of key → value. */
+    public java.util.Map<String, String> loadBotStateWithPrefix(String prefix) {
+        String sql = "SELECT key, value FROM bot_state WHERE key LIKE ?";
+        var result = new java.util.HashMap<String, String>();
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, prefix + "%");
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) result.put(rs.getString("key"), rs.getString("value"));
+            }
+        } catch (SQLException e) {
+            logger.warn("loadBotStateWithPrefix failed for prefix '{}': {}", prefix, e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return result;
+    }
+
+    /** Delete a single key (e.g., when cooldown expires naturally). */
+    public void deleteBotState(String key) {
+        String sql = "DELETE FROM bot_state WHERE key = ?";
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, key);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warn("deleteBotState failed for key '{}': {}", key, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
     }
 }

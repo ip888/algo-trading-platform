@@ -275,38 +275,40 @@ public class MarketRegimeDetector {
     }
     
     /**
-     * Analyze market breadth using momentum as proxy
-     * In a real implementation, would use advance/decline data
+     * Analyze market breadth using 5-day price trend across a broader symbol set.
+     *
+     * Previous approach used intraday changePercent (close vs open of latest bar), which
+     * collapsed to 0% on gap-down opens even in healthy bull markets — the symbols spent the
+     * day recovering above their opens but had already been counted as "declining" at open.
+     *
+     * New approach: fetch 6 daily bars, compare close[today] vs close[5 days ago].
+     * A symbol is "advancing" if it is up over the past week. This is a trend signal, not
+     * a single-day noise check, and it's immune to stale intraday quotes from the IEX feed.
      */
     private BreadthAnalysis analyzeBreadth() {
-        try {
-            // Use market analyzer to get momentum across symbols
-            var analysis = marketAnalyzer.analyze(List.of("SPY", "QQQ", "IWM", "DIA"));
-            
-            // Count symbols with positive momentum
-            int advancing = 0;
-            int declining = 0;
-            
-            for (var score : analysis.assetScores().values()) {
-                if (score.changePercent() > 0) {
-                    advancing++;
-                } else {
-                    declining++;
-                }
+        var symbols = List.of("SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV");
+        int advancing = 0;
+        int declining = 0;
+
+        for (String sym : symbols) {
+            try {
+                var bars = client.getMarketHistory(sym, 6); // 6 daily bars
+                if (bars.size() < 2) continue;
+                double recent = bars.get(bars.size() - 1).close();
+                double older  = bars.get(0).close();
+                if (recent > older) advancing++;
+                else declining++;
+            } catch (Exception e) {
+                logger.debug("Breadth fetch failed for {}: {}", sym, e.getMessage());
             }
-            
-            int total = advancing + declining;
-            double adRatio = total > 0 ? (double) advancing / total : 0.5;
-            double strength = adRatio; // 0.0 to 1.0
-            
-            logger.debug("Breadth: {}% (A/D: {}/{})", String.format("%.0f", strength * 100), advancing, declining);
-            
-            return new BreadthAnalysis(strength, advancing, declining, adRatio);
-            
-        } catch (Exception e) {
-            logger.warn("Failed to analyze breadth: {}", e.getMessage());
-            return new BreadthAnalysis(0.5, 0, 0, 1.0);
         }
+
+        int total = advancing + declining;
+        double adRatio  = total > 0 ? (double) advancing / total : 0.5;
+        double strength = adRatio;
+
+        logger.debug("Breadth: {}% (A/D: {}/{})", String.format("%.0f", strength * 100), advancing, declining);
+        return new BreadthAnalysis(strength, advancing, declining, adRatio);
     }
     
     /**

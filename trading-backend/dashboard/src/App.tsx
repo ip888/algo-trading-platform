@@ -29,27 +29,39 @@ import './App.css';
 function App() {
   const store = useTradingStore();
   const accountData = store.accountData;
-  
+
+  // Scalp status polled from /api/status (30s interval)
+  const [scalpStatus, setScalpStatus] = useState<{ count: number; max: number; enabled: boolean } | null>(null);
+
   useEffect(() => {
     webSocketService.connect();
-    
-    // Fetch initial account data via REST (WebSocket may not send until trading activity)
+
     const fetchAccountData = async () => {
       try {
         const res = await fetch(`${CONFIG.API_BASE_URL}/api/account`);
-        if (res.ok) {
-          const data = await res.json();
-          store.setAccountData(data);
-        }
+        if (res.ok) store.setAccountData(await res.json());
       } catch (e) {
         console.warn('Failed to fetch initial account data:', e);
       }
     };
+
+    const fetchBotStatus = async () => {
+      try {
+        const res = await fetch(`${CONFIG.API_BASE_URL}/api/status`);
+        if (res.ok) {
+          const d = await res.json();
+          if (d.scalpEnabled !== undefined) {
+            setScalpStatus({ count: d.scalpDailyCount ?? 0, max: d.scalpDailyMax ?? 4, enabled: d.scalpEnabled });
+          }
+        }
+      } catch { /* silent */ }
+    };
+
     fetchAccountData();
-    
-    // Refresh account data every 30 seconds
-    const interval = setInterval(fetchAccountData, 30000);
-    
+    fetchBotStatus();
+
+    const interval = setInterval(() => { fetchAccountData(); fetchBotStatus(); }, 30000);
+
     return () => {
       webSocketService.disconnect();
       clearInterval(interval);
@@ -146,6 +158,14 @@ function App() {
                 {store.systemStatus?.totalTrades ? `${(store.systemStatus.winRate ?? 0).toFixed(1)}%` : '—'}
               </div>
             </div>
+            {scalpStatus?.enabled && (
+              <div className="stat-card">
+                <span className="label">⚡ SCALP TODAY</span>
+                <div className={`value ${scalpStatus.count >= scalpStatus.max ? 'negative' : scalpStatus.count > 0 ? 'positive' : 'highlight'}`}>
+                  {scalpStatus.count}/{scalpStatus.max}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="layout-columns">

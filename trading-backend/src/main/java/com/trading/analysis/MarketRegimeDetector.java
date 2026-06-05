@@ -368,11 +368,18 @@ public class MarketRegimeDetector {
         
         // Bearish regimes
         if (trend.direction == TrendDirection.STRONG_DOWN || trend.direction == TrendDirection.WEAK_DOWN) {
-            // Strong bear: high volume + weak breadth
+            // Strong bear: high volume + weak breadth — confirmed crash/correction
             if (volume.trend == VolumeTrend.INCREASING && breadth.strength < 0.4) {
                 return MarketRegime.STRONG_BEAR;
             }
-            // Weak bear: low volume
+            // Conflicting signals: trend is mildly down but breadth is healthy and VIX is calm.
+            // Breadth > 50% means most sectors are up over 5 days — this is consolidation/chop,
+            // not a true bear market. Mean Reversion (RANGE_BOUND) fits better than WEAK_BEAR's
+            // strict entry block, which would halt all trading on a normal pullback day.
+            if (breadth.strength > 0.50 && vix < 20) {
+                return MarketRegime.RANGE_BOUND;
+            }
+            // Genuine weak bear: downtrend with low breadth or elevated VIX
             return MarketRegime.WEAK_BEAR;
         }
         

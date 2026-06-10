@@ -762,9 +762,19 @@ public class ProfileManager implements Runnable {
         }
     }
     
-    private void tradeSymbol(String symbol, List<String> targetSymbols, 
+    private void tradeSymbol(String symbol, List<String> targetSymbols,
                             double equity, double buyingPower, MarketRegime regime, double currentVix, String profilePrefix) throws Exception {
-        
+
+        // ========== SYMBOL BLACKLIST ==========
+        // Hard block for IPOs, secondary offerings, or symbols with broker-imposed restrictions
+        // (e.g. fractional trading disabled, no margin, no price history). Set SYMBOL_BLACKOUT=X,Y in config.
+        var blacklist = config.getSymbolBlacklist();
+        if (!blacklist.isEmpty() && blacklist.contains(symbol.toUpperCase())) {
+            logger.info("{} {} BLACKLISTED — skipping (reason: SYMBOL_BLACKOUT config)", profilePrefix, symbol);
+            blockedBuys.put(symbol, "blacklisted (SYMBOL_BLACKOUT)");
+            return;
+        }
+
         // Broadcast processing status for dashboard
         int symbolIndex = new ArrayList<>(targetSymbols).indexOf(symbol) + 1;
         int totalSymbols = targetSymbols.size();

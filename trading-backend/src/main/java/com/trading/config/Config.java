@@ -1608,6 +1608,22 @@ public class Config {
     public boolean isEarningsBlackoutEnabled() {
         return getBooleanProperty("EARNINGS_BLACKOUT_ENABLED", true);
     }
+
+    /**
+     * Comma-separated list of symbols to never trade — covers IPOs, secondary offerings,
+     * or any symbol with broker-imposed restrictions (e.g. fractional/margin not available).
+     * Example: SYMBOL_BLACKOUT=SPACEX,SYMBOL2
+     */
+    public java.util.Set<String> getSymbolBlacklist() {
+        String raw = getProperty("SYMBOL_BLACKOUT");
+        if (raw == null || raw.isBlank()) return java.util.Set.of();
+        return java.util.Arrays.stream(raw.split(","))
+            .map(String::trim)
+            .map(String::toUpperCase)
+            .filter(s -> !s.isEmpty())
+            .collect(java.util.stream.Collectors.toSet());
+    }
+
     public int getEarningsBlackoutHoursBefore() {
         return getIntProperty("EARNINGS_BLACKOUT_HOURS_BEFORE", 24);
     }

@@ -315,17 +315,21 @@ public final class AlpacaClient implements BrokerClient {
      * @param stopPrice  Price that triggers the market sell
      */
     public void placeNativeStopOrder(String symbol, double qty, double stopPrice) throws Exception {
+        // Alpaca rejects GTC for fractional quantities ("fractional orders must be DAY orders").
+        // Since EOD_EXIT_ENABLED closes positions by 15:30, a DAY stop provides full session protection.
+        boolean isFractional = (qty % 1.0) != 0.0;
+        String tif = isFractional ? "day" : "gtc";
         var order = objectMapper.createObjectNode()
             .put("symbol", symbol)
             .put("qty", String.format("%.9f", qty))
             .put("side", "sell")
             .put("type", "stop")
-            .put("time_in_force", "gtc")
+            .put("time_in_force", tif)
             .put("stop_price", String.format("%.2f", stopPrice));
 
         var body = objectMapper.writeValueAsString(order);
-        logger.info("Placing native GTC stop-loss order: symbol={} qty={} stopPrice={}",
-            symbol, qty, stopPrice);
+        logger.info("Placing native {} stop-loss order: symbol={} qty={} stopPrice={}",
+            tif.toUpperCase(), symbol, qty, stopPrice);
         sendRequest(config.baseUrl() + "/v2/orders", "POST", body);
     }
 

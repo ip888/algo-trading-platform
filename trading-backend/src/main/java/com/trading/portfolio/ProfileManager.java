@@ -2739,28 +2739,43 @@ public class ProfileManager implements Runnable {
         if (!config.isAvoidFirst15Minutes()) {
             return true; // Feature disabled, always allow
         }
-        
+
         var now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
         var currentTime = now.toLocalTime();
-        
+
         // Avoid first 15 minutes (9:30-9:45 AM)
         var marketOpen = java.time.LocalTime.of(9, 30);
         var safeEntryTime = java.time.LocalTime.of(9, 45);
-        
+
         if (currentTime.isAfter(marketOpen) && currentTime.isBefore(safeEntryTime)) {
             return false; // Too early
         }
-        
-        // Optionally avoid last 30 minutes
+
+        // Block new entries at or after EOD exit time when EOD exit is enabled.
+        // Prevents the trading loop from re-entering positions immediately after EOD closes them,
+        // which was causing overnight holds on positions opened at 15:32 after a 15:30 exit.
+        if (config.isEodExitEnabled()) {
+            try {
+                var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
+                if (!currentTime.isBefore(eodTime)) {
+                    logger.debug("{} Entry blocked — at or after EOD exit time ({})", profilePrefix, config.getEodExitTime());
+                    return false;
+                }
+            } catch (Exception e) {
+                logger.warn("{} Could not parse EOD exit time — skipping EOD entry block", profilePrefix);
+            }
+        }
+
+        // Optionally avoid last 30 minutes (legacy, kept for compatibility)
         if (config.isAvoidLast30Minutes()) {
             var marketClose = java.time.LocalTime.of(16, 0);
             var stopEntryTime = java.time.LocalTime.of(15, 30);
-            
+
             if (currentTime.isAfter(stopEntryTime) && currentTime.isBefore(marketClose)) {
                 return false; // Too late
             }
         }
-        
+
         return true; // Good time to enter
     }
     

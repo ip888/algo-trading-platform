@@ -245,7 +245,14 @@ public final class StrategyManager {
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }
             case RANGE_BOUND -> {
-                // Sideways market → Mean Reversion
+                if (isMomentumAsset) {
+                    // Commodities and sector leaders (GLD, OIH, XLE, XOP, URA, NVDA, etc.) trend on
+                    // their own supply/demand drivers independent of the broad market regime.
+                    // Mean Reversion would miss a rising gold/oil trend — use MACD to follow it.
+                    activeStrategy = "MACD Trend (Range, Momentum Asset)";
+                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                }
+                // Non-momentum assets in sideways market → Mean Reversion (RSI bounce)
                 activeStrategy = "Mean Reversion";
                 yield meanReversionStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }

@@ -2758,11 +2758,11 @@ public class ProfileManager implements Runnable {
             try {
                 var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
                 if (!currentTime.isBefore(eodTime)) {
-                    logger.debug("{} Entry blocked — at or after EOD exit time ({})", profilePrefix, config.getEodExitTime());
+                    logger.debug("Entry blocked — at or after EOD exit time ({})", config.getEodExitTime());
                     return false;
                 }
             } catch (Exception e) {
-                logger.warn("{} Could not parse EOD exit time — skipping EOD entry block", profilePrefix);
+                logger.warn("Could not parse EOD exit time — skipping EOD entry block");
             }
         }
 

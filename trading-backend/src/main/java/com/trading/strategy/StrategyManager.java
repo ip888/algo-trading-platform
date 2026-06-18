@@ -249,8 +249,12 @@ public final class StrategyManager {
                     // Commodities and sector leaders (GLD, OIH, XLE, XOP, URA, NVDA, etc.) trend on
                     // their own supply/demand drivers independent of the broad market regime.
                     // Mean Reversion would miss a rising gold/oil trend — use MACD to follow it.
+                    // RSI gate applied same as WEAK_BULL: blocks entries when RSI is already extended
+                    // (>65) or in freefall (<35), preventing late entries into exhausted moves.
                     activeStrategy = "MACD Trend (Range, Momentum Asset)";
-                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    yield rsiFilteredBuy(
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
+                        history, symbol, positionQty);
                 }
                 // Non-momentum assets in sideways market → Mean Reversion (RSI bounce)
                 activeStrategy = "Mean Reversion";

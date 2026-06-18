@@ -1001,15 +1001,17 @@ public class ProfileManager implements Runnable {
     private void handleBuy(String symbol, double currentPrice, double equity,
                           double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
         
-        // ========== DOUBLE-ENTRY RACE GUARD ==========
-        // The DB gate (hasOpenTrade) fires only after recordTrade() which is called after order
-        // placement. During the ~90s window a second evaluation cycle can fire another BUY for
-        // the same symbol before the DB write completes. This in-memory flag closes that gap.
+        // ========== DOUBLE-ENTRY RACE GUARD (cross-profile safe) ==========
+        // putIfAbsent is atomic: whichever profile wins the CAS owns the entry, the other returns.
+        // This closes the race where MAIN and EXPERIMENTAL both pass a containsKey check at the
+        // same millisecond before either reaches the later put() — causing duplicate entries on
+        // the same symbol and doubling loss exposure on bad trades.
         String pendingBuyKey = brokerName + ":" + symbol;
-        if (pendingBuySymbols.containsKey(pendingBuyKey)) {
-            logger.debug("{} {} BUY skipped — buy already in flight (placed {}s ago)",
+        Long existingClaim = pendingBuySymbols.putIfAbsent(pendingBuyKey, System.currentTimeMillis());
+        if (existingClaim != null) {
+            logger.debug("{} {} BUY skipped — buy already in flight or claimed by sibling profile ({}s ago)",
                 profilePrefix, symbol,
-                (System.currentTimeMillis() - pendingBuySymbols.get(pendingBuyKey)) / 1000);
+                (System.currentTimeMillis() - existingClaim) / 1000);
             return;
         }
 
@@ -1711,10 +1713,6 @@ public class ProfileManager implements Runnable {
             );
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
             Double entryLimitPrice = orderDecision.limitPrice();
-
-            // Mark this symbol as having a buy in-flight BEFORE placing the order.
-            // Cleared after portfolio + DB are updated; prevents duplicate orders from back-to-back cycles.
-            pendingBuySymbols.put(pendingBuyKey, System.currentTimeMillis());
 
             // Place bracket order and check if server-side protection was applied
             var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",

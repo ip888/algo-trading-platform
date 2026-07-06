@@ -368,8 +368,11 @@ public class MarketRegimeDetector {
         
         // Bearish regimes
         if (trend.direction == TrendDirection.STRONG_DOWN || trend.direction == TrendDirection.WEAK_DOWN) {
-            // Strong bear: high volume + weak breadth — confirmed crash/correction
-            if (volume.trend == VolumeTrend.INCREASING && breadth.strength < 0.4) {
+            // Strong bear: high volume + weak breadth + elevated VIX — confirmed crash/correction.
+            // VIX < 20 with a downtrend = sector rotation or consolidation, NOT a real bear market.
+            // Inverse ETF entries (SQQQ, SH, etc.) are only triggered by STRONG_BEAR, so this gate
+            // prevents the bot from buying inverse ETFs during low-volatility pullbacks.
+            if (volume.trend == VolumeTrend.INCREASING && breadth.strength < 0.4 && vix >= 20) {
                 return MarketRegime.STRONG_BEAR;
             }
             // Conflicting signals: trend is mildly down but breadth is reasonable and VIX is calm.

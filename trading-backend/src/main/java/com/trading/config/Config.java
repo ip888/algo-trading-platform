@@ -1669,6 +1669,23 @@ public class Config {
         return getIntProperty("NO_TRADE_OPEN_WINDOW_MINUTES", 30);
     }
 
+    // ── Inverse ETF / bearish entry guards ──────────────────────────────────
+    // Minimum VIX required before the bot may buy inverse ETFs in STRONG_BEAR.
+    // Real bear markets have elevated VIX; low VIX + downtrend = chop, not crash.
+    public double getBearEntryVixMinimum() {
+        return getDoubleProperty("BEAR_ENTRY_VIX_MINIMUM", 20.0);
+    }
+    // Minutes the STRONG_BEAR regime must be active during market hours before
+    // the first inverse ETF entry is allowed.  Prevents acting on stale overnight data.
+    public int getBearEntryPersistenceMinutes() {
+        return getIntProperty("BEAR_ENTRY_PERSISTENCE_MINUTES", 30);
+    }
+    // Minimum regime-detector confidence (0–1) to act on a regime signal.
+    // Below this threshold the bot falls back to RANGE_BOUND for safety.
+    public double getMinRegimeConfidence() {
+        return getDoubleProperty("REGIME_MIN_CONFIDENCE", 0.60);
+    }
+
     // Equity-curve circuit breaker
     public boolean isCircuitBreakerEnabled() {
         return getBooleanProperty("CIRCUIT_BREAKER_ENABLED", true);

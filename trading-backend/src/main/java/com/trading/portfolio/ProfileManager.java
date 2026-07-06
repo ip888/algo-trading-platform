@@ -101,6 +101,9 @@ public class ProfileManager implements Runnable {
     // Daily profit target tracking
     private double todayPnL = 0.0;
     private java.time.LocalDate lastResetDate = java.time.LocalDate.now();
+
+    // EOD exit tracking — prevent re-firing and self-cancelling sell orders within same day
+    private java.time.LocalDate eodExitExecutedDate = null;
     
     // STATIC: Shared across ALL ProfileManager instances to prevent cross-profile buy-back.
     // When MAIN sells SLV, EXPERIMENTAL must also see the cooldown and not re-buy.
@@ -211,6 +214,12 @@ public class ProfileManager implements Runnable {
 
     private volatile boolean running = true;
     private final String brokerName;
+
+    // Bearish regime persistence: tracks when STRONG_BEAR/WEAK_BEAR was first confirmed
+    // during market hours. Inverse ETF entries are blocked until the regime has been bearish
+    // for at least BEAR_ENTRY_PERSISTENCE_MINUTES continuous market-hours minutes.
+    // Resets to null whenever regime turns non-bearish.
+    private java.time.Instant bearishRegimeMarketStart = null;
 
     public ProfileManager(
             TradingProfile profile,
@@ -447,8 +456,43 @@ public class ProfileManager implements Runnable {
             var regimeAnalysis = regimeDetector.getCurrentRegime();
             regime = regimeAnalysis.regime();
             currentVix = regimeAnalysis.vix();
+
+            // ── Regime confidence gate ─────────────────────────────────────────
+            // If the detector isn't confident, fall back to the safer RANGE_BOUND.
+            // This protects against low-quality signals (stale overnight data, few
+            // bars, all indicators in conflict).
+            double minConfidence = config.getMinRegimeConfidence();
+            if (regimeAnalysis.confidence() < minConfidence && regime != MarketRegime.RANGE_BOUND) {
+                logger.info("{} Regime confidence {:.0f}% < minimum {:.0f}% — using RANGE_BOUND fallback (was {})",
+                    profilePrefix,
+                    regimeAnalysis.confidence() * 100,
+                    minConfidence * 100,
+                    regime);
+                regime = MarketRegime.RANGE_BOUND;
+            }
+
+            // ── Bearish regime persistence clock ──────────────────────────────
+            // Track how long we've been in a bearish regime during market hours.
+            // Inverse ETF entry guard in handleBuy() reads bearishRegimeMarketStart.
+            boolean isBearishRegime = (regime == MarketRegime.STRONG_BEAR || regime == MarketRegime.WEAK_BEAR);
+            if (isBearishRegime && marketHoursFilter.isMarketOpen()) {
+                if (bearishRegimeMarketStart == null) {
+                    bearishRegimeMarketStart = java.time.Instant.now();
+                    logger.info("{} 🐻 Bearish regime ({}) confirmed during market hours — " +
+                        "inverse ETF entries blocked for {}min persistence window",
+                        profilePrefix, regime, config.getBearEntryPersistenceMinutes());
+                }
+            } else if (!isBearishRegime) {
+                if (bearishRegimeMarketStart != null) {
+                    logger.info("{} 🔄 Regime flipped {} → {} — resetting bearish persistence clock",
+                        profilePrefix,
+                        isBearishRegime ? regime : "bearish",
+                        regime);
+                }
+                bearishRegimeMarketStart = null;
+            }
+
             targetSymbols = symbolSelector.selectSymbols(regime);
-            
             logger.debug("{} {}", profilePrefix, regimeAnalysis.getSummary());
         } else {
             // Fallback to simple VIX-based selection
@@ -1102,6 +1146,56 @@ public class ProfileManager implements Runnable {
                     profile.name(), symbol, config.getNoTradeOpenWindowMinutes()),
                 "INFO");
             return;
+        }
+
+        // ========== INVERSE ETF / BEARISH ENTRY GUARD (Tier 3.11) ==========
+        // Buying inverse ETFs (SQQQ, SH, PSQ, RWM, DOG) is only valid when market
+        // conditions genuinely confirm a bear market.  Two gates:
+        //
+        //   1. VIX gate: real bear markets have elevated VIX (≥ BEAR_ENTRY_VIX_MINIMUM,
+        //      default 20).  Low VIX + downtrend = sector rotation / consolidation, not a
+        //      confirmed crash.  The regime can briefly call STRONG_BEAR on stale overnight
+        //      daily-bar breadth data even when VIX is calm — this gate catches that.
+        //
+        //   2. Persistence gate: the bearish regime must have been active during market
+        //      hours for at least BEAR_ENTRY_PERSISTENCE_MINUTES (default 30 min) before
+        //      the first inverse ETF entry is allowed.  This prevents the bot from acting
+        //      on a regime flip that appeared at market open from overnight stale data and
+        //      then immediately reverses once fresh intraday bars arrive.
+        if (profile.bearishSymbols().contains(symbol)
+                && (regime == MarketRegime.STRONG_BEAR || regime == MarketRegime.WEAK_BEAR)) {
+            // Gate 1: VIX must be elevated
+            double bearVixMin = config.getBearEntryVixMinimum();
+            if (currentVix < bearVixMin) {
+                String reason = String.format(
+                    "inverse ETF blocked — VIX %.1f < BEAR_ENTRY_VIX_MINIMUM %.1f (not a real bear)",
+                    currentVix, bearVixMin);
+                blockedBuys.put(symbol, reason);
+                logger.warn("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⛔ %s blocked: VIX %.1f too low for inverse ETF entry (min %.0f)",
+                        profile.name(), symbol, currentVix, bearVixMin),
+                    "WARN");
+                return;
+            }
+            // Gate 2: regime persistence during market hours
+            long persistenceMs = config.getBearEntryPersistenceMinutes() * 60_000L;
+            long elapsedMs = bearishRegimeMarketStart != null
+                ? java.time.Duration.between(bearishRegimeMarketStart, java.time.Instant.now()).toMillis()
+                : 0L;
+            if (elapsedMs < persistenceMs) {
+                long remainingMin = (persistenceMs - elapsedMs) / 60_000L + 1;
+                String reason = String.format(
+                    "inverse ETF blocked — STRONG_BEAR persistence %dmin < required %dmin (%.0f min remaining)",
+                    elapsedMs / 60_000L, config.getBearEntryPersistenceMinutes(), (float) remainingMin);
+                blockedBuys.put(symbol, reason);
+                logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⛔ %s blocked: STRONG_BEAR not yet confirmed (%d min remaining)",
+                        profile.name(), symbol, remainingMin),
+                    "INFO");
+                return;
+            }
         }
 
         // ========== EARNINGS BLACKOUT (Tier 2.5) ==========
@@ -2472,10 +2566,16 @@ public class ProfileManager implements Runnable {
             int removed = 0;
             for (String symbol : internalSymbols) {
                 if (!brokerSymbols.contains(symbol)) {
+                    // Arm the re-entry cooldown BEFORE clearing the position.
+                    // Broker-side native stop/TP fills bypass handleSell() and handleTakeProfit(),
+                    // so the cooldown would never be set — allowing immediate re-entry on the next
+                    // cycle. This is the root cause of rapid same-symbol re-entries (e.g. NVDA
+                    // entered twice within 9 minutes on July 6, 2026).
+                    stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                     portfolio.setPosition(symbol, Optional.empty());
                     removed++;
-                    logger.info("{} Reconciliation: removed stale position {} (not found at broker)",
-                        profilePrefix, symbol);
+                    logger.info("{} Reconciliation: removed stale position {} (not found at broker) — {}-min re-entry cooldown armed",
+                        profilePrefix, symbol, config.getStopLossCooldownMs() / 60000);
                 }
             }
             if (removed > 0) {
@@ -2734,24 +2834,13 @@ public class ProfileManager implements Runnable {
      * Avoids first 15 minutes (9:30-9:45 AM) and optionally last 30 minutes.
      */
     private boolean isGoodEntryTime() {
-        if (!config.isAvoidFirst15Minutes()) {
-            return true; // Feature disabled, always allow
-        }
-
         var now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
         var currentTime = now.toLocalTime();
 
-        // Avoid first 15 minutes (9:30-9:45 AM)
-        var marketOpen = java.time.LocalTime.of(9, 30);
-        var safeEntryTime = java.time.LocalTime.of(9, 45);
-
-        if (currentTime.isAfter(marketOpen) && currentTime.isBefore(safeEntryTime)) {
-            return false; // Too early
-        }
-
-        // Block new entries at or after EOD exit time when EOD exit is enabled.
-        // Prevents the trading loop from re-entering positions immediately after EOD closes them,
-        // which was causing overnight holds on positions opened at 15:32 after a 15:30 exit.
+        // EOD entry block is independent of all other timing flags.
+        // Must be checked first: new entries opened at/after EOD exit time would be
+        // immediately closed by the EOD exit, creating churn and potential overnight holds.
+        // isAvoidFirst15Minutes defaults false, so this was dead code before — fixed.
         if (config.isEodExitEnabled()) {
             try {
                 var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
@@ -2764,6 +2853,18 @@ public class ProfileManager implements Runnable {
             }
         }
 
+        if (!config.isAvoidFirst15Minutes()) {
+            return true; // Open-window feature disabled; EOD block above still applies
+        }
+
+        // Avoid first 15 minutes (9:30-9:45 AM)
+        var marketOpen = java.time.LocalTime.of(9, 30);
+        var safeEntryTime = java.time.LocalTime.of(9, 45);
+
+        if (currentTime.isAfter(marketOpen) && currentTime.isBefore(safeEntryTime)) {
+            return false; // Too early
+        }
+
         // Optionally avoid last 30 minutes (legacy, kept for compatibility)
         if (config.isAvoidLast30Minutes()) {
             var marketClose = java.time.LocalTime.of(16, 0);
@@ -2774,7 +2875,7 @@ public class ProfileManager implements Runnable {
             }
         }
 
-        return true; // Good time to enter
+        return true;
     }
     
     /**
@@ -3173,94 +3274,115 @@ public class ProfileManager implements Runnable {
         if (!profile.isMainProfile()) {
             return;
         }
-        
+
         try {
             // Get current time in ET timezone
             var now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
+            var today = now.toLocalDate();
             var currentTime = now.toLocalTime();
-            
+
             // Parse EOD exit time from config (e.g., "15:30")
             var eodTimeStr = config.getEodExitTime();
             var eodTime = java.time.LocalTime.parse(eodTimeStr);
-            
-            // Check if we're within 1 minute of EOD exit time
-            var timeDiff = java.time.Duration.between(currentTime, eodTime).abs();
-            
-            if (timeDiff.toMinutes() <= 1) {
-                logger.warn("{} ⏰ END OF DAY EXIT TIME ({}) - Closing all positions", profilePrefix, eodTimeStr);
-                
-                // Get all open positions
-                var positions = client.getPositions();
-                
-                if (positions.isEmpty()) {
-                    logger.info("{} No positions to close for EOD", profilePrefix);
-                    return;
+
+            // Fire once per day, as soon as currentTime passes eodTime.
+            // Previous approach used a ±1-minute window which caused every 10-second cycle to
+            // cancel-then-replace the sell order before it could fill (self-cancelling loop).
+            if (currentTime.isBefore(eodTime)) {
+                return; // not yet time
+            }
+            if (eodExitExecutedDate != null && eodExitExecutedDate.equals(today)) {
+                return; // already ran today
+            }
+
+            logger.warn("{} ⏰ END OF DAY EXIT TIME ({}) - Closing all positions", profilePrefix, eodTimeStr);
+
+            // Get all open positions
+            var positions = client.getPositions();
+
+            if (positions.isEmpty()) {
+                eodExitExecutedDate = today;
+                logger.info("{} No positions to close for EOD", profilePrefix);
+                return;
+            }
+
+            logger.warn("{} 🔴 Closing {} position(s) for end of day", profilePrefix, positions.size());
+
+            // Close each position
+            for (var position : positions) {
+                String symbol = position.symbol();
+                double qty = Math.abs(position.quantity());
+                double marketValue = position.marketValue();
+                double entryPrice = position.avgEntryPrice();
+
+                if (qty == 0 || entryPrice == 0) {
+                    logger.debug("{} Skipping invalid position during EOD exit: {} (qty={}, entry={})",
+                        profilePrefix, symbol, qty, entryPrice);
+                    continue;
                 }
-                
-                logger.warn("{} 🔴 Closing {} position(s) for end of day", profilePrefix, positions.size());
-                
-                // Close each position
-                for (var position : positions) {
-                    String symbol = position.symbol();
-                    double qty = Math.abs(position.quantity());
-                    double marketValue = position.marketValue();
-                    double entryPrice = position.avgEntryPrice();
 
-                    // Guard against division by zero
-                    if (qty == 0 || entryPrice == 0) {
-                        logger.debug("{} Skipping invalid position during EOD exit: {} (qty={}, entry={})",
-                            profilePrefix, symbol, qty, entryPrice);
-                        continue;
-                    }
+                double currentPrice = Math.abs(marketValue / qty);
+                double pnl = (currentPrice - entryPrice) * qty;
+                double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
 
-                    // Calculate current price from market value
-                    double currentPrice = Math.abs(marketValue / qty);
-                    double pnl = (currentPrice - entryPrice) * qty;
-                    double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-                    
-                    logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({}%)",
-                        profilePrefix, symbol, qty, entryPrice, currentPrice, pnl, String.format("%.2f", pnlPercent));
-                    
-                    try {
-                        // Cancel any existing orders for this symbol first
-                        var openOrders = client.getOpenOrders(symbol);
-                        for (var order : openOrders) {
+                logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({}%)",
+                    profilePrefix, symbol, qty, entryPrice, currentPrice, pnl, String.format("%.2f", pnlPercent));
+
+                try {
+                    // Cancel only STOP/STOP_LIMIT orders — never cancel pending sell orders.
+                    // The old code cancelled ALL open orders, which could cancel a market sell
+                    // placed by a prior 10-second cycle before it filled (self-cancelling loop).
+                    var openOrders = client.getOpenOrders(symbol);
+                    for (var order : openOrders) {
+                        String orderType = order.get("type") != null ? order.get("type").asText() : "";
+                        String orderSide = order.get("side") != null ? order.get("side").asText() : "";
+                        if (("stop".equals(orderType) || "stop_limit".equals(orderType)) && "sell".equals(orderSide)) {
                             String orderId = order.get("id").asText();
-                            logger.info("{} Canceling existing order {} for {} before EOD exit", 
+                            logger.info("{} Canceling stop order {} for {} before EOD exit",
                                 profilePrefix, orderId, symbol);
                             client.cancelOrder(orderId);
                         }
-                        
-                        // Place market sell order
-                        logger.warn("{} 🔴 EOD SELL: {} - {} shares @ market", profilePrefix, symbol, qty);
-                        client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                        broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
-                        portfolio.setPosition(symbol, Optional.empty());
-
-                        // Broadcast to UI
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] EOD EXIT: %s - Closed %.3f shares | P&L: $%.2f (%.2f%%)",
-                                profile.name(), symbol, qty, pnl, pnlPercent),
-                            pnl >= 0 ? "SUCCESS" : "WARNING"
-                        );
-                        
-                        logger.warn("{} ✅ EOD EXIT completed for {}", profilePrefix, symbol);
-                        
-                    } catch (Exception e) {
-                        logger.error("{} ❌ Failed to execute EOD exit for {}: {}", 
-                            profilePrefix, symbol, e.getMessage(), e);
-                        
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] EOD EXIT FAILED: %s - %s", 
-                                profile.name(), symbol, e.getMessage()),
-                            "ERROR"
-                        );
                     }
+
+                    logger.warn("{} 🔴 EOD SELL: {} - {} shares @ market", profilePrefix, symbol, qty);
+                    client.placeOrder(symbol, qty, "sell", "market", "day", null);
+                    broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
+                    portfolio.setPosition(symbol, Optional.empty());
+                    // Close DB record immediately so hasOpenTrade() returns false on the next
+                    // cycle. Without this, orphan cleanup runs 1-2 cycles later, leaving a window
+                    // where isGoodEntryTime() is true + hasOpenTrade() is false → re-entry.
+                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
+
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] EOD EXIT: %s - Closed %.3f shares | P&L: $%.2f (%.2f%%)",
+                            profile.name(), symbol, qty, pnl, pnlPercent),
+                        pnl >= 0 ? "SUCCESS" : "WARNING"
+                    );
+                    logger.warn("{} ✅ EOD EXIT completed for {}", profilePrefix, symbol);
+
+                } catch (Exception e) {
+                    logger.error("{} ❌ Failed to execute EOD exit for {}: {}",
+                        profilePrefix, symbol, e.getMessage(), e);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] EOD EXIT FAILED: %s - %s",
+                            profile.name(), symbol, e.getMessage()),
+                        "ERROR"
+                    );
                 }
-                
-                logger.warn("{} ✅ END OF DAY EXIT COMPLETE - All positions closed", profilePrefix);
             }
-            
+
+            // Mark EOD exit done only if all positions are confirmed closed.
+            // If any sell failed, eodExitExecutedDate stays null → retries every 10s
+            // until market closes at 16:00 (30-minute retry window).
+            var remaining = client.getPositions();
+            if (remaining.isEmpty()) {
+                eodExitExecutedDate = today;
+                logger.warn("{} ✅ END OF DAY EXIT COMPLETE - All positions closed", profilePrefix);
+            } else {
+                logger.error("{} ⚠️ EOD EXIT INCOMPLETE - {} position(s) still open, will retry next cycle",
+                    profilePrefix, remaining.size());
+            }
+
         } catch (Exception e) {
             logger.error("{} Error during EOD exit check: {}", profilePrefix, e.getMessage(), e);
         }

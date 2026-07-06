@@ -80,8 +80,12 @@ public final class SymbolSelector {
                 yield bearishSymbols;
             }
             case WEAK_BEAR -> {
-                logger.debug("Weak bear regime → Bearish symbols (safe havens)");
-                yield bearishSymbols;
+                // WEAK_BEAR = mild downtrend, low VIX — sector rotation, not a crash.
+                // Trade defensive bullish names (GLD, XLV, XLP, XLE are in bullishSymbols).
+                // Inverse ETFs (bearishSymbols) are only appropriate for genuine STRONG_BEAR
+                // confirmed by elevated VIX + persistence guard.
+                logger.debug("Weak bear regime → Bullish symbols (defensive rotation)");
+                yield bullishSymbols;
             }
             case RANGE_BOUND -> {
                 logger.debug("Range bound regime → Bullish symbols (mean reversion)");

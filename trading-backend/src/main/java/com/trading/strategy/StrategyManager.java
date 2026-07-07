@@ -73,7 +73,11 @@ public final class StrategyManager {
             }
 
             // Mean reversion legitimately buys below SMA — skip trend/volume guards for it.
-            boolean isMeanReversion = (regime == MarketRegime.RANGE_BOUND);
+            // Momentum assets in RANGE_BOUND use MACD (not mean reversion), so they still
+            // need the downtrend guard. Only true mean-reversion entries (non-momentum assets
+            // in RANGE_BOUND) skip the guard. Bug: the old blanket flag allowed MACD entries
+            // on AMD/MSFT/QQQ to bypass the downtrend check, causing losses on Jul 7 2026.
+            boolean isMeanReversion = (regime == MarketRegime.RANGE_BOUND) && !momentumAssets.contains(symbol);
 
             // Check multi-timeframe alignment if enabled
             MultiTimeframeAnalysis latestMtfAnalysis = null;

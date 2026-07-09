@@ -2873,8 +2873,10 @@ public class ProfileManager implements Runnable {
         if (config.isEodExitEnabled()) {
             try {
                 var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
-                if (!currentTime.isBefore(eodTime)) {
-                    logger.debug("Entry blocked — at or after EOD exit time ({})", config.getEodExitTime());
+                var entryDeadline = eodTime.minusMinutes(config.getEodEntryCutoffMinutes());
+                if (!currentTime.isBefore(entryDeadline)) {
+                    logger.debug("Entry blocked — within {}min of EOD exit ({} → cutoff {})",
+                        config.getEodEntryCutoffMinutes(), config.getEodExitTime(), entryDeadline);
                     return false;
                 }
             } catch (Exception e) {

@@ -836,6 +836,11 @@ public class Config {
     public String getEodExitTime() {
         return getProperty("EOD_EXIT_TIME", "15:30");
     }
+
+    /** Minutes before EOD exit to stop accepting new entries. Default 15 → no new entries after 15:15. */
+    public int getEodEntryCutoffMinutes() {
+        return getIntProperty("EOD_ENTRY_CUTOFF_MINUTES", 15);
+    }
     
     // ==================== Time-Based Profit Taking ====================
     

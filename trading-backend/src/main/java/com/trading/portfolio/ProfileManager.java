@@ -876,7 +876,7 @@ public class ProfileManager implements Runnable {
                             "WARN"
                         );
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol);
+                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                         applyPostExitCooldown(symbol, currentPrice, exitPnl, profilePrefix, "max loss");
                         success = true;
                         return;
@@ -914,7 +914,7 @@ public class ProfileManager implements Runnable {
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol);
+                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                         applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "time-based");
 
                         TradingWebSocketHandler.broadcastActivity(
@@ -1095,6 +1095,18 @@ public class ProfileManager implements Runnable {
                     "WARN");
                 return;
             }
+        }
+
+        // ========== DAILY PROFIT TARGET HALT ==========
+        // Stop new entries once the day's P&L has hit the daily profit target.
+        // Exits (stop-loss, take-profit) still run normally — only new buys are blocked.
+        // Prevents giving back a strong day chasing marginal late-session signals.
+        if (config.isDailyProfitTargetEnabled() && todayPnL >= config.getDailyProfitTarget()) {
+            logger.info("{} {} BUY BLOCKED — daily profit target reached (today=+${}, target=${})",
+                profilePrefix, symbol,
+                String.format("%.2f", todayPnL),
+                String.format("%.2f", config.getDailyProfitTarget()));
+            return;
         }
 
         // ========== PDT RESERVATION CHECK ==========
@@ -1965,7 +1977,7 @@ public class ProfileManager implements Runnable {
         
         // Update portfolio and cross-profile tracker
         portfolio.setPosition(symbol, Optional.empty());
-        globalHeldSymbols.remove(symbol);
+        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
 
         // Set re-entry cooldown to prevent immediate re-buy
         long cooldownMs = config.getStopLossCooldownMs();
@@ -2032,11 +2044,23 @@ public class ProfileManager implements Runnable {
                                     String profilePrefix) {
         
         double trailingStopPercent = profile.trailingStopPercent() / 100.0;
-        
-        // Use the built-in updateTrailingStop method which handles validation correctly
+
+        // Base trailing stop: lifts at a fixed percentage below highest price
         var updatedPosition = position.updateTrailingStop(currentPrice, trailingStopPercent);
-        
-        // Only update if stop-loss actually changed
+
+        // Multi-level tighter trail: at +1% profit trail 0.5% below price, at +2% trail 0.3%.
+        // This protects gains more aggressively once a position is solidly profitable,
+        // without changing the initial stop distance on new entries.
+        double multiLevelStop = trailingTargetManager.updateTrailingStop(position, currentPrice);
+        if (multiLevelStop > updatedPosition.stopLoss()) {
+            updatedPosition = new TradePosition(
+                symbol, position.entryPrice(), position.quantity(),
+                multiLevelStop, position.takeProfit(), position.entryTime(),
+                Math.max(position.highestPrice(), currentPrice), position.partialExitsExecuted()
+            );
+        }
+
+        // Persist the tighter stop if it moved up
         if (updatedPosition.stopLoss() > position.stopLoss()) {
             portfolio.setPosition(symbol, Optional.of(updatedPosition));
             database.updateStop(symbol, brokerName, updatedPosition.stopLoss());
@@ -2141,7 +2165,7 @@ public class ProfileManager implements Runnable {
                                     cancelExistingOrders(profilePrefix, symbol);
                                     client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                                     portfolio.setPosition(symbol, Optional.empty());
-                                    globalHeldSymbols.remove(symbol);
+                                    globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                                     applyPostExitCooldown(symbol, currentPrice,
                                         (currentPrice - entryPrice) * qty,
                                         profilePrefix, "PRE_EARNINGS");
@@ -2203,7 +2227,7 @@ public class ProfileManager implements Runnable {
                             } else {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
                                 portfolio.setPosition(symbol, Optional.empty());
-                                globalHeldSymbols.remove(symbol);
+                                globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                                 // Set re-entry cooldown after full exit
                                 stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                                 // Record exit price if loss — require price improvement before re-entry
@@ -2288,7 +2312,7 @@ public class ProfileManager implements Runnable {
                                 client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                                 double pnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
-                                globalHeldSymbols.remove(symbol);
+                                globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                                 database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
                                 updateDailyPnL(profilePrefix, pnl);
                                 applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
@@ -2405,7 +2429,7 @@ public class ProfileManager implements Runnable {
                         // Use direct order for max-loss exit (bypass circuit breaker - critical protective exit)
                         client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol);
+                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                         // Set re-entry cooldown + per-symbol cooldown + circuit-breaker tracking.
                         applyPostExitCooldown(symbol, currentPrice, (currentPrice - entryPrice) * qty,
                             profilePrefix, "MAX_LOSS_UNTRACKED");
@@ -2601,7 +2625,7 @@ public class ProfileManager implements Runnable {
                     // entered twice within 9 minutes on July 6, 2026).
                     stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                     portfolio.setPosition(symbol, Optional.empty());
-                    globalHeldSymbols.remove(symbol);
+                    globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                     removed++;
                     logger.info("{} Reconciliation: removed stale position {} (not found at broker) — {}-min re-entry cooldown armed",
                         profilePrefix, symbol, config.getStopLossCooldownMs() / 60000);
@@ -2989,7 +3013,7 @@ public class ProfileManager implements Runnable {
                 cancelExistingOrders(profilePrefix, symbol);
                 client.placeOrder(symbol, qty, "sell", "market", "day", null);
                 portfolio.setPosition(symbol, Optional.empty());
-                globalHeldSymbols.remove(symbol);
+                globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
 
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] 🧹 CLEANUP: Closed %s (P&L: $%.2f) - reducing to %d positions",
@@ -3108,7 +3132,7 @@ public class ProfileManager implements Runnable {
                     database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                     if (!eodDecision.isPartial()) {
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol);
+                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                         pendingExitOrders.put(symbol, System.currentTimeMillis());
                     }
                     
@@ -3125,9 +3149,19 @@ public class ProfileManager implements Runnable {
                 }
             }
             
-            // Get profile-specific targets
+            // Get profile-specific targets — may be extended if trailing target is active
             double takeProfitPercent = profile.takeProfitPercent();
                 double stopLossPercent = profile.stopLossPercent();
+
+                // When the multi-level trailing stop has locked in profit (stop > entry),
+                // extend the TP ceiling to 2× profile default so the winner can keep running.
+                // The trailing stop will eventually close it when momentum stalls.
+                if (config.isTrailingTargetsEnabled()) {
+                    double trailStop = trailingTargetManager.getCurrentStop(symbol);
+                    if (trailStop > entryPrice) {
+                        takeProfitPercent = profile.takeProfitPercent() * 2.0;
+                    }
+                }
                 
                 // Log P&L status for each position
                 logger.info("{} {} P&L check: current=+{}% vs target=+{}% (entry=${}, now=${})",
@@ -3186,7 +3220,7 @@ public class ProfileManager implements Runnable {
 
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol);
+                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
                         pendingExitOrders.put(symbol, System.currentTimeMillis());
@@ -3232,7 +3266,7 @@ public class ProfileManager implements Runnable {
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol);
+                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
                         pendingExitOrders.put(symbol, System.currentTimeMillis());
@@ -3383,7 +3417,7 @@ public class ProfileManager implements Runnable {
                     client.placeOrder(symbol, qty, "sell", "market", "day", null);
                     broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
                     portfolio.setPosition(symbol, Optional.empty());
-                    globalHeldSymbols.remove(symbol);
+                    globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
                     // Close DB record immediately so hasOpenTrade() returns false on the next
                     // cycle. Without this, orphan cleanup runs 1-2 cycles later, leaving a window
                     // where isGoodEntryTime() is true + hasOpenTrade() is false → re-entry.

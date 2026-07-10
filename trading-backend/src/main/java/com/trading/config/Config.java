@@ -1074,11 +1074,11 @@ public class Config {
     // ==================== Daily Profit Target ====================
     
     public boolean isDailyProfitTargetEnabled() {
-        return getBooleanProperty("DAILY_PROFIT_TARGET_ENABLED", false);
+        return getBooleanProperty("DAILY_PROFIT_TARGET_ENABLED", true);
     }
 
     public double getDailyProfitTarget() {
-        return getDoubleProperty("DAILY_PROFIT_TARGET", 15.0);
+        return getDoubleProperty("DAILY_PROFIT_TARGET", 10.0);
     }
 
     public boolean isDailyMaxLossEnabled() {
@@ -1671,7 +1671,7 @@ public class Config {
         return getBooleanProperty("NO_TRADE_OPEN_WINDOW_ENABLED", true);
     }
     public int getNoTradeOpenWindowMinutes() {
-        return getIntProperty("NO_TRADE_OPEN_WINDOW_MINUTES", 30);
+        return getIntProperty("NO_TRADE_OPEN_WINDOW_MINUTES", 15);
     }
 
     // ── Inverse ETF / bearish entry guards ──────────────────────────────────

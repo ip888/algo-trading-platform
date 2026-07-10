@@ -1671,7 +1671,7 @@ public class Config {
         return getBooleanProperty("NO_TRADE_OPEN_WINDOW_ENABLED", true);
     }
     public int getNoTradeOpenWindowMinutes() {
-        return getIntProperty("NO_TRADE_OPEN_WINDOW_MINUTES", 15);
+        return getIntProperty("NO_TRADE_OPEN_WINDOW_MINUTES", 30);
     }
 
     // ── Inverse ETF / bearish entry guards ──────────────────────────────────

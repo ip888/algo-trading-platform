@@ -3246,88 +3246,12 @@ public class ProfileManager implements Runnable {
                         logger.debug("{} Full stack trace:", profilePrefix, e);
                     }
                 }
-                // Check for stop-loss trigger
-                else if (pnlPercent <= -stopLossPercent) {
-                    logger.warn("{} {} STOP LOSS HIT: Entry=${}, Current=${}, P&L={}% (stop: -{}%)",
-                        profilePrefix, symbol, entryPrice, currentPrice,
-                        String.format("%.2f", pnlPercent), String.format("%.1f", stopLossPercent));
-
-                    try {
-                        // Cancel any existing orders first to free up held shares
-                        cancelExistingOrders(profilePrefix, symbol);
-
-                        // Use direct order for stop-loss (bypass circuit breaker - critical protective exit)
-                        client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
-                        broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
-
-                        // Calculate actual P&L in dollars
-                        double pnlDollars = (currentPrice - entryPrice) * qty;
-                        
-                        // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
-                        portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
-
-                        // Mark as pending exit to prevent duplicate sell on next cycle
-                        pendingExitOrders.put(symbol, System.currentTimeMillis());
-
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ⚠️ STOP LOSS: %s sold @ $%.2f (%.2f%%, $%.2f loss)",
-                                profile.name(), symbol, currentPrice, pnlPercent, pnlDollars),
-                            "WARN"
-                        );
-
-                        // ========== SET RE-ENTRY COOLDOWN ==========
-                        // Prevent immediate re-buy after stop loss (was causing repeated losses)
-                        // Track consecutive stop-losses per symbol for extended cooldown
-                        int slCount = consecutiveStopLosses.merge(symbol, 1, Integer::sum);
-                        long cooldownMs = config.getStopLossCooldownMs();
-
-                        // Extended cooldown after repeated stop-losses on same symbol
-                        if (slCount >= MAX_CONSECUTIVE_SL_BEFORE_EXTENDED_COOLDOWN) {
-                            // 4-hour cooldown after 2+ consecutive SLs (prevents MACD churn)
-                            cooldownMs = Math.max(cooldownMs, 4 * 60 * 60 * 1000L);
-                            logger.warn("{} {} has {} consecutive stop-losses! Extended cooldown: {} hours",
-                                profilePrefix, symbol, slCount, cooldownMs / 3600000);
-
-                            TradingWebSocketHandler.broadcastActivity(
-                                String.format("[%s] ⚠️ %s: %d consecutive stop-losses - extended %d-hour cooldown",
-                                    profile.name(), symbol, slCount, cooldownMs / 3600000),
-                                "WARN"
-                            );
-                        }
-
-                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
-                        // Record exit price — require price improvement before re-entry
-                        lastExitPrices.put(symbol, currentPrice);
-                        // Tier 1.1 + 3.10: feed per-symbol post-loss cooldown and session circuit breaker.
-                        if (postLossCooldown != null) {
-                            postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
-                        }
-                        CircuitBreakerState cbSl = circuitBreakers.get(brokerName);
-                        if (cbSl != null) cbSl.recordTrade(pnlDollars);
-                        logger.warn("{} {} placed on {}-minute COOLDOWN after stop loss - no re-entry until {}",
-                            profilePrefix, symbol, cooldownMs / 60000,
-                            java.time.Instant.ofEpochMilli(System.currentTimeMillis() + cooldownMs));
-                        
-                        logger.info("{} ✅ Stop loss exit order placed for {}", profilePrefix, symbol);
-                    } catch (PDTRejectedException e) {
-                        pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                staticPdtBlockedUntil = pdtBlockedUntil;
-                        logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
-                            profilePrefix, symbol);
-                        continue; // try remaining positions — non-day-trade sells may still succeed
-                    } catch (Exception e) {
-                        logger.error("{} Failed to place stop loss exit for {}", profilePrefix, symbol, e);
-                        urgentExitQueue.put(urgentKey(brokerName, symbol), new UrgentExit(brokerName, symbol, qty,
-                            String.format("stop loss (%.1f%%)", pnlPercent), System.currentTimeMillis()));
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ⚠️ STOP LOSS EXIT FAILED, QUEUED FOR RETRY: %s",
-                                profile.name(), symbol),
-                            "ERROR"
-                        );
-                    }
-                }
+                // NOTE: Stop-loss exits are intentionally NOT checked here.
+                // checkAllPositionsForRiskExits() handles stops via evaluateExit() → isStopLossHit()
+                // using the position's stored ATR-based stop price. Adding a second flat-% stop here
+                // creates two competing triggers with different thresholds — the flat % fires first
+                // and overrides the ATR stop (ORCL Jul 10 2026: ATR stop -5% but flat 1% stop triggered
+                // at -1.44%, taking a $2.58 loss that the ATR stop would have held through).
             }
         } catch (Exception e) {
             logger.error("{} Error checking positions for profit targets: {}", profilePrefix, e.getMessage(), e);

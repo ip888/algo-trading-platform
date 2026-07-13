@@ -197,9 +197,10 @@ public class ProfileManager implements Runnable {
     private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingEntryTimestamps
         = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long STALE_ENTRY_ORDER_MS = 30 * 60 * 1000L; // 30 minutes
-    // Hard cap: at most 2 open DB entries per symbol per broker (original + 1 add-to-position).
-    // Prevents runaway pyramid buying across restarts or repeated signals.
-    private static final int MAX_OPEN_ENTRIES_PER_SYMBOL = 2;
+    // Hard cap: at most 1 open DB entry per symbol per broker.
+    // Prevents adding to a losing position when the same MACD signal fires again
+    // (IWM×2 and SMH×2 on Jul 13 2026 each doubled the loss on declining positions).
+    private static final int MAX_OPEN_ENTRIES_PER_SYMBOL = 1;
 
     // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
     private volatile long pdtBlockedUntil = 0;

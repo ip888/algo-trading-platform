@@ -255,9 +255,12 @@ public final class StrategyManager {
                     // Mean Reversion would miss a rising gold/oil trend — use MACD to follow it.
                     // RSI gate applied same as WEAK_BULL: blocks entries when RSI is already extended
                     // (>65) or in freefall (<35), preventing late entries into exhausted moves.
+                    // Stricter MACD threshold (0.20 vs default 0.10): choppy range-bound markets
+                    // produce frequent histogram oscillations near 0.10 — requiring 0.20 filters
+                    // out whipsaws and keeps only confirmed multi-bar momentum moves (Jul 14 2026).
                     activeStrategy = "MACD Trend (Range, Momentum Asset)";
                     yield rsiFilteredBuy(
-                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.20),
                         history, symbol, positionQty);
                 }
                 // Non-momentum assets in sideways market → Mean Reversion (RSI bounce)

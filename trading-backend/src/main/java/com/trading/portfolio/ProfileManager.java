@@ -1752,6 +1752,25 @@ public class ProfileManager implements Runnable {
                 stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
                 takeProfit = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
             }
+
+            // ========== RANGE_BOUND STOP CAP ==========
+            // In choppy sideways markets, ATR can produce stops of -3% to -5%, letting positions
+            // bleed for hours before stopping out (AAPL -5% ATR stop on Jul 14 2026 in VIX=11.5).
+            // Cap at 2× profile SL in RANGE_BOUND so the max loss per trade stays predictable.
+            // Example: MAIN_STOP_LOSS_PERCENT=1.0 → cap at 2%, vs ATR stop at 5% raw.
+            if (regime == MarketRegime.RANGE_BOUND && atr > 0) {
+                double maxStopPct = profile.stopLossPercent() * 2.0;
+                double minStopPrice = currentPrice * (1.0 - maxStopPct / 100.0);
+                if (stopLoss < minStopPrice) {
+                    logger.info("{} {} RANGE_BOUND stop cap: ATR stop ${} ({}%) → capped at ${} ({}%)",
+                        profilePrefix, symbol,
+                        String.format("%.2f", stopLoss),
+                        String.format("%.2f", (currentPrice - stopLoss) / currentPrice * 100.0),
+                        String.format("%.2f", minStopPrice),
+                        String.format("%.2f", maxStopPct));
+                    stopLoss = minStopPrice;
+                }
+            }
         }
 
         // ========== ATR-BASED VOL-TARGETED SIZING (Tier 1.3) ==========

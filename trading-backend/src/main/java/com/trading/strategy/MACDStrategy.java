@@ -23,6 +23,14 @@ public final class MACDStrategy implements TradingStrategy {
     }
 
     public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty, List<Double> history) {
+        return evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.10);
+    }
+
+    /**
+     * Evaluate with a custom histogram threshold for tighter entry conditions.
+     * Pass 0.20 in RANGE_BOUND regime to require stronger trend confirmation before entry.
+     */
+    public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty, List<Double> history, double histogramThreshold) {
         if (history.size() <= SLOW_PERIOD + SIGNAL_PERIOD) {
             return new TradingSignal.Hold("Insufficient history for MACD");
         }
@@ -36,21 +44,23 @@ public final class MACDStrategy implements TradingStrategy {
         double signalLine = macdValuesCurrent[1];
         double prevMacdLine = macdValuesPrev[0];
         double prevSignalLine = macdValuesPrev[1];
-        
+
         double histogram = macdLine - signalLine;
         double prevHistogram = prevMacdLine - prevSignalLine;
 
-        logger.debug("MACD Strategy: Price={}, MACD={}, Signal={}, Hist={} (prev={})",
+        logger.debug("MACD Strategy: Price={}, MACD={}, Signal={}, Hist={} (prev={}) threshold={}",
             currentPrice, String.format("%.2f", macdLine), String.format("%.2f", signalLine),
-            String.format("%.2f", histogram), String.format("%.2f", prevHistogram));
+            String.format("%.2f", histogram), String.format("%.2f", prevHistogram),
+            String.format("%.2f", histogramThreshold));
 
         // Strong Uptrend: MACD above signal, histogram growing, AND was already positive last bar.
         // Two consecutive bars with a positive and expanding histogram = confirmed momentum, not a
         // single-bar whipsaw. Single-bar crossovers are intentionally removed — they fire on every
         // daily chop and produce the majority of false entries (historically ~79% loss rate).
+        // In RANGE_BOUND regime, histogramThreshold=0.20 (vs default 0.10) requires stronger signal.
         boolean strongUptrend = macdLine > signalLine
             && histogram > prevHistogram
-            && histogram > 0.10
+            && histogram > histogramThreshold
             && prevHistogram > 0;
 
         // Bearish Crossover: MACD crosses BELOW Signal

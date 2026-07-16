@@ -245,8 +245,13 @@ public final class StrategyManager {
                     activeStrategy = "Bear Block (Weak Bear, strict)";
                     yield new TradingSignal.Hold("WEAK_BEAR strict — no new longs on non-momentum asset");
                 }
+                // Stricter MACD threshold (0.20) for NEW entries in WEAK_BEAR: the market is declining
+                // and entering long on a weak MACD signal causes losses (IWM Jul 15 2026: BUY in
+                // WEAK_BEAR at threshold 0.10, market declined, exited at loss $295.94).
+                // For exits (positionQty > 0), use the default 0.10 so we still catch SELL signals cleanly.
                 activeStrategy = "MACD Trend (Weak Bear)";
-                yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                double weakBearThreshold = (positionQty == 0) ? 0.20 : 0.10;
+                yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, weakBearThreshold);
             }
             case RANGE_BOUND -> {
                 if (isMomentumAsset) {

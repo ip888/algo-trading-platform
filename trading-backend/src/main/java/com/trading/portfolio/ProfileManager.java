@@ -1199,21 +1199,27 @@ public class ProfileManager implements Runnable {
         //      then immediately reverses once fresh intraday bars arrive.
         if (profile.bearishSymbols().contains(symbol)
                 && (regime == MarketRegime.STRONG_BEAR || regime == MarketRegime.WEAK_BEAR)) {
-            // Gate 1: VIX must be elevated
-            double bearVixMin = config.getBearEntryVixMinimum();
-            if (currentVix < bearVixMin) {
-                String reason = String.format(
-                    "inverse ETF blocked — VIX %.1f < BEAR_ENTRY_VIX_MINIMUM %.1f (not a real bear)",
-                    currentVix, bearVixMin);
-                blockedBuys.put(symbol, reason);
-                logger.warn("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
-                TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ⛔ %s blocked: VIX %.1f too low for inverse ETF entry (min %.0f)",
-                        profile.name(), symbol, currentVix, bearVixMin),
-                    "WARN");
-                return;
+            // Gate 1: VIX must be elevated — applies to STRONG_BEAR only.
+            // STRONG_BEAR can fire from stale overnight breadth data even when VIX is calm.
+            // Requiring VIX ≥ BEAR_ENTRY_VIX_MINIMUM guards against false inverse ETF entries.
+            // WEAK_BEAR with low VIX is a genuine mild decline (breadth < 50%, trend WEAK_DOWN)
+            // — no panic VIX required to profit from it with inverse ETFs (Jul 21 2026).
+            if (regime == MarketRegime.STRONG_BEAR) {
+                double bearVixMin = config.getBearEntryVixMinimum();
+                if (currentVix < bearVixMin) {
+                    String reason = String.format(
+                        "inverse ETF blocked — VIX %.1f < BEAR_ENTRY_VIX_MINIMUM %.1f (STRONG_BEAR requires panic VIX)",
+                        currentVix, bearVixMin);
+                    blockedBuys.put(symbol, reason);
+                    logger.warn("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⛔ %s blocked: VIX %.1f too low for STRONG_BEAR entry (min %.0f)",
+                            profile.name(), symbol, currentVix, bearVixMin),
+                        "WARN");
+                    return;
+                }
             }
-            // Gate 2: regime persistence during market hours
+            // Gate 2: regime persistence during market hours (applies to both STRONG_BEAR and WEAK_BEAR)
             long persistenceMs = config.getBearEntryPersistenceMinutes() * 60_000L;
             long elapsedMs = bearishRegimeMarketStart != null
                 ? java.time.Duration.between(bearishRegimeMarketStart, java.time.Instant.now()).toMillis()
@@ -1221,12 +1227,12 @@ public class ProfileManager implements Runnable {
             if (elapsedMs < persistenceMs) {
                 long remainingMin = (persistenceMs - elapsedMs) / 60_000L + 1;
                 String reason = String.format(
-                    "inverse ETF blocked — STRONG_BEAR persistence %dmin < required %dmin (%.0f min remaining)",
-                    elapsedMs / 60_000L, config.getBearEntryPersistenceMinutes(), (float) remainingMin);
+                    "inverse ETF blocked — bearish regime persistence %dmin < required %dmin (%d min remaining)",
+                    elapsedMs / 60_000L, config.getBearEntryPersistenceMinutes(), remainingMin);
                 blockedBuys.put(symbol, reason);
                 logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ⛔ %s blocked: STRONG_BEAR not yet confirmed (%d min remaining)",
+                    String.format("[%s] ⛔ %s blocked: bearish regime not yet confirmed (%d min remaining)",
                         profile.name(), symbol, remainingMin),
                     "INFO");
                 return;
@@ -3322,6 +3328,8 @@ public class ProfileManager implements Runnable {
             logger.warn("{} 🔴 Closing {} position(s) for end of day", profilePrefix, positions.size());
 
             // Close each position
+            var carriedSymbols = new java.util.HashSet<String>();
+            boolean isFriday = (now.getDayOfWeek() == java.time.DayOfWeek.FRIDAY);
             for (var position : positions) {
                 String symbol = position.symbol();
                 double qty = Math.abs(position.quantity());
@@ -3337,6 +3345,20 @@ public class ProfileManager implements Runnable {
                 double currentPrice = Math.abs(marketValue / qty);
                 double pnl = (currentPrice - entryPrice) * qty;
                 double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+
+                // Carry profitable positions overnight (Mon–Thu only).
+                // Breakeven stop arms at +0.5%, so pnlPercent ≥ 0.5% guarantees the worst
+                // case overnight is flat — the position cannot turn into a loss even on a gap down.
+                // Never carry over Friday: a 3-day weekend gap is unacceptable risk.
+                if (!isFriday && pnlPercent >= 0.5) {
+                    carriedSymbols.add(symbol);
+                    logger.info("{} 📈 {} carrying overnight — P&L +{}% ≥ 0.5% (breakeven stop active, trailing stop managing)",
+                        profilePrefix, symbol, String.format("%.2f", pnlPercent));
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] 📈 %s carrying overnight: P&L +%.2f%% (breakeven protected)",
+                            profile.name(), symbol, pnlPercent), "SUCCESS");
+                    continue;
+                }
 
                 logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({}%)",
                     profilePrefix, symbol, qty, entryPrice, currentPrice, pnl, String.format("%.2f", pnlPercent));
@@ -3389,12 +3411,21 @@ public class ProfileManager implements Runnable {
             // If any sell failed, eodExitExecutedDate stays null → retries every 10s
             // until market closes at 16:00 (30-minute retry window).
             var remaining = client.getPositions();
-            if (remaining.isEmpty()) {
+            boolean allRemainingCarried = remaining.stream()
+                .allMatch(p -> carriedSymbols.contains(p.symbol()));
+            if (allRemainingCarried) {
                 eodExitExecutedDate = today;
-                logger.warn("{} ✅ END OF DAY EXIT COMPLETE - All positions closed", profilePrefix);
+                if (carriedSymbols.isEmpty()) {
+                    logger.warn("{} ✅ END OF DAY EXIT COMPLETE - All positions closed", profilePrefix);
+                } else {
+                    logger.warn("{} ✅ END OF DAY EXIT COMPLETE - {} carried overnight: {}",
+                        profilePrefix, carriedSymbols.size(), carriedSymbols);
+                }
             } else {
-                logger.error("{} ⚠️ EOD EXIT INCOMPLETE - {} position(s) still open, will retry next cycle",
-                    profilePrefix, remaining.size());
+                long failedCount = remaining.stream()
+                    .filter(p -> !carriedSymbols.contains(p.symbol())).count();
+                logger.error("{} ⚠️ EOD EXIT INCOMPLETE - {} position(s) failed to close, will retry",
+                    profilePrefix, failedCount);
             }
 
         } catch (Exception e) {

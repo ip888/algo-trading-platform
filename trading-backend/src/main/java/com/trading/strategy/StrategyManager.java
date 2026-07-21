@@ -141,7 +141,25 @@ public final class StrategyManager {
                     logger.info("{}: Blocked {} BUY — low volume", symbol, activeStrategy);
                     return new TradingSignal.Hold("Low volume — BUY not confirmed");
                 }
-                // 3. MTF confidence gradient veto (0.6–0.7): strategy says BUY but MTF is leaning
+                // 3. Block if the symbol is already down > 0.5% from yesterday's close.
+                // MACD uses daily bars — a BUY signal from yesterday's data does not mean today
+                // is a good day to enter. If the stock is already declining intraday, entering
+                // long adds to an active downtrend (IWM -0.75% day on Jul 20 2026 was entered).
+                // Exempt: mean-reversion entries (isMeanReversion=false here already, so this
+                // block only runs for trend/momentum entries where intraday alignment matters).
+                if (!closes.isEmpty()) {
+                    double yesterdayClose = closes.get(closes.size() - 1);
+                    if (yesterdayClose > 0) {
+                        double intradayPct = (currentPrice - yesterdayClose) / yesterdayClose * 100.0;
+                        if (intradayPct < -0.50) {
+                            logger.info("{}: Blocked {} BUY — down {}% on the day vs yesterday close",
+                                symbol, activeStrategy, String.format("%.2f", intradayPct));
+                            return new TradingSignal.Hold(
+                                String.format("Intraday down %.2f%% — blocking BUY (entry against day trend)", intradayPct));
+                        }
+                    }
+                }
+                // 4. MTF confidence gradient veto (0.6–0.7): strategy says BUY but MTF is leaning
                 //    SELL/HOLD at medium confidence — don't fight a conflicting signal.
                 //    Below 0.6 we already returned HOLD above; above 0.7 MTF was authoritative.
                 //    This window specifically catches the ambiguous middle zone.

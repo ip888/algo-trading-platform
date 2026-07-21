@@ -375,11 +375,13 @@ public class MarketRegimeDetector {
             if (volume.trend == VolumeTrend.INCREASING && breadth.strength < 0.4 && vix >= 20) {
                 return MarketRegime.STRONG_BEAR;
             }
-            // Conflicting signals: trend is mildly down but breadth is reasonable and VIX is calm.
-            // Breadth > 35% with calm VIX (<20) = normal consolidation/sector rotation, not a true bear.
-            // Real WEAK_BEAR needs breadth < 35% (majority of sectors falling) OR elevated VIX (>=20).
-            // Using 35% threshold: today's ~38% breadth + VIX ~14 = chop, not bear.
-            if (breadth.strength > 0.35 && vix < 20) {
+            // Downgrade to RANGE_BOUND only if a CLEAR MAJORITY of sectors are still advancing.
+            // 35% was too loose: 3 of 8 sectors advancing (38%) was treated as "sideways" even
+            // though 5 sectors were declining — causing RANGE_BOUND entries in a falling market
+            // (IWM -0.75% on Jul 20 2026, AAPL mean-reversion entry same day).
+            // 50% requires at least 4 of 8 sectors advancing before we call it sideways rather
+            // than bearish. Below 50% = more sectors falling than rising = WEAK_BEAR.
+            if (breadth.strength > 0.50 && vix < 20) {
                 return MarketRegime.RANGE_BOUND;
             }
             // Genuine weak bear: downtrend with most sectors falling OR elevated VIX

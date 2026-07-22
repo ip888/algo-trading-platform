@@ -24,6 +24,8 @@ public final class StrategyManager {
     private final java.util.Set<String> momentumAssets;
     // Inverse/short ETFs (SH, PSQ, RWM, DOG, SQQQ) — bypass long-only strict routing in WEAK_BEAR.
     private final java.util.Set<String> inverseEtfAssets;
+    // Safe-haven assets that outperform during bear markets — get relaxed MACD gate in WEAK_BEAR.
+    private final java.util.Set<String> safeHavenAssets;
     
     private final BrokerClient client;
     private final Config config;
@@ -55,6 +57,7 @@ public final class StrategyManager {
             : java.util.Set.of("GLD","SLV","TLT","XLU","NVDA","TSLA","META","XLE","XLK","XOP","URA","GRID");
         this.inverseEtfAssets = config != null ? config.getInverseEtfSymbols()
             : java.util.Set.of("SH","PSQ","RWM","DOG","SQQQ");
+        this.safeHavenAssets = java.util.Set.of("GLD","TLT","XLU","SLV");
 
         if (multiTimeframeAnalyzer != null) {
             logger.info("StrategyManager initialized with multi-timeframe analysis + Momentum Strategy");
@@ -82,6 +85,9 @@ public final class StrategyManager {
             // in RANGE_BOUND) skip the guard. Bug: the old blanket flag allowed MACD entries
             // on AMD/MSFT/QQQ to bypass the downtrend check, causing losses on Jul 7 2026.
             boolean isMeanReversion = (regime == MarketRegime.RANGE_BOUND) && !momentumAssets.contains(symbol);
+            // Set to true when MTF strongly confirms BUY for momentum assets — passed to
+            // evaluateWithHistory so it can relax the MACD entry threshold in WEAK_BEAR.
+            boolean highMtfBuy = false;
 
             // Check multi-timeframe alignment if enabled
             MultiTimeframeAnalysis latestMtfAnalysis = null;
@@ -109,15 +115,22 @@ public final class StrategyManager {
                     }
 
                     // MTF says BUY. For non-range-bound regimes, momentum assets need their
-                    // own strict entry conditions (RSI sweet spot, SMA50, ATR, momentum consistency).
-                    // MTF BUY is a necessary gate, not sufficient — fall through to evaluateWithHistory().
+                    // own strict entry conditions (MACD). MTF BUY is necessary but not sufficient
+                    // — fall through to evaluateWithHistory() with the high-confidence flag.
                     if (!isMeanReversion && momentumAssets.contains(symbol)) {
-                        logger.info("{}: MTF BUY ({}%) deferred to MomentumStrategy for full entry validation",
+                        logger.info("{}: MTF BUY ({}%) deferred to regime strategy for entry validation",
                             symbol, (int)(mtfAnalysis.confidence() * 100));
+                        highMtfBuy = true;
                         // fall through to evaluateWithHistory() below
                     } else {
-                        // Non-momentum assets and range-bound regime: use MTF BUY directly.
+                        // Non-momentum assets and range-bound: use MTF BUY directly after quality gates.
                         if (!isMeanReversion) {
+                            // In WEAK_BEAR, only safe havens (GLD, TLT, XLU, SLV) may trade via
+                            // the direct MTF path — other assets buy against the regime trend.
+                            if (regime == MarketRegime.WEAK_BEAR && !safeHavenAssets.contains(symbol)) {
+                                logger.info("{}: Blocked MTF BUY — WEAK_BEAR, not a safe-haven asset", symbol);
+                                return new TradingSignal.Hold("WEAK_BEAR — MTF BUY blocked for non-safe-haven");
+                            }
                             if (isShortTermDowntrend(closes, currentPrice)) {
                                 logger.info("{}: Blocked MTF BUY — downtrend (price below declining SMA)", symbol);
                                 return new TradingSignal.Hold("Downtrend — blocking BUY");
@@ -126,13 +139,27 @@ public final class StrategyManager {
                                 logger.info("{}: Blocked MTF BUY — low volume (below 70% of 20-bar avg)", symbol);
                                 return new TradingSignal.Hold("Low volume — BUY not confirmed");
                             }
+                            // Block if stock already down >0.5% intraday — MTF uses 15-min data
+                            // and can fire BUY while the stock is actively gapping down on the day.
+                            if (!closes.isEmpty()) {
+                                double prevClose = closes.get(closes.size() - 1);
+                                if (prevClose > 0) {
+                                    double intradayPct = (currentPrice - prevClose) / prevClose * 100.0;
+                                    if (intradayPct < -0.50) {
+                                        logger.info("{}: Blocked MTF BUY — intraday down {:.2f}%",
+                                            symbol, intradayPct);
+                                        return new TradingSignal.Hold(
+                                            String.format("Intraday down %.2f%% — blocking MTF BUY", intradayPct));
+                                    }
+                                }
+                            }
                         }
                         return new TradingSignal.Buy("Multi-timeframe BUY signal");
                     }
                 }
             }
 
-            var signal = evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime);
+            var signal = evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime, highMtfBuy);
 
             if (signal instanceof TradingSignal.Buy && !isMeanReversion) {
                 // 1. Block if price is in a short-term or medium-term downtrend
@@ -207,10 +234,20 @@ public final class StrategyManager {
     /**
      * Evaluate with regime and price history.
      */
-    public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty, 
+    public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty,
                                             List<Double> history, MarketRegime regime) {
+        return evaluateWithHistory(symbol, currentPrice, positionQty, history, regime, false);
+    }
+
+    /**
+     * Evaluate with regime, price history, and MTF confidence flag.
+     * highMtfConfidence=true relaxes the MACD entry threshold in WEAK_BEAR for momentum assets.
+     */
+    public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty,
+                                            List<Double> history, MarketRegime regime,
+                                            boolean highMtfConfidence) {
         currentRegime = regime;
-        
+
         // Check if this is a momentum asset (should use momentum strategy in uptrends)
         boolean isMomentumAsset = momentumAssets.contains(symbol);
         
@@ -275,12 +312,19 @@ public final class StrategyManager {
                     activeStrategy = "Bear Block (Weak Bear, strict)";
                     yield new TradingSignal.Hold("WEAK_BEAR strict — no new longs on non-momentum asset");
                 }
-                // Stricter MACD threshold (0.20) for NEW entries in WEAK_BEAR: the market is declining
-                // and entering long on a weak MACD signal causes losses (IWM Jul 15 2026: BUY in
-                // WEAK_BEAR at threshold 0.10, market declined, exited at loss $295.94).
-                // For exits (positionQty > 0), use the default 0.10 so we still catch SELL signals cleanly.
-                activeStrategy = "MACD Trend (Weak Bear)";
-                double weakBearThreshold = (positionQty == 0) ? 0.20 : 0.10;
+                // Stricter MACD threshold (0.20) for NEW entries in WEAK_BEAR to filter counter-trend
+                // bounces (IWM Jul 15 2026: bought on 0.10 threshold, lost money in declining market).
+                // Exceptions — use 0.10 (same as position management) for:
+                //   1. Safe havens (GLD, TLT, XLU, SLV): these naturally rally during bear markets,
+                //      so they're not going against the regime — they're aligned with it.
+                //   2. High-MTF-confidence momentum (>70%): multi-timeframe agreement is strong
+                //      enough to override the conservative gate for momentum names like XLE.
+                boolean isSafeHaven = safeHavenAssets.contains(symbol);
+                boolean useRelaxed = positionQty == 0 && (isSafeHaven || highMtfConfidence);
+                double weakBearThreshold = (!useRelaxed && positionQty == 0) ? 0.20 : 0.10;
+                activeStrategy = useRelaxed
+                    ? (isSafeHaven ? "MACD (Safe Haven, Weak Bear)" : "MACD (MTF-Confirmed, Weak Bear)")
+                    : "MACD Trend (Weak Bear)";
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, weakBearThreshold);
             }
             case RANGE_BOUND -> {

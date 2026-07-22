@@ -1304,7 +1304,7 @@ public class ProfileManager implements Runnable {
                 // If stock rallied Friday then gaps down Monday, old code missed the gap.
                 double prevClose = recentBars.get(recentBars.size() - 1).close();
                 double gapDownPct = (prevClose - currentPrice) / prevClose * 100.0;
-                double gapDownThreshold = profile.stopLossPercent() * 0.67;
+                double gapDownThreshold = profile.stopLossPercent();
                 if (gapDownPct >= gapDownThreshold) {
                     String reason = String.format("gap-down %.1f%% from $%.2f", gapDownPct, prevClose);
                     blockedBuys.put(symbol, reason);

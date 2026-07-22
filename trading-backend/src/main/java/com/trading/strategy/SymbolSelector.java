@@ -80,12 +80,14 @@ public final class SymbolSelector {
                 yield bearishSymbols;
             }
             case WEAK_BEAR -> {
-                // WEAK_BEAR = mild downtrend, low VIX — sector rotation, not a crash.
-                // Trade defensive bullish names (GLD, XLV, XLP, XLE are in bullishSymbols).
-                // Inverse ETFs (bearishSymbols) are only appropriate for genuine STRONG_BEAR
-                // confirmed by elevated VIX + persistence guard.
-                logger.debug("Weak bear regime → Bullish symbols (defensive rotation)");
-                yield bullishSymbols;
+                // Merge bullish + bearish so both defensive names (GLD, XLV) AND inverse
+                // ETFs (SH, PSQ, RWM) are evaluated. StrategyManager's strict routing blocks
+                // non-momentum longs; the inverse ETF bypass in StrategyManager opens the
+                // path specifically for short ETFs.
+                logger.debug("Weak bear regime → Combined bullish+bearish symbols (defensive + inverse ETF)");
+                var combined = new java.util.ArrayList<>(bullishSymbols);
+                combined.addAll(bearishSymbols);
+                yield java.util.List.copyOf(combined);
             }
             case RANGE_BOUND -> {
                 logger.debug("Range bound regime → Bullish symbols (mean reversion)");

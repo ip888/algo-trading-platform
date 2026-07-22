@@ -22,6 +22,8 @@ public final class StrategyManager {
     // Momentum assets loaded from config (MOMENTUM_ASSETS key), with hardcoded fallback.
     // Use config to tune without redeploying.
     private final java.util.Set<String> momentumAssets;
+    // Inverse/short ETFs (SH, PSQ, RWM, DOG, SQQQ) — bypass long-only strict routing in WEAK_BEAR.
+    private final java.util.Set<String> inverseEtfAssets;
     
     private final BrokerClient client;
     private final Config config;
@@ -51,6 +53,8 @@ public final class StrategyManager {
         this.scalpStrategy = (config != null && client != null) ? new ScalpStrategy(client, config) : null;
         this.momentumAssets = config != null ? config.getMomentumAssets()
             : java.util.Set.of("GLD","SLV","TLT","XLU","NVDA","TSLA","META","XLE","XLK","XOP","URA","GRID");
+        this.inverseEtfAssets = config != null ? config.getInverseEtfSymbols()
+            : java.util.Set.of("SH","PSQ","RWM","DOG","SQQQ");
 
         if (multiTimeframeAnalyzer != null) {
             logger.info("StrategyManager initialized with multi-timeframe analysis + Momentum Strategy");
@@ -259,6 +263,14 @@ public final class StrategyManager {
                 // ones on a non-momentum asset. MACD can fire a BUY on a counter-trend bounce that
                 // historically hasn't paid here. If the user disables strict mode, fall back to the
                 // old behaviour (MACD for all positionQty values).
+                // Inverse ETFs profit from market decline — bypass the long-only strict routing.
+                // SH/PSQ/RWM/SQQQ are in bearishSymbols, not momentumAssets, so without this
+                // bypass they'd always be blocked as "non-momentum" in WEAK_BEAR.
+                boolean isInverseEtf = inverseEtfAssets.contains(symbol);
+                if (isInverseEtf && positionQty == 0) {
+                    activeStrategy = "MACD (Inverse ETF, Weak Bear)";
+                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.20);
+                }
                 if (config != null && config.isRegimeStrictRoutingEnabled() && positionQty == 0 && !isMomentumAsset) {
                     activeStrategy = "Bear Block (Weak Bear, strict)";
                     yield new TradingSignal.Hold("WEAK_BEAR strict — no new longs on non-momentum asset");

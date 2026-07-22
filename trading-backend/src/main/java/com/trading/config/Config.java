@@ -1015,6 +1015,11 @@ public class Config {
         return java.util.Set.copyOf(java.util.Arrays.asList(symbols.split(",")));
     }
 
+    public java.util.Set<String> getInverseEtfSymbols() {
+        String symbols = getProperty("INVERSE_ETF_SYMBOLS", "SH,PSQ,RWM,DOG,SQQQ");
+        return java.util.Set.copyOf(java.util.Arrays.asList(symbols.split(",")));
+    }
+
     public double getMomentumRsiBuyMin() {
         return getDoubleProperty("MOMENTUM_RSI_BUY_MIN", 45.0);
     }

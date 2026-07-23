@@ -117,42 +117,65 @@ public final class StrategyManager {
                     // MTF says BUY. For non-range-bound regimes, momentum assets need their
                     // own strict entry conditions (MACD). MTF BUY is necessary but not sufficient
                     // — fall through to evaluateWithHistory() with the high-confidence flag.
-                    if (!isMeanReversion && momentumAssets.contains(symbol)) {
-                        logger.info("{}: MTF BUY ({}%) deferred to regime strategy for entry validation",
-                            symbol, (int)(mtfAnalysis.confidence() * 100));
-                        highMtfBuy = true;
+                    // Momentum assets AND inverse ETFs defer to evaluateWithHistory for full validation.
+                    // Inverse ETFs need the MACD-0.20 bypass in evaluateWithHistory — letting them
+                    // return Buy directly here would skip that gate entirely.
+                    if (!isMeanReversion && (momentumAssets.contains(symbol) || inverseEtfAssets.contains(symbol))) {
+                        if (momentumAssets.contains(symbol)) {
+                            highMtfBuy = true;
+                            logger.info("{}: MTF BUY ({}%) deferred to regime strategy for entry validation",
+                                symbol, (int)(mtfAnalysis.confidence() * 100));
+                        } else {
+                            logger.info("{}: MTF BUY ({}%) deferred to inverse ETF evaluation",
+                                symbol, (int)(mtfAnalysis.confidence() * 100));
+                        }
                         // fall through to evaluateWithHistory() below
                     } else {
                         // Non-momentum assets and range-bound: use MTF BUY directly after quality gates.
+                        // When all gates block the trade, still try scalp — it uses intraday 15-min
+                        // data and is not regime-dependent; a blocked MTF BUY doesn't mean
+                        // scalp conditions are also unmet.
+                        TradingSignal mtfBlockSignal = null;
                         if (!isMeanReversion) {
                             // In WEAK_BEAR, only safe havens (GLD, TLT, XLU, SLV) may trade via
                             // the direct MTF path — other assets buy against the regime trend.
                             if (regime == MarketRegime.WEAK_BEAR && !safeHavenAssets.contains(symbol)) {
                                 logger.info("{}: Blocked MTF BUY — WEAK_BEAR, not a safe-haven asset", symbol);
-                                return new TradingSignal.Hold("WEAK_BEAR — MTF BUY blocked for non-safe-haven");
-                            }
-                            if (isShortTermDowntrend(closes, currentPrice)) {
+                                mtfBlockSignal = new TradingSignal.Hold("WEAK_BEAR — MTF BUY blocked for non-safe-haven");
+                            } else if (isShortTermDowntrend(closes, currentPrice)) {
                                 logger.info("{}: Blocked MTF BUY — downtrend (price below declining SMA)", symbol);
-                                return new TradingSignal.Hold("Downtrend — blocking BUY");
-                            }
-                            if (!isVolumeConfirming(volumes)) {
+                                mtfBlockSignal = new TradingSignal.Hold("Downtrend — blocking BUY");
+                            } else if (!isVolumeConfirming(volumes)) {
                                 logger.info("{}: Blocked MTF BUY — low volume (below 70% of 20-bar avg)", symbol);
-                                return new TradingSignal.Hold("Low volume — BUY not confirmed");
-                            }
-                            // Block if stock already down >0.5% intraday — MTF uses 15-min data
-                            // and can fire BUY while the stock is actively gapping down on the day.
-                            if (!closes.isEmpty()) {
+                                mtfBlockSignal = new TradingSignal.Hold("Low volume — BUY not confirmed");
+                            } else if (!closes.isEmpty()) {
+                                // Block if stock already down >0.5% intraday — MTF uses 15-min data
+                                // and can fire BUY while the stock is actively gapping down on the day.
                                 double prevClose = closes.get(closes.size() - 1);
                                 if (prevClose > 0) {
                                     double intradayPct = (currentPrice - prevClose) / prevClose * 100.0;
                                     if (intradayPct < -0.50) {
-                                        logger.info("{}: Blocked MTF BUY — intraday down {:.2f}%",
-                                            symbol, intradayPct);
-                                        return new TradingSignal.Hold(
+                                        logger.info("{}: Blocked MTF BUY — intraday down {}%",
+                                            symbol, String.format("%.2f", intradayPct));
+                                        mtfBlockSignal = new TradingSignal.Hold(
                                             String.format("Intraday down %.2f%% — blocking MTF BUY", intradayPct));
                                     }
                                 }
                             }
+                        }
+                        if (mtfBlockSignal != null) {
+                            // MTF BUY blocked — give scalp a chance before returning HOLD.
+                            // Scalp evaluates intraday conditions independently of regime/MTF.
+                            if (scalpStrategy != null && positionQty == 0
+                                    && regime != MarketRegime.STRONG_BEAR
+                                    && regime != MarketRegime.HIGH_VOLATILITY) {
+                                var scalpSignal = scalpStrategy.evaluate(symbol, currentPrice, positionQty);
+                                if (scalpSignal instanceof TradingSignal.ScalpBuy) {
+                                    activeStrategy = "Scalp (15-min)";
+                                    return scalpSignal;
+                                }
+                            }
+                            return mtfBlockSignal;
                         }
                         return new TradingSignal.Buy("Multi-timeframe BUY signal");
                     }

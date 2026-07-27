@@ -47,9 +47,9 @@ ENV JAVA_HOME=/opt/java
 ENV PATH=/opt/java/bin:$PATH
 
 # Install Python ML sidecar dependencies into a venv
-COPY sidecar/requirements.txt /app/sidecar/requirements.txt
+COPY sidecar/requirements.pip /app/sidecar/requirements.pip
 RUN python3 -m venv /app/sidecar/.venv && \
-    /app/sidecar/.venv/bin/pip install --no-cache-dir -r /app/sidecar/requirements.txt
+    /app/sidecar/.venv/bin/pip install --no-cache-dir -r /app/sidecar/requirements.pip
 
 COPY sidecar/regime_classifier.py /app/sidecar/regime_classifier.py
 COPY --from=build /app/target/trading-backend-1.0-SNAPSHOT.jar app.jar

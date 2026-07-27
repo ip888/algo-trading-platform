@@ -846,12 +846,21 @@ public class TradeDatabase {
 
     /**
      * Persist the current regime and increment its consecutive-day counter.
-     * Call once per trading session (e.g., after regime detection).
+     * Idempotent within a calendar day — multiple calls on the same ET date only
+     * count as one day, so the counter tracks actual trading days not cycle counts.
      * Key layout in bot_state:
      *   "regime_persist:current"  → e.g. "WEAK_BEAR"
      *   "regime_persist:days"     → e.g. "3"
+     *   "regime_persist:date"     → e.g. "2026-07-27"  (ET date of last increment)
      */
     public void updateRegimePersistence(String newRegime) {
+        String today = java.time.LocalDate.now(java.time.ZoneId.of("America/New_York")).toString();
+        String lastDate = loadBotState("regime_persist:date");
+        if (today.equals(lastDate)) {
+            // Already updated today — nothing to do
+            return;
+        }
+
         String currentRegime = loadBotState("regime_persist:current");
         int days = 1;
         if (newRegime.equals(currentRegime)) {
@@ -862,6 +871,7 @@ public class TradeDatabase {
         }
         saveBotState("regime_persist:current", newRegime);
         saveBotState("regime_persist:days", String.valueOf(days));
+        saveBotState("regime_persist:date", today);
         logger.info("Regime persistence: {} for {} consecutive day(s)", newRegime, days);
     }
 

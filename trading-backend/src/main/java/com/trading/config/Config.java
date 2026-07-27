@@ -1644,6 +1644,35 @@ public class Config {
         return getLongProperty("EARNINGS_CACHE_TTL_MS", 24L * 60 * 60 * 1000); // 24h
     }
 
+    // Economic calendar blackout — FOMC, CPI, PCE, NFP release days
+    // Dates are stored as comma-separated YYYY-MM-DD strings in config.properties.
+    // New entries can be added at any time without redeploying — just update config and restart.
+    public boolean isEconomicCalendarBlackoutEnabled() {
+        return getBooleanProperty("ECONOMIC_BLACKOUT_ENABLED", true);
+    }
+
+    /**
+     * Returns dates on which no new long entries are allowed due to high-impact macro events.
+     * Format in config.properties: ECONOMIC_BLACKOUT_DATES=2026-07-30,2026-08-13,2026-09-17
+     * Covers FOMC decisions, CPI, PCE, and NFP releases for the current quarter.
+     */
+    public java.util.Set<java.time.LocalDate> getEconomicBlackoutDates() {
+        String raw = getProperty("ECONOMIC_BLACKOUT_DATES");
+        if (raw == null || raw.isBlank()) return java.util.Set.of();
+        return java.util.Arrays.stream(raw.split(","))
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .flatMap(s -> {
+                try {
+                    return java.util.stream.Stream.of(java.time.LocalDate.parse(s));
+                } catch (java.time.format.DateTimeParseException e) {
+                    logger.warn("Invalid ECONOMIC_BLACKOUT_DATES entry '{}' — expected YYYY-MM-DD", s);
+                    return java.util.stream.Stream.empty();
+                }
+            })
+            .collect(java.util.stream.Collectors.toSet());
+    }
+
     // Scale-out at 1R
     public boolean isScaleOutEnabled() {
         return getBooleanProperty("SCALE_OUT_ENABLED", true);

@@ -393,6 +393,12 @@ public class ProfileManager implements Runnable {
         logger.info("[{}] Synced {} positions from Alpaca",
             profile.name(), portfolio.getActivePositionCount());
         
+        // Log last Claude end-of-session review suggestion so operator sees it on startup
+        String claudeKey = System.getenv("CLAUDE_API_KEY");
+        if (claudeKey != null && !claudeKey.isBlank()) {
+            new com.trading.ai.ClaudeSessionReviewer(database, claudeKey).logLastReviewIfPresent();
+        }
+
         // Log AI component status
         if (sentimentAnalyzer != null) logger.info("[{}] 🧠 AI: Sentiment Analysis ENABLED", profile.name());
         if (signalPredictor != null) logger.info("[{}] 🤖 AI: ML Prediction ENABLED", profile.name());
@@ -531,6 +537,12 @@ public class ProfileManager implements Runnable {
         this.latestVix = currentVix;
         this.latestRegime = regime;
         this.latestEquity = equity;
+
+        // Persist regime streak — used by position sizing to reduce exposure after
+        // 3+ consecutive bearish days (WEAK_BEAR or STRONG_BEAR).
+        if (regime != null) {
+            database.updateRegimePersistence(regime.name());
+        }
 
         // Update static snapshots for dashboard visibility
         latestVixSnapshot = currentVix;
@@ -1471,6 +1483,19 @@ public class ProfileManager implements Runnable {
             }
         }
         
+        // ========== PHASE 3: ECONOMIC CALENDAR BLACKOUT ==========
+        // On FOMC/CPI/PCE/NFP release days, macro surprise risk dwarfs any technical signal.
+        // Block all new entries; existing positions can run to their natural SL/TP.
+        if (config.isEconomicCalendarBlackoutEnabled()) {
+            var blackoutDates = config.getEconomicBlackoutDates();
+            var today = java.time.LocalDate.now(java.time.ZoneId.of("America/New_York"));
+            if (blackoutDates.contains(today)) {
+                logger.info("{} {}: ❌ ECONOMIC BLACKOUT — macro event day ({}), no new entries",
+                    profilePrefix, symbol, today);
+                return;
+            }
+        }
+
         // ========== PHASE 3: MARKET BREADTH FILTER ==========
         if (!marketBreadthAnalyzer.isMarketHealthy()) {
             logger.info("{} {}: ❌ PHASE 3 FILTER - Market breadth too low, skipping trade", 
@@ -1485,6 +1510,28 @@ public class ProfileManager implements Runnable {
             String.format("{\"breadth\":%.2f}", breadth)
         );
         
+        // ========== PHASE 3: REGIME WIN-RATE GATE ==========
+        // If this symbol has a losing track record in the current regime (≥5 trades, <35% win rate),
+        // block new entries to avoid repeating a known bad setup. This adaptive gate prevents
+        // the bot from repeatedly entering the same symbol under conditions where it historically loses.
+        if (regime != null) {
+            String regimeName = regime.name();
+            var regimeStats = database.getSymbolStatistics(symbol, regimeName, 5);
+            if (regimeStats != null && regimeStats.winRate() < 0.35) {
+                logger.warn("{} {}: ❌ WIN-RATE GATE — {}% win rate in {} over {} trades, blocking entry",
+                    profilePrefix, symbol,
+                    String.format("%.0f", regimeStats.winRate() * 100),
+                    regimeName, regimeStats.totalTrades());
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⚠️ %s blocked — low win rate in %s (%.0f%% over %d trades)",
+                        profile.name(), symbol, regimeName,
+                        regimeStats.winRate() * 100, regimeStats.totalTrades()),
+                    "WARNING"
+                );
+                return;
+            }
+        }
+
         // ========== PHASE 3: ML ENTRY SCORING ==========
         if (config.isMLEntryScoringEnabled()) {
             try {
@@ -1570,13 +1617,39 @@ public class ProfileManager implements Runnable {
         // This prevents "insufficient buying power" errors
         double availableCapital = Math.min(buyingPower * 0.95, equity); // Use 95% of buying power for safety
         // ========== POSITION SIZING ==========
-        // Pass actual VIX for volatility-based size adjustment (NOT stop-loss percent)
+        // Regime-aware Kelly sizing: rolling win-rate stats conditioned on the current
+        // market regime produce more accurate Kelly fractions than the lifetime average.
         double positionSize = riskManager.calculatePositionSize(
+            symbol,
             availableCapital,
             currentPrice,
-            currentVix
+            currentVix,
+            profile.stopLossPercent(),
+            regime != null ? regime.name() : null
         );
         
+        // ========== REGIME STREAK PENALTY ==========
+        // After 3+ consecutive bearish days, reduce position size to limit drawdown
+        // during sustained adverse conditions (e.g. a multi-day WEAK_BEAR regime).
+        // Scale: day 3 → 75%, day 4 → 60%, day 5+ → 50%.
+        if (regime != null) {
+            boolean isBearishRegime = (regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.WEAK_BEAR
+                || regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.STRONG_BEAR);
+            if (isBearishRegime) {
+                int bearDays = database.getRegimePersistenceDays(regime.name());
+                if (bearDays >= 5) {
+                    positionSize *= 0.50;
+                    logger.info("{} {}: ⚠️ BEAR STREAK {} days — position halved to ${}", profilePrefix, symbol, bearDays, String.format("%.2f", positionSize));
+                } else if (bearDays == 4) {
+                    positionSize *= 0.60;
+                    logger.info("{} {}: ⚠️ BEAR STREAK {} days — position at 60% ${}", profilePrefix, symbol, bearDays, String.format("%.2f", positionSize));
+                } else if (bearDays == 3) {
+                    positionSize *= 0.75;
+                    logger.info("{} {}: ⚠️ BEAR STREAK {} days — position at 75% ${}", profilePrefix, symbol, bearDays, String.format("%.2f", positionSize));
+                }
+            }
+        }
+
         // ========== PHASE 3: ADAPTIVE POSITION SIZING ==========
         if (config.isAdaptiveSizingEnabled()) {
             try {
@@ -1954,9 +2027,9 @@ public class ProfileManager implements Runnable {
         portfolio.setPosition(symbol, Optional.of(newPosition));
         globalHeldSymbols.put(symbol, profilePrefix);
 
-        // Record trade — tag scalp entries so the dashboard can display them distinctly
+        // Record trade with full market context for adaptive learning (regime, VIX, breadth)
         String entryStrategyTag = scalpOverrides != null ? "SCALP" : profile.strategyType();
-        database.recordTrade(
+        database.recordTradeWithContext(
             symbol,
             entryStrategyTag,
             profile.name(),
@@ -1965,7 +2038,10 @@ public class ProfileManager implements Runnable {
             currentPrice,
             positionSize,
             stopLoss,
-            takeProfit
+            takeProfit,
+            regime != null ? regime.name() : "UNKNOWN",
+            currentVix,
+            breadth
         );
         // Portfolio and DB are now consistent — release the in-flight lock.
         pendingBuySymbols.remove(pendingBuyKey);
@@ -3420,6 +3496,21 @@ public class ProfileManager implements Runnable {
                 } else {
                     logger.warn("{} ✅ END OF DAY EXIT COMPLETE - {} carried overnight: {}",
                         profilePrefix, carriedSymbols.size(), carriedSymbols);
+                }
+                // Run end-of-session Claude review after all exits are confirmed complete.
+                // Async — non-blocking so EOD latency is unaffected.
+                String claudeApiKey = System.getenv("CLAUDE_API_KEY");
+                if (claudeApiKey != null && !claudeApiKey.isBlank()) {
+                    String regimeName = latestRegime != null ? latestRegime.name() : "UNKNOWN";
+                    double vix = latestVix;
+                    Thread.ofVirtual().name("claude-eod-review").start(() -> {
+                        try {
+                            var reviewer = new com.trading.ai.ClaudeSessionReviewer(database, claudeApiKey);
+                            reviewer.runEndOfSessionReview(regimeName, vix);
+                        } catch (Exception ex) {
+                            logger.warn("EOD Claude review thread failed: {}", ex.getMessage());
+                        }
+                    });
                 }
             } else {
                 long failedCount = remaining.stream()

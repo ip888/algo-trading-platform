@@ -93,6 +93,14 @@ public class TradeDatabase {
         runMigration("ALTER TABLE trades ADD COLUMN partial_exits_executed INTEGER DEFAULT 0",
             "Schema migration: Added 'partial_exits_executed' column (bitmask of partial-exit levels fired)");
 
+        // Market-context columns recorded at entry — enables regime-conditioned win-rate analysis.
+        runMigration("ALTER TABLE trades ADD COLUMN regime TEXT",
+            "Schema migration: Added 'regime' column (market regime at entry time)");
+        runMigration("ALTER TABLE trades ADD COLUMN vix_at_entry REAL",
+            "Schema migration: Added 'vix_at_entry' column");
+        runMigration("ALTER TABLE trades ADD COLUMN breadth_at_entry REAL",
+            "Schema migration: Added 'breadth_at_entry' column (% sectors advancing at entry)");
+
         // bot_state: lightweight key-value store for in-memory state that must survive restarts.
         // Covers: post-loss cooldowns, consecutive-loss counts, circuit-breaker drawdown.
         // Keys use namespaced prefixes: "cooldown:{symbol}", "consec_sl:{symbol}", "circuit:{broker}"
@@ -167,6 +175,50 @@ public class TradeDatabase {
         }
     }
     
+    /**
+     * Record a trade with full market context — regime, VIX, breadth — for adaptive learning.
+     * Call this from handleBuy() instead of the base recordTrade() so the bot can
+     * query win rates conditioned on the market environment that was present at entry.
+     */
+    public void recordTradeWithContext(String symbol, String strategy, String profile, String broker,
+                                       Instant entryTime, double entryPrice, double quantity,
+                                       double stopLoss, double takeProfit,
+                                       String regime, double vixAtEntry, double breadthAtEntry) {
+        String sql = """
+            INSERT INTO trades (symbol, strategy, profile, broker, entry_time, entry_price, quantity,
+                                status, stop_loss, take_profit, regime, vix_at_entry, breadth_at_entry)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
+            """;
+        long stamp = lock.writeLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            stmt.setString(2, strategy);
+            stmt.setString(3, profile);
+            stmt.setString(4, broker);
+            stmt.setString(5, entryTime.toString());
+            stmt.setDouble(6, entryPrice);
+            stmt.setDouble(7, quantity);
+            stmt.setDouble(8, stopLoss);
+            stmt.setDouble(9, takeProfit);
+            stmt.setString(10, regime);
+            stmt.setDouble(11, vixAtEntry);
+            stmt.setDouble(12, breadthAtEntry);
+            stmt.executeUpdate();
+            logger.atInfo()
+                .addKeyValue("symbol", symbol)
+                .addKeyValue("regime", regime)
+                .addKeyValue("vix", vixAtEntry)
+                .addKeyValue("breadth", breadthAtEntry)
+                .log("Trade recorded with market context");
+        } catch (SQLException e) {
+            logger.error("Failed to record trade with context for {}", symbol, e);
+            // Fall back to basic recordTrade so the trade isn't lost
+            recordTrade(symbol, strategy, profile, broker, entryTime, entryPrice, quantity, stopLoss, takeProfit);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
     /**
      * Simplified recordTrade for testing - records a trade with minimal parameters.
      * Uses configured stop-loss and take-profit percentages.
@@ -447,6 +499,7 @@ public class TradeDatabase {
                 while (rs.next()) {
                     var trade = new java.util.HashMap<String, Object>();
                     trade.put("symbol",     rs.getString("symbol"));
+                    trade.put("strategy",   rs.getString("strategy"));
                     trade.put("broker",     rs.getString("broker"));
                     trade.put("entryPrice", rs.getDouble("entry_price"));
                     trade.put("exitPrice",  rs.getDouble("exit_price"));
@@ -700,6 +753,130 @@ public class TradeDatabase {
         }
     }
     
+    /**
+     * Regime-conditioned symbol statistics — narrows the win-rate to the specific
+     * market environment (WEAK_BEAR, STRONG_BULL, etc.) so adaptive gates can
+     * compare apples-to-apples instead of averaging across all regimes.
+     * Returns null if fewer than {@code minSamples} trades exist for this symbol+regime pair.
+     */
+    public SymbolStatistics getSymbolStatistics(String symbol, String regime) {
+        return getSymbolStatistics(symbol, regime, 0);
+    }
+
+    public SymbolStatistics getSymbolStatistics(String symbol, String regime, int minSamples) {
+        String totalSql = "SELECT COUNT(*) as count FROM trades WHERE symbol=? AND regime=? AND status='CLOSED'";
+        String winSql   = "SELECT COUNT(*) as count FROM trades WHERE symbol=? AND regime=? AND status='CLOSED' AND pnl>0";
+        String avgWinSql  = "SELECT AVG(pnl) FROM trades WHERE symbol=? AND regime=? AND status='CLOSED' AND pnl>0";
+        String avgLossSql = "SELECT AVG(ABS(pnl)) FROM trades WHERE symbol=? AND regime=? AND status='CLOSED' AND pnl<0";
+
+        long stamp = lock.readLock();
+        try {
+            int total = 0;
+            try (var stmt = connection.prepareStatement(totalSql)) {
+                stmt.setString(1, symbol); stmt.setString(2, regime);
+                var rs = stmt.executeQuery();
+                if (rs.next()) total = rs.getInt("count");
+            }
+            if (total < minSamples || total == 0) return null;
+
+            int wins = 0;
+            try (var stmt = connection.prepareStatement(winSql)) {
+                stmt.setString(1, symbol); stmt.setString(2, regime);
+                var rs = stmt.executeQuery();
+                if (rs.next()) wins = rs.getInt("count");
+            }
+            double avgWin = 0.0;
+            try (var stmt = connection.prepareStatement(avgWinSql)) {
+                stmt.setString(1, symbol); stmt.setString(2, regime);
+                var rs = stmt.executeQuery();
+                if (rs.next()) avgWin = rs.getDouble(1);
+            }
+            double avgLoss = 0.0;
+            try (var stmt = connection.prepareStatement(avgLossSql)) {
+                stmt.setString(1, symbol); stmt.setString(2, regime);
+                var rs = stmt.executeQuery();
+                if (rs.next()) avgLoss = rs.getDouble(1);
+            }
+            return new SymbolStatistics(total, (double) wins / total, avgWin, avgLoss);
+        } catch (SQLException e) {
+            logger.error("Failed to get regime-conditioned statistics for {} in {}", symbol, regime, e);
+            return null;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    /**
+     * Rolling regime-conditioned statistics over the last {@code maxTrades} closed trades.
+     * Used for Kelly fraction sizing: recent sample is more predictive than lifetime average.
+     */
+    public SymbolStatistics getRollingSymbolStatistics(String symbol, String regime, int maxTrades) {
+        String sql = """
+            SELECT pnl FROM trades
+            WHERE symbol = ? AND regime = ? AND status = 'CLOSED'
+            ORDER BY exit_time DESC
+            LIMIT ?
+            """;
+        long stamp = lock.readLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, symbol);
+            stmt.setString(2, regime);
+            stmt.setInt(3, maxTrades);
+            var rs = stmt.executeQuery();
+            int total = 0, wins = 0;
+            double sumWin = 0.0, sumLoss = 0.0;
+            int winCount = 0, lossCount = 0;
+            while (rs.next()) {
+                double pnl = rs.getDouble(1);
+                total++;
+                if (pnl > 0) { wins++; sumWin += pnl; winCount++; }
+                else if (pnl < 0) { sumLoss += Math.abs(pnl); lossCount++; }
+            }
+            if (total == 0) return null;
+            double avgWin  = winCount  > 0 ? sumWin  / winCount  : 0.0;
+            double avgLoss = lossCount > 0 ? sumLoss / lossCount : 0.0;
+            return new SymbolStatistics(total, (double) wins / total, avgWin, avgLoss);
+        } catch (SQLException e) {
+            logger.error("Failed to get rolling statistics for {} in {}", symbol, regime, e);
+            return null;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    /**
+     * Persist the current regime and increment its consecutive-day counter.
+     * Call once per trading session (e.g., after regime detection).
+     * Key layout in bot_state:
+     *   "regime_persist:current"  → e.g. "WEAK_BEAR"
+     *   "regime_persist:days"     → e.g. "3"
+     */
+    public void updateRegimePersistence(String newRegime) {
+        String currentRegime = loadBotState("regime_persist:current");
+        int days = 1;
+        if (newRegime.equals(currentRegime)) {
+            String daysStr = loadBotState("regime_persist:days");
+            if (daysStr != null) {
+                try { days = Integer.parseInt(daysStr) + 1; } catch (NumberFormatException ignored) {}
+            }
+        }
+        saveBotState("regime_persist:current", newRegime);
+        saveBotState("regime_persist:days", String.valueOf(days));
+        logger.info("Regime persistence: {} for {} consecutive day(s)", newRegime, days);
+    }
+
+    /**
+     * Returns how many consecutive trading days the given regime has been active.
+     * Returns 0 if the current persisted regime does not match, or no data exists.
+     */
+    public int getRegimePersistenceDays(String regime) {
+        String current = loadBotState("regime_persist:current");
+        if (!regime.equals(current)) return 0;
+        String daysStr = loadBotState("regime_persist:days");
+        if (daysStr == null) return 0;
+        try { return Integer.parseInt(daysStr); } catch (NumberFormatException e) { return 0; }
+    }
+
     /**
      * Check if there was a buy order for this symbol today (PDT detection).
      */

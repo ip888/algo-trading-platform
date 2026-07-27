@@ -31,12 +31,12 @@ RUN cd dashboard && npm ci && npm run build && \
 # Now build JAR with embedded dashboard
 RUN mvn -B clean package -DskipTests
 
-# Run Stage - Ubuntu with OpenJDK 25
+# Run Stage - Ubuntu with OpenJDK 25 + Python 3 for ML sidecar
 FROM ubuntu:24.04
 WORKDIR /app
 
-# Install Java 25.0.1 and curl for healthchecks
-RUN apt-get update && apt-get install -y curl wget && \
+# Install Java 25.0.1, Python 3, pip, and curl for healthchecks
+RUN apt-get update && apt-get install -y curl wget python3 python3-pip python3-venv && \
     wget -q https://download.java.net/java/GA/jdk25.0.1/2fbf10d8c78e40bd87641c434705079d/8/GPL/openjdk-25.0.1_linux-x64_bin.tar.gz && \
     mkdir -p /opt/java && \
     tar -xzf openjdk-25.0.1_linux-x64_bin.tar.gz -C /opt/java --strip-components=1 && \
@@ -46,17 +46,25 @@ RUN apt-get update && apt-get install -y curl wget && \
 ENV JAVA_HOME=/opt/java
 ENV PATH=/opt/java/bin:$PATH
 
+# Install Python ML sidecar dependencies into a venv
+COPY sidecar/requirements.txt /app/sidecar/requirements.txt
+RUN python3 -m venv /app/sidecar/.venv && \
+    /app/sidecar/.venv/bin/pip install --no-cache-dir -r /app/sidecar/requirements.txt
+
+COPY sidecar/regime_classifier.py /app/sidecar/regime_classifier.py
 COPY --from=build /app/target/trading-backend-1.0-SNAPSHOT.jar app.jar
 COPY --from=build /app/config.properties config.properties
 
-# Create directory for database (if using file-based DB)
+# Create directory for database
 RUN mkdir -p /app/data
 
-EXPOSE 8080
+COPY sidecar/start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
-# Health check
+EXPOSE 8080 5001
+
+# Health check covers Java bot; sidecar is best-effort
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8080/api/health || exit 1
 
-# Use correct main class: com.trading.bot.TradingBot
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["/app/start.sh"]

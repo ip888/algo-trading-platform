@@ -88,24 +88,27 @@ public final class RiskManager {
      * Calculate position size with full parameters.
      * This is the main method that uses AdvancedPositionSizer when available.
      */
-    public double calculatePositionSize(String symbol, double accountEquity, double entryPrice, 
+    public double calculatePositionSize(String symbol, double accountEquity, double entryPrice,
                                        double currentVix, double stopLossPercent) {
-        // Use AdvancedPositionSizer if available
+        return calculatePositionSize(symbol, accountEquity, entryPrice, currentVix, stopLossPercent, null);
+    }
+
+    /**
+     * Regime-aware overload: passes the current market regime to AdvancedPositionSizer
+     * so Kelly sizing uses rolling regime-conditioned win-rate stats instead of the
+     * lifetime average.
+     */
+    public double calculatePositionSize(String symbol, double accountEquity, double entryPrice,
+                                       double currentVix, double stopLossPercent, String regime) {
         if (positionSizer != null && symbol != null) {
-            // Calculate volatility from VIX (approximate)
-            double volatility = currentVix / 100.0; // Convert VIX to decimal
-            
+            double volatility = currentVix / 100.0;
             double size = positionSizer.calculatePositionSize(
-                symbol, accountEquity, entryPrice, volatility, stopLossPercent
+                symbol, accountEquity, entryPrice, volatility, stopLossPercent, regime
             );
-            
-            logger.debug("{}: Advanced position sizing - {} shares", symbol, 
+            logger.debug("{}: Advanced position sizing (regime={}) - {} shares", symbol, regime,
                 String.format("%.4f", size));
-            
             return size;
         }
-        
-        // Fallback to simple volatility-adjusted sizing
         return calculateVolatilityAdjustedSize(accountEquity, entryPrice, currentVix);
     }
 

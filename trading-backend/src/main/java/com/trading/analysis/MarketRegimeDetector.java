@@ -20,23 +20,25 @@ import java.util.*;
  */
 public class MarketRegimeDetector {
     private static final Logger logger = LoggerFactory.getLogger(MarketRegimeDetector.class);
-    
+
     private final BrokerClient client;
     private final Config config;
     private final MarketAnalyzer marketAnalyzer;
-    
+    private final RegimeClassifierClient sidecarClient;
+
     // Cache for regime detection (expensive operation)
     private MarketRegimeAnalysis cachedRegime;
     private Instant lastUpdate;
     private final Duration cacheExpiry;
-    
+
     public MarketRegimeDetector(BrokerClient client, Config config, MarketAnalyzer marketAnalyzer) {
         this.client = client;
         this.config = config;
         this.marketAnalyzer = marketAnalyzer;
         this.cacheExpiry = Duration.ofMinutes(config.getRegimeUpdateIntervalMinutes());
-        
-        logger.info("MarketRegimeDetector initialized with {}min cache", 
+        this.sidecarClient = new RegimeClassifierClient();
+
+        logger.info("MarketRegimeDetector initialized with {}min cache",
             config.getRegimeUpdateIntervalMinutes());
     }
     
@@ -154,10 +156,34 @@ public class MarketRegimeDetector {
             
             // Determine regime based on all factors
             MarketRegime regime = classifyRegime(trend, volume, breadth, vix);
-            
+
             // Calculate confidence based on factor agreement
             double confidence = calculateConfidence(trend, volume, breadth, vix, regime);
-            
+
+            // ── ML sidecar overlay ────────────────────────────────────────────
+            // Consult the Python RandomForest sidecar trained on trade history.
+            // Agreement boosts confidence; disagreement is logged but rule-based wins.
+            try {
+                double breadthFraction = breadth.strength();
+                var sidecar = sidecarClient.classify(vix, breadthFraction);
+                if (sidecar != null) {
+                    if (sidecar.regime().equals(regime.name())) {
+                        // Models agree — blend confidence upward (cap at 0.95)
+                        double boosted = Math.min(0.95, confidence + (sidecar.confidence() - confidence) * 0.3);
+                        logger.debug("ML sidecar agrees: {} ({} trades, conf {}→{})",
+                            regime, sidecar.modelTrades(),
+                            String.format("%.2f", confidence), String.format("%.2f", boosted));
+                        confidence = boosted;
+                    } else {
+                        // Models disagree — log for monitoring, rule-based wins
+                        logger.info("ML sidecar disagrees: rule={} ml={} (conf={}, {} trades) — keeping rule-based",
+                            regime, sidecar.regime(), String.format("%.2f", sidecar.confidence()), sidecar.modelTrades());
+                    }
+                }
+            } catch (Exception sidecarEx) {
+                logger.debug("Sidecar overlay skipped: {}", sidecarEx.getMessage());
+            }
+
             return new MarketRegimeAnalysis(
                 regime, confidence, trend, volume, breadth, vix, Instant.now()
             );

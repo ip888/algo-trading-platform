@@ -64,16 +64,26 @@ public class AdvancedPositionSizer {
      */
     public double calculatePositionSize(String symbol, double equity, double currentPrice,
                                        double volatility, double stopLossPercent) {
-        
+        return calculatePositionSize(symbol, equity, currentPrice, volatility, stopLossPercent, null);
+    }
+
+    /**
+     * Regime-aware overload: uses rolling Kelly stats conditioned on the current market regime
+     * so win-rate assumptions reflect how THIS symbol has actually performed in conditions
+     * like the current one, not a lifetime average that mixes bull and bear results.
+     */
+    public double calculatePositionSize(String symbol, double equity, double currentPrice,
+                                       double volatility, double stopLossPercent, String regime) {
+
         // Calculate deployable capital (respecting reserve)
         double deployableEquity = calculateDeployableCapital(equity);
-        
+
         // Get or create symbol stats
-        SymbolStats stats = symbolStats.computeIfAbsent(symbol, 
+        SymbolStats stats = symbolStats.computeIfAbsent(symbol,
             k -> new SymbolStats(config.getPositionSizingDefaultWinRate()));
-        
-        // Update stats from database
-        updateStatsFromDatabase(symbol, stats);
+
+        // Update stats — prefer rolling regime-conditioned sample when regime is known
+        updateStatsFromDatabase(symbol, stats, regime);
         
         // Calculate base size using selected method (with deployable capital)
         double baseSize = switch (config.getPositionSizingMethod()) {
@@ -221,18 +231,35 @@ public class AdvancedPositionSizer {
     }
     
     /**
-     * Update symbol statistics from database
+     * Update symbol statistics from database.
+     * When {@code regime} is non-null, prefers a rolling 20-trade regime-conditioned
+     * sample over the lifetime average — closer to how this symbol will actually behave
+     * in the current market environment.
      */
-    private void updateStatsFromDatabase(String symbol, SymbolStats stats) {
+    private void updateStatsFromDatabase(String symbol, SymbolStats stats, String regime) {
         try {
+            // Try regime-conditioned rolling stats first (20-trade window)
+            if (regime != null && !regime.isBlank()) {
+                var rolling = database.getRollingSymbolStatistics(symbol, regime, 20);
+                if (rolling != null && rolling.totalTrades() >= 3) {
+                    stats.winRate = rolling.winRate();
+                    stats.totalTrades = rolling.totalTrades();
+                    stats.avgWin = rolling.avgWin() > 0 ? rolling.avgWin() : stats.avgWin;
+                    stats.avgLoss = rolling.avgLoss() > 0 ? rolling.avgLoss() : stats.avgLoss;
+                    logger.debug("{}: Kelly stats from rolling {}-trade {} sample — WinRate: {}%",
+                        symbol, rolling.totalTrades(), regime,
+                        String.format("%.1f", stats.winRate * 100));
+                    return;
+                }
+            }
+            // Fall back to lifetime stats when regime sample is too small
             var dbStats = database.getSymbolStatistics(symbol);
             if (dbStats != null && dbStats.totalTrades() > 0) {
                 stats.winRate = dbStats.winRate();
                 stats.totalTrades = dbStats.totalTrades();
                 stats.avgWin = dbStats.avgWin();
                 stats.avgLoss = dbStats.avgLoss();
-                
-                logger.debug("{}: Updated stats from DB - WinRate: {}%, Trades: {}",
+                logger.debug("{}: Kelly stats from lifetime DB — WinRate: {}%, Trades: {}",
                     symbol, String.format("%.1f", stats.winRate * 100), stats.totalTrades);
             }
         } catch (Exception e) {

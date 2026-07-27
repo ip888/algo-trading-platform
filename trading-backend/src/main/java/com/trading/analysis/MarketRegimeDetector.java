@@ -401,6 +401,13 @@ public class MarketRegimeDetector {
             if (volume.trend == VolumeTrend.INCREASING && breadth.strength < 0.4 && vix >= 20) {
                 return MarketRegime.STRONG_BEAR;
             }
+            // VIX < 14 = extreme market calm — no bear market is possible at this volatility level.
+            // Weak breadth at VIX < 14 is sector rotation or holiday churn, not a real decline.
+            // WEAK_BEAR at VIX 12-13 blocks all strategies and produces 0 trades all day
+            // (observed Jul 22, Jul 27 2026). Reclassify to RANGE_BOUND so mean-reversion fires.
+            if (vix < 14.0) {
+                return MarketRegime.RANGE_BOUND;
+            }
             // Downgrade to RANGE_BOUND only if a CLEAR MAJORITY of sectors are still advancing.
             // 35% was too loose: 3 of 8 sectors advancing (38%) was treated as "sideways" even
             // though 5 sectors were declining — causing RANGE_BOUND entries in a falling market
@@ -410,7 +417,7 @@ public class MarketRegimeDetector {
             if (breadth.strength > 0.50 && vix < 20) {
                 return MarketRegime.RANGE_BOUND;
             }
-            // Genuine weak bear: downtrend with most sectors falling OR elevated VIX
+            // Genuine weak bear: downtrend with most sectors falling AND VIX 14-20
             return MarketRegime.WEAK_BEAR;
         }
         

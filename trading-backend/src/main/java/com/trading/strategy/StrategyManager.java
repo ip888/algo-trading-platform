@@ -36,6 +36,7 @@ public final class StrategyManager {
     private final ScalpStrategy scalpStrategy;
     private MarketRegime currentRegime = MarketRegime.RANGE_BOUND;
     private String activeStrategy = "None";
+    private double latestVix = 20.0;
 
     public StrategyManager(BrokerClient client) {
         this(client, null, null);
@@ -62,6 +63,11 @@ public final class StrategyManager {
         if (multiTimeframeAnalyzer != null) {
             logger.info("StrategyManager initialized with multi-timeframe analysis + Momentum Strategy");
         }
+    }
+
+    /** Called by ProfileManager before each evaluate() to pass current VIX for threshold scaling. */
+    public void setLatestVix(double vix) {
+        this.latestVix = vix;
     }
 
     /**
@@ -328,8 +334,13 @@ public final class StrategyManager {
                 // bypass they'd always be blocked as "non-momentum" in WEAK_BEAR.
                 boolean isInverseEtf = inverseEtfAssets.contains(symbol);
                 if (isInverseEtf && positionQty == 0) {
+                    // Low-VIX WEAK_BEAR (calm breadth-weak market): inverse ETFs move slowly —
+                    // 0.20 MACD threshold never fires. Use 0.10 when VIX < 16; keep 0.20 for
+                    // genuine high-volatility bear markets where momentum is strong.
+                    double currentVix = latestVix > 0 ? latestVix : 20.0;
+                    double inverseEtfThreshold = currentVix < 16.0 ? 0.10 : 0.20;
                     activeStrategy = "MACD (Inverse ETF, Weak Bear)";
-                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.20);
+                    yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, inverseEtfThreshold);
                 }
                 if (config != null && config.isRegimeStrictRoutingEnabled() && positionQty == 0 && !isMomentumAsset) {
                     activeStrategy = "Bear Block (Weak Bear, strict)";

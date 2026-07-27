@@ -944,6 +944,10 @@ public class ProfileManager implements Runnable {
             }
         }
         
+        // Give StrategyManager current VIX so it can adjust thresholds (e.g. inverse ETF
+        // MACD threshold scales with volatility — lower in calm WEAK_BEAR markets).
+        strategyManager.setLatestVix(currentVix);
+
         // Evaluate strategy using regime
         var signal = strategyManager.evaluate(symbol, currentPrice, qty, regime);
         

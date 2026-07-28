@@ -3442,18 +3442,35 @@ public class ProfileManager implements Runnable {
                 double pnl = (currentPrice - entryPrice) * qty;
                 double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
 
-                // Carry profitable positions overnight (Mon–Thu only).
-                // Breakeven stop arms at +0.5%, so pnlPercent ≥ 0.5% guarantees the worst
-                // case overnight is flat — the position cannot turn into a loss even on a gap down.
-                // Never carry over Friday: a 3-day weekend gap is unacceptable risk.
-                if (!isFriday && pnlPercent >= 0.5) {
-                    carriedSymbols.add(symbol);
-                    logger.info("{} 📈 {} carrying overnight — P&L +{}% ≥ 0.5% (breakeven stop active, trailing stop managing)",
-                        profilePrefix, symbol, String.format("%.2f", pnlPercent));
-                    TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] 📈 %s carrying overnight: P&L +%.2f%% (breakeven protected)",
-                            profile.name(), symbol, pnlPercent), "SUCCESS");
-                    continue;
+                // Carry profitable positions overnight (Mon–Thu only, never Friday).
+                // Threshold raised 0.5% → 1.0%: a position at exactly 0.5% is too close to
+                // flat — it faded to +0.08% by close on Jul 28 2026 (SMH was at 0.47% at 15:55
+                // but drifted to nearly zero, carried overnight unprotected).
+                // Requires 1.0% profit so the GTC stop at entry price gives real cushion.
+                // Places a real GTC stop order at entry price before marking as carried — the old
+                // code only logged "breakeven stop active" without actually placing any order.
+                // If the stop order placement fails, position is force-closed at market instead.
+                if (!isFriday && pnlPercent >= 1.0) {
+                    double stopPrice = Math.round(entryPrice * 100.0) / 100.0; // stop at exact entry
+                    boolean stopPlaced = false;
+                    try {
+                        client.placeOrder(symbol, qty, "sell", "stop", "gtc", stopPrice);
+                        stopPlaced = true;
+                        logger.info("{} 📈 {} carrying overnight — P&L +{}%, GTC stop @ ${} (entry, can't lose)",
+                            profilePrefix, symbol, String.format("%.2f", pnlPercent),
+                            String.format("%.2f", stopPrice));
+                    } catch (Exception stopEx) {
+                        logger.error("{} ❌ Cannot place overnight stop for {} ({}), force-closing instead",
+                            profilePrefix, symbol, stopEx.getMessage());
+                    }
+                    if (stopPlaced) {
+                        carriedSymbols.add(symbol);
+                        TradingWebSocketHandler.broadcastActivity(
+                            String.format("[%s] 📈 %s overnight: +%.2f%%, stop @ $%.2f", profile.name(), symbol, pnlPercent, stopPrice),
+                            "SUCCESS");
+                        continue; // skip EOD close — stop order is the protection
+                    }
+                    // Stop failed — fall through to normal EOD close below
                 }
 
                 logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({}%)",

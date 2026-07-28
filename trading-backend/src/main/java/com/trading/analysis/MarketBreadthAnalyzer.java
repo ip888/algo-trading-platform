@@ -51,14 +51,17 @@ public class MarketBreadthAnalyzer {
     }
     
     /**
-     * Update breadth data (called periodically)
-     * In production, this would query real market data
+     * Update breadth with the real advance/decline ratio from MarketRegimeDetector.
+     * Called each cycle with regimeAnalysis.breadth().strength() so the filter
+     * uses actual 5-day sector breadth instead of random simulation.
      */
+    public void updateBreadth(double realBreadth) {
+        this.currentBreadth = realBreadth;
+        logger.debug("Market breadth updated (real): {}%", String.format("%.1f", currentBreadth * 100));
+    }
+
+    /** Legacy no-arg form kept for backward compatibility — no longer used by ProfileManager. */
     public void updateBreadth() {
-        // Simulate breadth fluctuation
-        // In production: query NYSE/NASDAQ advance/decline data
-        currentBreadth = 0.50 + (Math.random() * 0.3); // 50-80%
-        
-        logger.debug("Market breadth updated: {}%", String.format("%.1f", currentBreadth * 100));
+        logger.debug("updateBreadth() no-arg called — ignoring (real breadth supplied by regime detector)");
     }
 }

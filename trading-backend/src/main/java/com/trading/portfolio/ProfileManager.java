@@ -509,6 +509,12 @@ public class ProfileManager implements Runnable {
 
             targetSymbols = symbolSelector.selectSymbols(regime);
             logger.debug("{} {}", profilePrefix, regimeAnalysis.getSummary());
+
+            // Feed real advance/decline breadth from the regime detector into the breadth analyzer.
+            // Previously MarketBreadthAnalyzer used random simulation (50-80%) — now it reflects
+            // actual 5-day sector breadth (SPY/QQQ/IWM/DIA/XLK/XLF/XLE/XLV) so the Phase 3
+            // breadth filter is meaningful rather than always passing.
+            marketBreadthAnalyzer.updateBreadth(regimeAnalysis.breadth().strength());
         } else {
             // Fallback to simple VIX-based selection
             currentVix = volatilityFilter.getCurrentVIX();
@@ -1501,8 +1507,13 @@ public class ProfileManager implements Runnable {
         }
 
         // ========== PHASE 3: MARKET BREADTH FILTER ==========
-        if (!marketBreadthAnalyzer.isMarketHealthy()) {
-            logger.info("{} {}: ❌ PHASE 3 FILTER - Market breadth too low, skipping trade", 
+        // Skip when regime is RANGE_BOUND at low VIX — the regime detector already
+        // overrode low breadth (e.g. VIX < 14 → RANGE_BOUND) meaning it determined
+        // this is sector rotation, not a broad decline. Blocking on breadth here would
+        // double-count the same concern and produce 0 trades all day (observed Jul 27 2026).
+        boolean skipBreadthFilter = (regime == MarketRegime.RANGE_BOUND && currentVix < 15.0);
+        if (!skipBreadthFilter && !marketBreadthAnalyzer.isMarketHealthy()) {
+            logger.info("{} {}: ❌ PHASE 3 FILTER - Market breadth too low, skipping trade",
                 profilePrefix, symbol);
             return;
         }

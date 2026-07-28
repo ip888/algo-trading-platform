@@ -14,7 +14,7 @@ import java.util.List;
 public final class MeanReversionStrategy implements TradingStrategy {
     private static final Logger logger = LoggerFactory.getLogger(MeanReversionStrategy.class);
     private static final int PERIOD = 20;
-    private static final double STD_DEV_MULTIPLIER = 2.5; // Wider bands for high volatility
+    private static final double STD_DEV_MULTIPLIER = 2.0; // Standard Bollinger Band multiplier
 
     @Override
     public TradingSignal evaluate(String symbol, double currentPrice, double positionQty) {

@@ -1292,7 +1292,7 @@ public class Config {
     }
     
     public double getVolumeNodeThreshold() {
-        return getDoubleProperty("VOLUME_NODE_THRESHOLD", 0.005);
+        return getDoubleProperty("VOLUME_NODE_THRESHOLD", 0.015);
     }
     
     // Feature 29: Market Breadth Filter
@@ -1756,6 +1756,6 @@ public class Config {
         return getDoubleProperty("SCALP_RSI_MAX", 58.0);
     }
     public double getScalpVolumeMultiplier() {
-        return getDoubleProperty("SCALP_VOLUME_MULTIPLIER", 1.3);
+        return getDoubleProperty("SCALP_VOLUME_MULTIPLIER", 1.1);
     }
 }

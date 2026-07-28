@@ -368,12 +368,14 @@ public final class StrategyManager {
                     // Mean Reversion would miss a rising gold/oil trend — use MACD to follow it.
                     // RSI gate applied same as WEAK_BULL: blocks entries when RSI is already extended
                     // (>65) or in freefall (<35), preventing late entries into exhausted moves.
-                    // Stricter MACD threshold (0.20 vs default 0.10): choppy range-bound markets
-                    // produce frequent histogram oscillations near 0.10 — requiring 0.20 filters
-                    // out whipsaws and keeps only confirmed multi-bar momentum moves (Jul 14 2026).
+                    // VIX-adaptive MACD threshold: in low-volatility markets (VIX < 15) the histogram
+                    // rarely reaches 0.20 even on confirmed uptrends — 0.12 still filters single-bar
+                    // whipsaws (requires prevHistogram > 0 too) while being achievable at VIX=12.
+                    // Above VIX 15 keep 0.20: more momentum available, stricter filter justified.
+                    double rangeBoundThreshold = latestVix < 15.0 ? 0.12 : 0.20;
                     activeStrategy = "MACD Trend (Range, Momentum Asset)";
                     yield rsiFilteredBuy(
-                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.20),
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, rangeBoundThreshold),
                         history, symbol, positionQty);
                 }
                 // Non-momentum assets in sideways market → Mean Reversion (RSI bounce)

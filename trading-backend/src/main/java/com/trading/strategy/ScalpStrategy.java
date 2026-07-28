@@ -41,9 +41,10 @@ public class ScalpStrategy {
     // Overridable clock — replaced in tests to simulate specific times of day
     private Supplier<ZonedDateTime> nowSupplier = () -> ZonedDateTime.now(ET);
 
-    // Daily trade counter — reset at the start of each new trading day
-    private int dailyScalpCount = 0;
-    private LocalDate lastCounterDate = null;
+    // Static: shared across MAIN and EXPERIMENTAL instances so both profiles
+    // contribute to the same daily limit (prevents 2×SCALP_MAX_DAILY_TRADES total).
+    private static volatile int dailyScalpCount = 0;
+    private static volatile LocalDate lastCounterDate = null;
 
     public ScalpStrategy(BrokerClient client, Config config) {
         this.client = client;

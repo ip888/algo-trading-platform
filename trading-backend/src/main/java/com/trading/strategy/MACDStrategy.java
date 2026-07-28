@@ -110,9 +110,16 @@ public final class MACDStrategy implements TradingStrategy {
 
     private double calculateEMA(List<Double> prices, int period, int endIndex) {
         double k = 2.0 / (period + 1);
-        double ema = prices.get(endIndex - period + 1); // Start with SMA approximation
-        
-        for (int i = endIndex - period + 2; i <= endIndex; i++) {
+        // Seed the EMA with the SMA of the first `period` bars in a 2×period lookback window.
+        // Seeding from a single price biases the EMA for many bars (decay constant ≈ period/2).
+        int windowStart = Math.max(0, endIndex - period * 2 + 1);
+        int seedEnd = Math.min(windowStart + period - 1, endIndex);
+        double seedSum = 0.0;
+        for (int i = windowStart; i <= seedEnd; i++) {
+            seedSum += prices.get(i);
+        }
+        double ema = seedSum / (seedEnd - windowStart + 1);
+        for (int i = seedEnd + 1; i <= endIndex; i++) {
             ema = prices.get(i) * k + ema * (1 - k);
         }
         return ema;

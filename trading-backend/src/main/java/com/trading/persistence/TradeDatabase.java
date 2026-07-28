@@ -441,22 +441,33 @@ public class TradeDatabase {
      * only the most recent entry is returned.
      */
     public java.util.List<OpenTradeRecord> getOpenTradeRecords(String broker) {
+        // Use the EARLIEST OPEN record's entry_price/stop_loss/take_profit per symbol so that
+        // restart recovery reconstructs the real fill price (AVG produces a fictional price
+        // when multiple OPEN rows exist for the same symbol, placing stops at wrong levels).
         String sql = """
-            SELECT symbol,
-                   SUM(quantity)               AS total_qty,
-                   AVG(entry_price)            AS avg_entry,
-                   MIN(stop_loss)              AS min_sl,
-                   MAX(take_profit)            AS max_tp,
-                   MAX(entry_time)             AS last_entry,
-                   MAX(partial_exits_executed) AS partial_exits
-            FROM trades
-            WHERE broker = ? AND status = 'OPEN'
-            GROUP BY symbol
+            SELECT t.symbol,
+                   agg.total_qty,
+                   t.entry_price                    AS avg_entry,
+                   t.stop_loss                      AS min_sl,
+                   t.take_profit                    AS max_tp,
+                   t.entry_time                     AS last_entry,
+                   COALESCE(t.partial_exits_executed, 0) AS partial_exits
+            FROM trades t
+            JOIN (
+                SELECT symbol,
+                       MIN(entry_time) AS first_entry,
+                       SUM(quantity)   AS total_qty
+                FROM trades
+                WHERE broker = ? AND status = 'OPEN'
+                GROUP BY symbol
+            ) agg ON t.symbol = agg.symbol AND t.entry_time = agg.first_entry
+            WHERE t.broker = ? AND t.status = 'OPEN'
             """;
         var result = new java.util.ArrayList<OpenTradeRecord>();
         long stamp = lock.readLock();
         try (var stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, broker);
+            stmt.setString(2, broker);
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     var entryStr = rs.getString("last_entry");

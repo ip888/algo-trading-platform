@@ -1097,13 +1097,17 @@ public class ProfileManager implements Runnable {
             return;
         }
 
+        // All code after this point owns the pendingBuyKey claim — ensure it is always released.
+        // Without try/finally, early returns (buying power) and throws (Alpaca errors) leave the
+        // key stuck for PENDING_BUY_TTL_MS (5 min), silently blocking all buys on this symbol.
+        try {
+
         // ========== CROSS-PROFILE POSITION EXCLUSION ==========
         // If another profile (MAIN vs EXPERIMENTAL) already holds this symbol, skip.
         // Allowing both profiles to hold the same declining symbol doubles concentration risk.
         // Root cause of XLP×2 and XLV×2 losses on July 7, 2026.
         String currentOwner = globalHeldSymbols.get(symbol);
         if (currentOwner != null && !currentOwner.equals(profilePrefix)) {
-            pendingBuySymbols.remove(pendingBuyKey); // release the race lock
             logger.info("{} {} BUY skipped — already held by {} (cross-profile exclusion)",
                 profilePrefix, symbol, currentOwner);
             return;
@@ -2068,16 +2072,18 @@ public class ProfileManager implements Runnable {
             currentVix,
             breadth
         );
-        // Portfolio and DB are now consistent — release the in-flight lock.
-        pendingBuySymbols.remove(pendingBuyKey);
-        
         // Broadcast trade event
         TradingWebSocketHandler.broadcastTradeEvent(
-            symbol, "BUY", currentPrice, positionSize, 
+            symbol, "BUY", currentPrice, positionSize,
             profile.name() + " Profile"
         );
+
+        } finally {
+            // Always release the in-flight lock — covers success, early returns, and thrown exceptions.
+            pendingBuySymbols.remove(pendingBuyKey);
+        }
     }
-    
+
     private void handleSell(String symbol, double currentPrice, TradePosition position,
                            String profilePrefix) throws Exception {
 
@@ -2196,6 +2202,28 @@ public class ProfileManager implements Runnable {
                 profilePrefix, symbol,
                 String.format("%.2f", position.stopLoss()),
                 String.format("%.2f", updatedPosition.stopLoss()));
+
+            // Replace the native Alpaca stop order at the new level.
+            // Without this, the original lower stop stays on Alpaca and fires too early:
+            // e.g. position gains 1%, trailing stop raised to entry, but old stop at entry-1%
+            // still on Alpaca → next pullback to entry-1% triggers the stale order, exiting
+            // at a loss despite the in-memory trailing stop being at entry (breakeven).
+            try {
+                var openOrders = client.getOpenOrders(symbol);
+                for (var ord : openOrders) {
+                    String otype = ord.path("type").asText("");
+                    String oside = ord.path("side").asText("");
+                    if (("stop".equals(otype) || "stop_limit".equals(otype)) && "sell".equals(oside)) {
+                        client.cancelOrder(ord.path("id").asText());
+                    }
+                }
+                client.placeNativeStopOrder(symbol, updatedPosition.quantity(), updatedPosition.stopLoss());
+                logger.info("{} {}: Broker stop replaced at ${} (trailing update)",
+                    profilePrefix, symbol, String.format("%.2f", updatedPosition.stopLoss()));
+            } catch (Exception stopEx) {
+                logger.warn("{} {}: Could not replace broker stop after trailing update ({}); in-memory stop still active",
+                    profilePrefix, symbol, stopEx.getMessage());
+            }
         }
     }
     
@@ -2242,7 +2270,7 @@ public class ProfileManager implements Runnable {
                 double qty = alpacaPos.quantity();
 
                 // Skip if a sell order was already placed this cycle (prevents duplicate sells)
-                if (pendingExitOrders.containsKey(symbol)) {
+                if (pendingExitOrders.containsKey(brokerName + ":" + symbol)) {
                     logger.debug("{} {} has pending exit order, skipping risk exit check", profilePrefix, symbol);
                     continue;
                 }
@@ -2302,7 +2330,7 @@ public class ProfileManager implements Runnable {
                                         String.format("[%s] 🗓️ PRE-EARNINGS EXIT: %s — %s",
                                             profile.name(), symbol, exitDecision.reason()),
                                         "WARN");
-                                    pendingExitOrders.put(symbol, System.currentTimeMillis());
+                                    pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
                                     continue;
                                 } catch (PDTRejectedException e) {
                                     pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
@@ -2386,7 +2414,7 @@ public class ProfileManager implements Runnable {
                             );
 
                             // Mark as pending to prevent duplicate sells in this and future cycles
-                            pendingExitOrders.put(symbol, System.currentTimeMillis());
+                            pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
                             continue;
                         } catch (PDTRejectedException e) {
                             pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
@@ -2448,7 +2476,7 @@ public class ProfileManager implements Runnable {
                                 database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
                                 updateDailyPnL(profilePrefix, pnl);
                                 applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
-                                pendingExitOrders.put(symbol, System.currentTimeMillis());
+                                pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
                             } catch (Exception e) {
                                 logger.error("{} Failed regime exit for {}: {}", profilePrefix, symbol, e.getMessage());
                                 urgentExitQueue.put(urgentKey(brokerName, symbol),
@@ -2678,6 +2706,9 @@ public class ProfileManager implements Runnable {
      * Only MAIN profile drains the queue to avoid duplicate orders.
      */
     private void drainUrgentExitQueue(String profilePrefix) {
+        // Only MAIN profile drains — prevents both profiles from placing duplicate exit orders
+        // for the same symbol when both dequeue the same UrgentExit entry concurrently.
+        if (!profile.isMainProfile()) return;
         if (System.currentTimeMillis() < pdtBlockedUntil) return;
 
         for (String key : new java.util.HashSet<>(urgentExitQueue.keySet())) {
@@ -2712,7 +2743,7 @@ public class ProfileManager implements Runnable {
                 client.placeOrderDirect(symbol, liveQty, "sell", "market", "day", null);
 
                 urgentExitQueue.remove(key);
-                pendingExitOrders.put(symbol, System.currentTimeMillis());
+                pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
 
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] ✅ URGENT EXIT SUCCEEDED: %s after %dm delay (%s)",
@@ -2779,17 +2810,21 @@ public class ProfileManager implements Runnable {
             long staleThresholdMs = 20 * 60 * 1000L; // 20 minutes
             long now = System.currentTimeMillis();
             int clearedExits = 0;
-            for (String symbol : new java.util.HashSet<>(pendingExitOrders.keySet())) {
+            for (String pendingKey : new java.util.HashSet<>(pendingExitOrders.keySet())) {
+                // Key format is "brokerName:symbol" — extract symbol for broker-position lookup
+                String[] parts = pendingKey.split(":", 2);
+                if (parts.length < 2 || !brokerName.equals(parts[0])) continue;
+                String symbol = parts[1];
                 if (!brokerSymbols.contains(symbol)) {
-                    pendingExitOrders.remove(symbol);
+                    pendingExitOrders.remove(pendingKey);
                     clearedExits++;
                     logger.info("{} Pending exit cleared: {} (position filled/gone from broker)",
                         profilePrefix, symbol);
                 } else {
                     // Position still exists — check if our "pending" order is stale
-                    long placedAt = pendingExitOrders.getOrDefault(symbol, now);
+                    long placedAt = pendingExitOrders.getOrDefault(pendingKey, now);
                     if (now - placedAt > staleThresholdMs) {
-                        pendingExitOrders.remove(symbol);
+                        pendingExitOrders.remove(pendingKey);
                         clearedExits++;
                         logger.warn("{} Stale pending exit cleared for {} — order is {}min old but position still exists (likely expired/rejected by broker); will re-evaluate next cycle",
                             profilePrefix, symbol, (now - placedAt) / 60000);
@@ -2845,7 +2880,11 @@ public class ProfileManager implements Runnable {
             // This fixes the "0 trades in DB" problem after a redeploy wipes the ephemeral DB:
             // positions that were bought in a previous session are re-inserted as OPEN so that
             // when they are eventually sold, closeTrade() can find them and record P&L.
-            for (var pos : brokerPositions) {
+            // Gate on isMainProfile() — both profiles run reconciliation but only MAIN writes DB
+            // recovery records. Without this gate, MAIN and EXPERIMENTAL both call hasOpenTrade()
+            // at the same instant (both see false), then both call recordTrade(), creating duplicate
+            // OPEN rows whose averaged entry price mis-places stops on restart recovery.
+            if (profile.isMainProfile()) for (var pos : brokerPositions) {
                 String symbol = pos.symbol();
                 if (!database.hasOpenTrade(symbol, brokerName)) {
                     try {
@@ -3251,10 +3290,10 @@ public class ProfileManager implements Runnable {
 
                 // Skip symbols with pending exit orders to prevent duplicate sell/closeTrade calls
                 // This fixes the bug where 49+ duplicate trade records were created for one position
-                if (pendingExitOrders.containsKey(symbol)) {
+                if (pendingExitOrders.containsKey(brokerName + ":" + symbol)) {
                     logger.info("{} {} has pending exit order (placed at {}), skipping duplicate check",
                         profilePrefix, symbol,
-                        java.time.Instant.ofEpochMilli(pendingExitOrders.get(symbol)));
+                        java.time.Instant.ofEpochMilli(pendingExitOrders.get(brokerName + ":" + symbol)));
                     continue;
                 }
                 
@@ -3295,7 +3334,7 @@ public class ProfileManager implements Runnable {
                     if (!eodDecision.isPartial()) {
                         portfolio.setPosition(symbol, Optional.empty());
                         globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
-                        pendingExitOrders.put(symbol, System.currentTimeMillis());
+                        pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
                     }
                     
                     TradingWebSocketHandler.broadcastActivity(
@@ -3385,7 +3424,7 @@ public class ProfileManager implements Runnable {
                         globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
-                        pendingExitOrders.put(symbol, System.currentTimeMillis());
+                        pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
 
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] ✅ TAKE PROFIT: %s sold @ $%.2f (+%.2f%%, $%.2f profit)",

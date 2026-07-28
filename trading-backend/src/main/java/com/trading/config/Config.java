@@ -314,7 +314,7 @@ public class Config {
     }
 
     public double getMainTakeProfitPercent() {
-        return getDoubleProperty("MAIN_TAKE_PROFIT_PERCENT", 2.0);
+        return getDoubleProperty("MAIN_TAKE_PROFIT_PERCENT", 1.5);
     }
 
     public double getMainStopLossPercent() {
@@ -322,7 +322,7 @@ public class Config {
     }
 
     public double getMainTrailingStopPercent() {
-        return getDoubleProperty("MAIN_TRAILING_STOP_PERCENT", 1.5);
+        return getDoubleProperty("MAIN_TRAILING_STOP_PERCENT", 1.2);
     }
 
     /**
@@ -393,7 +393,7 @@ public class Config {
     }
 
     public double getExperimentalTrailingStopPercent() {
-        return getDoubleProperty("EXPERIMENTAL_TRAILING_STOP_PERCENT", 0.5);
+        return getDoubleProperty("EXPERIMENTAL_TRAILING_STOP_PERCENT", 1.0);
     }
 
     private double getDoubleProperty(String key, double defaultValue) {
@@ -830,11 +830,11 @@ public class Config {
     // ==================== EOD Exit Configuration ====================
     
     public boolean isEodExitEnabled() {
-        return getBooleanProperty("EOD_EXIT_ENABLED", false);
+        return getBooleanProperty("EOD_EXIT_ENABLED", true);
     }
-    
+
     public String getEodExitTime() {
-        return getProperty("EOD_EXIT_TIME", "15:30");
+        return getProperty("EOD_EXIT_TIME", "15:45");
     }
 
     /** Minutes before EOD exit to stop accepting new entries. Default 15 → no new entries after 15:15. */
@@ -1025,7 +1025,7 @@ public class Config {
     }
     
     public double getMomentumRsiBuyMax() {
-        return getDoubleProperty("MOMENTUM_RSI_BUY_MAX", 60.0);
+        return getDoubleProperty("MOMENTUM_RSI_BUY_MAX", 65.0);
     }
     
     public double getMomentumRsiSellThreshold() {
@@ -1033,7 +1033,7 @@ public class Config {
     }
     
     public double getMomentumMinPercent() {
-        return getDoubleProperty("MOMENTUM_MIN_PERCENT", 0.8); // 0.8%
+        return getDoubleProperty("MOMENTUM_MIN_PERCENT", 1.2);
     }
     
     public int getMomentumConfirmationBars() {
@@ -1045,7 +1045,7 @@ public class Config {
     }
     
     public double getMomentumMaxAboveSmaPercent() {
-        return getDoubleProperty("MOMENTUM_MAX_ABOVE_SMA_PERCENT", 2.0);
+        return getDoubleProperty("MOMENTUM_MAX_ABOVE_SMA_PERCENT", 5.0);
     }
     
     // ==================== Smart Entry Timing ====================
@@ -1092,7 +1092,7 @@ public class Config {
 
     // Stop new entries when today's realized losses exceed this % of equity (default 3%).
     public double getDailyMaxLossPercent() {
-        return getDoubleProperty("DAILY_MAX_LOSS_PERCENT", 3.0);
+        return getDoubleProperty("DAILY_MAX_LOSS_PERCENT", 1.5);
     }
     
     public boolean isStopTradingWhenTargetHit() {
@@ -1120,7 +1120,7 @@ public class Config {
     }
     
     public int getMaxPositionsAtOnce() {
-        return getIntProperty("MAX_POSITIONS_AT_ONCE", 3);
+        return getIntProperty("MAX_POSITIONS_AT_ONCE", 5);
     }
     
     
@@ -1132,7 +1132,7 @@ public class Config {
     
     // Feature 16: Smart Capital Reserve
     public double getSmartCapitalReservePercent() {
-        return getDoubleProperty("SMART_CAPITAL_RESERVE_PERCENT", 0.25);
+        return getDoubleProperty("SMART_CAPITAL_RESERVE_PERCENT", 0.03);
     }
     
     // Feature 17: PDT-Aware Profit Taking

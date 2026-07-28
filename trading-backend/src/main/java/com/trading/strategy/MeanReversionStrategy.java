@@ -75,6 +75,6 @@ public final class MeanReversionStrategy implements TradingStrategy {
                 .skip(Math.max(0, history.size() - period))
                 .mapToDouble(p -> Math.pow(p - mean, 2))
                 .sum();
-        return Math.sqrt(sumSqDiff / period);
+        return Math.sqrt(sumSqDiff / (period - 1));
     }
 }

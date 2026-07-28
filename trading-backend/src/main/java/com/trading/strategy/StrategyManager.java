@@ -307,9 +307,16 @@ public final class StrategyManager {
             }
             case WEAK_BULL -> {
                 if (isMomentumAsset) {
-                    // Momentum assets in weak bull: Still use Momentum (they often lead)
+                    // Momentum assets: Momentum strategy first (they lead uptrends).
+                    // If it says HOLD, try MACD trend as fallback — catches assets that are
+                    // momentum names by classification but currently pausing (not surging).
                     activeStrategy = "Momentum (Weak Bull)";
-                    yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    var momSignal = momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    if (!(momSignal instanceof TradingSignal.Hold)) yield momSignal;
+                    activeStrategy = "MACD Trend (Weak Bull, Fallback)";
+                    yield rsiFilteredBuy(
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
+                        history, symbol, positionQty);
                 } else {
                     // MACD trend-following, gated by RSI to avoid entering already-extended moves.
                     // RSI > 65 on a MACD BUY = late entry into a move that's about to retrace.
@@ -362,25 +369,40 @@ public final class StrategyManager {
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, weakBearThreshold);
             }
             case RANGE_BOUND -> {
+                // ── Strategy competition in RANGE_BOUND ─────────────────────────
+                // Run two strategies per symbol and take the first BUY signal.
+                // Single-strategy selection produces 0 signals on flat days where one
+                // strategy has nothing to say but another does.
                 if (isMomentumAsset) {
-                    // Commodities and sector leaders (GLD, OIH, XLE, XOP, URA, NVDA, etc.) trend on
-                    // their own supply/demand drivers independent of the broad market regime.
-                    // Mean Reversion would miss a rising gold/oil trend — use MACD to follow it.
-                    // RSI gate applied same as WEAK_BULL: blocks entries when RSI is already extended
-                    // (>65) or in freefall (<35), preventing late entries into exhausted moves.
-                    // VIX-adaptive MACD threshold: in low-volatility markets (VIX < 15) the histogram
-                    // rarely reaches 0.20 even on confirmed uptrends — 0.12 still filters single-bar
-                    // whipsaws (requires prevHistogram > 0 too) while being achievable at VIX=12.
-                    // Above VIX 15 keep 0.20: more momentum available, stricter filter justified.
+                    // Momentum assets: MACD trend first (their primary driver is momentum).
+                    // VIX-adaptive threshold: 0.12 at VIX<15 (calm market), 0.20 otherwise.
                     double rangeBoundThreshold = latestVix < 15.0 ? 0.12 : 0.20;
                     activeStrategy = "MACD Trend (Range, Momentum Asset)";
-                    yield rsiFilteredBuy(
+                    var macdSignal = rsiFilteredBuy(
                         macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, rangeBoundThreshold),
                         history, symbol, positionQty);
+                    if (!(macdSignal instanceof TradingSignal.Hold)) yield macdSignal;
+
+                    // MACD says HOLD — momentum asset pulled back. Try mean reversion:
+                    // if price is below its 20-day SMA by 2σ, a bounce back to the mean
+                    // is tradeable even on a normally-trending name (NVDA/GLD/XLE all
+                    // mean-revert within their longer-term uptrends during flat markets).
+                    activeStrategy = "Mean Reversion (Range, Fallback)";
+                    yield meanReversionStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
                 }
-                // Non-momentum assets in sideways market → Mean Reversion (RSI bounce)
+                // Non-momentum assets: Mean Reversion first (sideways oscillation is their regime).
                 activeStrategy = "Mean Reversion";
-                yield meanReversionStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                var mrSignal = meanReversionStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                if (!(mrSignal instanceof TradingSignal.Hold)) yield mrSignal;
+
+                // Mean reversion not at lower band — try MACD trend as second strategy.
+                // Uses 0.15 threshold (between default 0.10 and strict 0.20): these are not
+                // momentum assets so we need stronger confirmation than for momentum names,
+                // but the 0.20 threshold is too strict in a calm low-VIX market.
+                activeStrategy = "MACD Trend (Range, Fallback)";
+                yield rsiFilteredBuy(
+                    macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.15),
+                    history, symbol, positionQty);
             }
             case HIGH_VOLATILITY -> {
                 // FIX: In high volatility, only manage exits — no new entries.

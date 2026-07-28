@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class AlphaVantageClient {
     private static final Logger logger = LoggerFactory.getLogger(AlphaVantageClient.class);
-    
+
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final String apiKey;
@@ -28,6 +28,11 @@ public class AlphaVantageClient {
     private final long cacheTtlMs;
     private final int newsLimit;
     private final double minRelevance;
+
+    // Daily rate limit guard: when Alpha Vantage rejects with "25 requests per day",
+    // set this to today so all subsequent calls fail fast instead of doing a full HTTP
+    // round-trip per symbol (which adds 10-30s of delay per symbol per evaluation cycle).
+    private static volatile java.time.LocalDate rateLimitedDate = null;
     
     public AlphaVantageClient(String apiKey, boolean enabled, int cacheTtlMinutes, 
                              int newsLimit, double minRelevance) {
@@ -63,7 +68,14 @@ public class AlphaVantageClient {
             logger.debug("Alpha Vantage disabled, returning neutral sentiment");
             return new SentimentResult(0.0, 0.0, 0.0, "Alpha Vantage disabled");
         }
-        
+
+        // Fast-fail when daily rate limit already hit — avoids 10-30s HTTP timeout per symbol.
+        // Resets automatically at midnight (new LocalDate).
+        if (java.time.LocalDate.now().equals(rateLimitedDate)) {
+            logger.debug("Alpha Vantage daily rate limit reached — skipping API call for {}", symbol);
+            return new SentimentResult(0.0, 0.0, 0.0, "Daily rate limit reached");
+        }
+
         // Check cache
         CachedSentiment cached = cache.get(symbol);
         if (cached != null && !cached.isExpired(cacheTtlMs)) {
@@ -143,8 +155,13 @@ public class AlphaVantageClient {
         
         // Check for API errors
         if (root.has("Information") || root.has("Error Message")) {
-            String error = root.has("Information") ? 
+            String error = root.has("Information") ?
                 root.get("Information").asText() : root.get("Error Message").asText();
+            // Detect daily rate limit and set the fast-fail guard for the rest of today.
+            if (error.contains("25 requests per day") || error.contains("rate limit")) {
+                rateLimitedDate = java.time.LocalDate.now();
+                logger.warn("Alpha Vantage daily rate limit hit — all sentiment calls skipped until midnight");
+            }
             throw new IOException("Alpha Vantage API error: " + error);
         }
         

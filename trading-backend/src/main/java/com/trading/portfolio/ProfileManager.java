@@ -1576,7 +1576,12 @@ public class ProfileManager implements Runnable {
         }
         
         // ========== PHASE 3: VOLUME PROFILE CHECK ==========
-        if (config.isVolumeProfileEnabled()) {
+        // Skip in RANGE_BOUND — the filter looks for price at a high-volume node (support/resistance),
+        // which makes sense for trend entries but not for mean reversion or MACD in sideways markets.
+        // In RANGE_BOUND the strategies themselves already gate on RSI and Bollinger bands.
+        // At VIX < 15 intraday gaps also push price >1.5% from opening nodes, causing false blocks.
+        boolean skipVolumeProfile = (regime == MarketRegime.RANGE_BOUND);
+        if (!skipVolumeProfile && config.isVolumeProfileEnabled()) {
             try {
                 var bars = client.getBars(symbol, "15Min", 50);
                 if (!volumeProfileAnalyzer.isGoodEntryPrice(symbol, currentPrice, bars)) {

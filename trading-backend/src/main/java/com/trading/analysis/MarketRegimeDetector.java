@@ -167,7 +167,13 @@ public class MarketRegimeDetector {
                 double breadthFraction = breadth.strength();
                 var sidecar = sidecarClient.classify(vix, breadthFraction);
                 if (sidecar != null) {
-                    if (sidecar.regime().equals(regime.name())) {
+                    if (sidecar.modelTrades() < 30) {
+                        // Fallback mode: model has not seen enough data to be informative.
+                        // A 50% fallback confidence blended in would drag rule-based confidence
+                        // below the gate even when the rule-based signal is clear (observed Jul 29 2026).
+                        logger.debug("ML sidecar in fallback ({} trades < 30) — skipping confidence blend",
+                            sidecar.modelTrades());
+                    } else if (sidecar.regime().equals(regime.name())) {
                         // Models agree — blend confidence upward (cap at 0.95)
                         double boosted = Math.min(0.95, confidence + (sidecar.confidence() - confidence) * 0.3);
                         logger.debug("ML sidecar agrees: {} ({} trades, conf {}→{})",
@@ -442,20 +448,37 @@ public class MarketRegimeDetector {
             confidence += 0.1;
         }
         
-        // Increase confidence for breadth alignment
+        // Increase confidence for breadth alignment (STRONG regimes)
         if (regime == MarketRegime.STRONG_BULL && breadth.strength > 0.6) {
             confidence += 0.1;
         } else if (regime == MarketRegime.STRONG_BEAR && breadth.strength < 0.4) {
             confidence += 0.1;
         }
-        
-        // Decrease confidence for conflicting signals
+
+        // Decrease confidence for conflicting signals (STRONG regimes)
         if (regime == MarketRegime.STRONG_BULL && breadth.strength < 0.5) {
             confidence -= 0.1;
         } else if (regime == MarketRegime.STRONG_BEAR && breadth.strength > 0.5) {
             confidence -= 0.1;
         }
-        
+
+        // WEAK regimes: breadth must confirm the trend direction to pass the confidence gate.
+        // Without this, WEAK_BULL tops out at ~52% confidence (base 0.5 + weak trend 0.3×0.07)
+        // and always falls back to RANGE_BOUND regardless of how clear the breadth signal is.
+        if (regime == MarketRegime.WEAK_BULL) {
+            if (breadth.strength > 0.55) {
+                confidence += 0.10; // majority of sectors advancing — confirms weak bull
+            } else if (breadth.strength < 0.45) {
+                confidence -= 0.05; // breadth contradicts the uptrend
+            }
+        } else if (regime == MarketRegime.WEAK_BEAR) {
+            if (breadth.strength < 0.45) {
+                confidence += 0.10; // majority of sectors declining — confirms weak bear
+            } else if (breadth.strength > 0.55) {
+                confidence -= 0.05; // breadth contradicts the downtrend
+            }
+        }
+
         return Math.max(0.3, Math.min(1.0, confidence));
     }
     

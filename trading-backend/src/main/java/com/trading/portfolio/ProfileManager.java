@@ -483,10 +483,10 @@ public class ProfileManager implements Runnable {
             // bars, all indicators in conflict).
             double minConfidence = config.getMinRegimeConfidence();
             if (regimeAnalysis.confidence() < minConfidence && regime != MarketRegime.RANGE_BOUND) {
-                logger.info("{} Regime confidence {:.0f}% < minimum {:.0f}% — using RANGE_BOUND fallback (was {})",
+                logger.info("{} Regime confidence {}% < minimum {}% — using RANGE_BOUND fallback (was {})",
                     profilePrefix,
-                    regimeAnalysis.confidence() * 100,
-                    minConfidence * 100,
+                    String.format("%.0f", regimeAnalysis.confidence() * 100),
+                    String.format("%.0f", minConfidence * 100),
                     regime);
                 regime = MarketRegime.RANGE_BOUND;
             }

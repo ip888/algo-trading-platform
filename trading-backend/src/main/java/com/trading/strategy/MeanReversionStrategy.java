@@ -41,6 +41,23 @@ public final class MeanReversionStrategy implements TradingStrategy {
         // Logic: Buy the dip, Sell the rip
         if (positionQty == 0) {
             if (currentPrice <= lowerBand) {
+                // Direction guard: don't buy into a sustained downtrend.
+                // Lower Bollinger Band in a declining market keeps walking down — buying there
+                // catches a falling knife, not a mean-reversion bounce.
+                // Require: either price is above SMA-50 (generally bullish) OR SMA-50 is rising
+                // (downtrend is ending). Both failing = structural bear, skip entry.
+                if (history.size() >= 50) {
+                    double sma50 = calculateSMA(history, 50);
+                    double sma50Prev = calculateSMA(history.subList(0, history.size() - 5), 50);
+                    boolean sma50Declining = sma50 < sma50Prev && currentPrice < sma50;
+                    if (sma50Declining) {
+                        logger.debug("{}: MeanReversion lower-band touch skipped — SMA-50 declining ({} < {})",
+                            symbol, String.format("%.2f", sma50), String.format("%.2f", sma50Prev));
+                        return new TradingSignal.Hold(String.format(
+                            "MeanReversion: below lower band but SMA-50 declining (%.2f<%.2f) — skip",
+                            sma50, sma50Prev));
+                    }
+                }
                 return new TradingSignal.Buy("Price below Lower Band (Oversold)");
             }
         } else {

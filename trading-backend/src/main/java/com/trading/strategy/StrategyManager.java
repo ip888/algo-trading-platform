@@ -306,25 +306,20 @@ public final class StrategyManager {
                 yield macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
             }
             case WEAK_BULL -> {
-                if (isMomentumAsset) {
-                    // Momentum assets: Momentum strategy first (they lead uptrends).
-                    // If it says HOLD, try MACD trend as fallback — catches assets that are
-                    // momentum names by classification but currently pausing (not surging).
-                    activeStrategy = "Momentum (Weak Bull)";
-                    var momSignal = momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
-                    if (!(momSignal instanceof TradingSignal.Hold)) yield momSignal;
-                    activeStrategy = "MACD Trend (Weak Bull, Fallback)";
-                    yield rsiFilteredBuy(
-                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
-                        history, symbol, positionQty);
-                } else {
-                    // MACD trend-following, gated by RSI to avoid entering already-extended moves.
-                    // RSI > 65 on a MACD BUY = late entry into a move that's about to retrace.
-                    activeStrategy = "MACD Trend (Weak Bull)";
-                    yield rsiFilteredBuy(
-                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
-                        history, symbol, positionQty);
-                }
+                // In a weak bull market, Momentum strategy fires first for ALL symbols.
+                // Previously only "momentum assets" got Momentum routing — non-momentum ETFs
+                // (IWM, QQQ, XLF, XLV, AAPL etc.) went straight to MACD, which produced
+                // 100% MACD trades even in WEAK_BULL (confirmed Jul 28-31 2026: 10/10 MACD).
+                // Momentum's RSI, SMA, and 3-bar consistency checks naturally filter bad setups;
+                // MACD is the fallback when Momentum says HOLD.
+                activeStrategy = "Momentum (Weak Bull)";
+                var momSignal = momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                if (!(momSignal instanceof TradingSignal.Hold)) yield momSignal;
+                // Momentum said HOLD — fall back to MACD trend with RSI gate
+                activeStrategy = isMomentumAsset ? "MACD Trend (Weak Bull, Mom Fallback)" : "MACD Trend (Weak Bull)";
+                yield rsiFilteredBuy(
+                    macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
+                    history, symbol, positionQty);
             }
             case WEAK_BEAR -> {
                 // FIX: RSI mean-reversion on inverse ETFs (SH, PSQ, SQQQ) gives backwards signals.

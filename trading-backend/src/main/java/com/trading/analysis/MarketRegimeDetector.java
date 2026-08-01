@@ -318,7 +318,12 @@ public class MarketRegimeDetector {
      * a single-day noise check, and it's immune to stale intraday quotes from the IEX feed.
      */
     private BreadthAnalysis analyzeBreadth() {
-        var symbols = List.of("SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV");
+        // 8 independent SPDR sector ETFs — truly cross-sector breadth.
+        // SPY/QQQ/IWM/DIA removed: all are broad-market and move identically, so 4/8 "advancing"
+        // when they all rise was guaranteed regardless of real sector divergence. With independent
+        // sectors (tech/financials/energy/healthcare/industrials/comms/utilities/materials), a 62%
+        // reading means 5 genuinely different areas of the economy are trending up.
+        var symbols = List.of("XLK", "XLF", "XLE", "XLV", "XLI", "XLC", "XLU", "XLB");
         int advancing = 0;
         int declining = 0;
 

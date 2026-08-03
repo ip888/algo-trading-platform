@@ -333,19 +333,23 @@ public final class StrategyManager {
                 // is near-zero (neither growing nor clearly positive), blocking entry despite a
                 // clear uptrend confirmed by multiple timeframes. Price > SMA-20 with normal RSI
                 // is a minimal "trend intact" check that passes the trade through.
+                // RSI cap is 78 here (not 70): in a strong bull, RSI 70-78 is normal momentum,
+                // not overextension. The MTF ≥80% gate already filters weak/choppy setups.
                 if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
                     double sma20 = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
-                    if (currentPrice > sma20) {
-                        double rsi = RSIStrategy.calculateRSI(history, 14);
-                        if (rsi >= 40.0 && rsi <= 70.0) {
-                            activeStrategy = "MTF Trend Entry (Weak Bull)";
-                            logger.info("{}: WEAK_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
-                                symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
-                                String.format("%.1f", rsi));
-                            yield new TradingSignal.Buy(String.format(
-                                "WEAK_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
-                                currentPrice, sma20, rsi));
-                        }
+                    double rsi = RSIStrategy.calculateRSI(history, 14);
+                    if (currentPrice > sma20 && rsi >= 35.0 && rsi <= 78.0) {
+                        activeStrategy = "MTF Trend Entry (Weak Bull)";
+                        logger.info("{}: WEAK_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
+                            symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
+                            String.format("%.1f", rsi));
+                        yield new TradingSignal.Buy(String.format(
+                            "WEAK_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
+                            currentPrice, sma20, rsi));
+                    } else {
+                        logger.info("{}: WEAK_BULL MTF entry blocked — price ${} vs SMA-20 ${}, RSI {} (need price>SMA, RSI 35-78)",
+                            symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
+                            String.format("%.1f", rsi));
                     }
                 }
                 yield new TradingSignal.Hold("WEAK_BULL: waiting for entry setup");

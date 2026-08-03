@@ -315,11 +315,16 @@ public final class StrategyManager {
                 activeStrategy = "Momentum (Weak Bull)";
                 var momSignal = momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
                 if (!(momSignal instanceof TradingSignal.Hold)) yield momSignal;
-                // Momentum said HOLD — fall back to MACD trend with RSI gate
+                // Momentum said HOLD — fall back to MACD in "sustained uptrend" mode.
+                // histogramThreshold=0.0 activates the sustainedUptrend check in MACDStrategy,
+                // which accepts an established positive MACD without requiring a growing histogram.
+                // In VIX=12 slow grinds, MACD crossed bullish days ago and the histogram plateaued;
+                // the default "growing" requirement permanently blocks entry in these markets.
+                // RSI cap raised 65→70: RSI 65-70 is normal momentum in a bull, not overextension.
                 activeStrategy = isMomentumAsset ? "MACD Trend (Weak Bull, Mom Fallback)" : "MACD Trend (Weak Bull)";
                 yield rsiFilteredBuy(
-                    macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
-                    history, symbol, positionQty);
+                    macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.0),
+                    history, symbol, positionQty, 70.0);
             }
             case WEAK_BEAR -> {
                 // FIX: RSI mean-reversion on inverse ETFs (SH, PSQ, SQQQ) gives backwards signals.
@@ -460,12 +465,17 @@ public final class StrategyManager {
      */
     private TradingSignal rsiFilteredBuy(TradingSignal signal, List<Double> history,
                                          String symbol, double positionQty) {
+        return rsiFilteredBuy(signal, history, symbol, positionQty, 65.0);
+    }
+
+    private TradingSignal rsiFilteredBuy(TradingSignal signal, List<Double> history,
+                                         String symbol, double positionQty, double rsiUpperBound) {
         if (!(signal instanceof TradingSignal.Buy) || positionQty > 0) return signal;
         double rsi = RSIStrategy.calculateRSI(history, 14);
-        if (rsi > 65.0) {
-            logger.info("{}: MACD BUY blocked — RSI extended ({} > 65, don't chase)",
-                symbol, String.format("%.1f", rsi));
-            return new TradingSignal.Hold(String.format("MACD BUY filtered: RSI extended (%.1f > 65)", rsi));
+        if (rsi > rsiUpperBound) {
+            logger.info("{}: MACD BUY blocked — RSI extended ({} > {}, don't chase)",
+                symbol, String.format("%.1f", rsi), String.format("%.0f", rsiUpperBound));
+            return new TradingSignal.Hold(String.format("MACD BUY filtered: RSI extended (%.1f > %.0f)", rsi, rsiUpperBound));
         }
         if (rsi < 35.0) {
             logger.info("{}: MACD BUY blocked — RSI weak ({} < 35, momentum not confirmed)",

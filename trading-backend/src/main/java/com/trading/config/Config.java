@@ -1033,7 +1033,7 @@ public class Config {
     }
     
     public double getMomentumMinPercent() {
-        return getDoubleProperty("MOMENTUM_MIN_PERCENT", 1.2);
+        return getDoubleProperty("MOMENTUM_MIN_PERCENT", 0.5);
     }
     
     public int getMomentumConfirmationBars() {

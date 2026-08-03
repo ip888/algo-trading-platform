@@ -322,9 +322,33 @@ public final class StrategyManager {
                 // the default "growing" requirement permanently blocks entry in these markets.
                 // RSI cap raised 65→70: RSI 65-70 is normal momentum in a bull, not overextension.
                 activeStrategy = isMomentumAsset ? "MACD Trend (Weak Bull, Mom Fallback)" : "MACD Trend (Weak Bull)";
-                yield rsiFilteredBuy(
+                var macdSignal = rsiFilteredBuy(
                     macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.0),
                     history, symbol, positionQty, 70.0);
+                if (!(macdSignal instanceof TradingSignal.Hold)) yield macdSignal;
+
+                // Last resort for high-confidence MTF signals: if both Momentum and MACD say
+                // HOLD but MTF is ≥80% confident AND price is above SMA-20 AND RSI is normal,
+                // enter on trend confirmation. In VIX=12 slow grinds the daily MACD histogram
+                // is near-zero (neither growing nor clearly positive), blocking entry despite a
+                // clear uptrend confirmed by multiple timeframes. Price > SMA-20 with normal RSI
+                // is a minimal "trend intact" check that passes the trade through.
+                if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
+                    double sma20 = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
+                    if (currentPrice > sma20) {
+                        double rsi = RSIStrategy.calculateRSI(history, 14);
+                        if (rsi >= 40.0 && rsi <= 70.0) {
+                            activeStrategy = "MTF Trend Entry (Weak Bull)";
+                            logger.info("{}: WEAK_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
+                                symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
+                                String.format("%.1f", rsi));
+                            yield new TradingSignal.Buy(String.format(
+                                "WEAK_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
+                                currentPrice, sma20, rsi));
+                        }
+                    }
+                }
+                yield new TradingSignal.Hold("WEAK_BULL: waiting for entry setup");
             }
             case WEAK_BEAR -> {
                 // FIX: RSI mean-reversion on inverse ETFs (SH, PSQ, SQQQ) gives backwards signals.

@@ -201,17 +201,18 @@ public final class StrategyManager {
                     logger.info("{}: Blocked {} BUY — low volume", symbol, activeStrategy);
                     return new TradingSignal.Hold("Low volume — BUY not confirmed");
                 }
-                // 3. Block if the symbol is already down > 0.5% from yesterday's close.
+                // 3. Block if the symbol is already down > 1.0% from yesterday's close.
                 // MACD uses daily bars — a BUY signal from yesterday's data does not mean today
-                // is a good day to enter. If the stock is already declining intraday, entering
+                // is a good day to enter. If the stock is actively declining intraday, entering
                 // long adds to an active downtrend (IWM -0.75% day on Jul 20 2026 was entered).
-                // Exempt: mean-reversion entries (isMeanReversion=false here already, so this
-                // block only runs for trend/momentum entries where intraday alignment matters).
+                // Threshold widened 0.5→1.0%: post-earnings dips (AMD -0.50% Aug 5 2026) and
+                // normal VIX=12 morning chop create false positives at 0.5%. A full 1% intraday
+                // decline is a clearer signal of sustained selling pressure.
                 if (!closes.isEmpty()) {
                     double yesterdayClose = closes.get(closes.size() - 1);
                     if (yesterdayClose > 0) {
                         double intradayPct = (currentPrice - yesterdayClose) / yesterdayClose * 100.0;
-                        if (intradayPct < -0.50) {
+                        if (intradayPct < -1.00) {
                             logger.info("{}: Blocked {} BUY — down {}% on the day vs yesterday close",
                                 symbol, activeStrategy, String.format("%.2f", intradayPct));
                             return new TradingSignal.Hold(
@@ -534,40 +535,30 @@ public final class StrategyManager {
 
         int size = closes.size();
 
-        // ---- 10-bar SMA check (short-term) ----
-        double sma10Current = smaOf(closes, size - 10, size);
-        double sma10Previous = smaOf(closes, size - 11, size - 1);
-        // Use live intraday price instead of last daily close — catches today's drop
-        boolean shortTermDown = livePrice < sma10Current && sma10Current < sma10Previous;
-
-        if (shortTermDown) {
-            double pct = ((sma10Current - livePrice) / sma10Current) * 100;
-            logger.debug("Short-term downtrend: price ${} is {}% below declining 10-SMA ${}",
-                String.format("%.2f", livePrice), String.format("%.2f", pct), String.format("%.2f", sma10Current));
-            return true;
-        }
-
         // ---- 20-bar SMA check (medium-term) ----
+        // Require BOTH: price below declining SMA-20. A post-earnings dip (e.g. AMD -7% day after
+        // earnings) can push price below the 10-day SMA while the stock remains above its 20-day SMA
+        // — that is a healthy correction in an uptrend, not a downtrend. The 10-bar check was
+        // removed because it false-fires on 2-week pullbacks and blocks valid post-earnings bounces.
         double sma20Current = smaOf(closes, size - 20, size);
         double sma20Previous = smaOf(closes, size - 21, size - 1);
         boolean mediumTermDown = livePrice < sma20Current && sma20Current < sma20Previous;
 
         if (mediumTermDown) {
             double pct = ((sma20Current - livePrice) / sma20Current) * 100;
-            logger.debug("Medium-term downtrend: price ${} is {}% below declining 20-SMA ${}",
+            logger.info("Downtrend check: price ${} is {}% below declining 20-SMA ${}",
                 String.format("%.2f", livePrice), String.format("%.2f", pct), String.format("%.2f", sma20Current));
             return true;
         }
 
         // ---- 50-bar SMA check (macro trend) ----
         // Any stock trading below its 50-bar SMA is in a macro downtrend regardless of short-term bounces.
-        // No requirement for SMA to be declining — being below it is sufficient.
         if (size >= 52) {
             double sma50 = smaOf(closes, size - 50, size);
             if (livePrice < sma50) {
                 double pct = ((sma50 - livePrice) / sma50) * 100;
-                logger.debug("Macro downtrend: price ${} is {:.2f}% below 50-SMA ${}",
-                    String.format("%.2f", livePrice), pct, String.format("%.2f", sma50));
+                logger.info("Downtrend check: price ${} is {}% below 50-SMA ${}",
+                    String.format("%.2f", livePrice), String.format("%.2f", pct), String.format("%.2f", sma50));
                 return true;
             }
         }
@@ -612,11 +603,17 @@ public final class StrategyManager {
     public MarketRegime getCurrentRegime() {
         return currentRegime;
     }
-    
-    /**
-     * Get current regime as string (for logging/display).
-     */
+
     public String getCurrentRegimeString() {
         return currentRegime.toString();
+    }
+
+    /**
+     * Lightweight scalp-only evaluation — calls ScalpStrategy directly, skipping MTF/regime analysis.
+     * Used by the scalp-priority scan in ProfileManager to check high-liquidity symbols every cycle.
+     */
+    public TradingSignal evaluateScalpOnly(String symbol, double currentPrice, double positionQty) {
+        if (scalpStrategy == null) return new TradingSignal.Hold("Scalp disabled");
+        return scalpStrategy.evaluate(symbol, currentPrice, positionQty);
     }
 }

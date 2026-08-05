@@ -40,8 +40,17 @@ public final class SmartOrderTypeSelector {
         String strategyType,   // "MACD", "RSI", "MOMENTUM", "MEAN_REVERSION", etc.
         boolean isExitOrder,   // true for SL/TP/signal exits
         boolean isEmergency,   // true for emergency/panic exits
-        boolean isStopLoss     // true specifically for stop-loss exits
-    ) {}
+        boolean isStopLoss,    // true specifically for stop-loss exits
+        double qty             // order quantity; fractional buys are forced to MARKET
+    ) {
+        // Backward-compat constructor for callers that don't supply qty yet
+        public OrderContext(String symbol, String side, double currentPrice, double accountEquity,
+                            double vix, MarketRegime regime, String strategyType,
+                            boolean isExitOrder, boolean isEmergency, boolean isStopLoss) {
+            this(symbol, side, currentPrice, accountEquity, vix, regime, strategyType,
+                 isExitOrder, isEmergency, isStopLoss, 0.0);
+        }
+    }
 
     // Limit order price offset: how far from current price to place limit
     // Tight enough to fill quickly, wide enough to save vs market order slippage
@@ -91,6 +100,18 @@ public final class SmartOrderTypeSelector {
         // (price is oscillating, we can wait for a better fill)
         if (!ctx.isExitOrder() && isPricePatientStrategy(ctx.strategyType())) {
             return limitOrder(ctx, "Mean-reversion/RSI entry in favorable conditions");
+        }
+
+        // Rule 6b: Fractional BUY orders must use MARKET to guarantee a full fill.
+        // Alpaca fractional limit orders can partially fill if price moves through the limit
+        // before the order completes — leaving the position tracker out of sync with actual
+        // shares held (observed Aug 3 2026: MSFT ordered 0.4276, only 0.2865 filled).
+        // Slippage on a $200 fractional position is ~$0.10, far less than the cost of a partial fill.
+        boolean isFractionalBuy = "buy".equals(ctx.side())
+            && ctx.qty() > 0
+            && Math.abs(ctx.qty() - Math.floor(ctx.qty())) > 0.0001;
+        if (isFractionalBuy) {
+            return marketOrder(ctx, "Fractional buy: market order guarantees full fill (partial fill risk on limit)");
         }
 
         // Rule 7: Small accounts (<$2K) prefer limit orders to minimize slippage cost

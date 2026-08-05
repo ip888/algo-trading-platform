@@ -63,11 +63,21 @@ public final class MACDStrategy implements TradingStrategy {
             && histogram > histogramThreshold
             && prevHistogram > 0;
 
+        // Sustained Uptrend: used in WEAK_BULL (histogramThreshold=0.0) for established trends.
+        // In a slow VIX=12 grind-up, MACD crossed bullish days ago and the histogram has peaked —
+        // it's positive but flat, so "growing" permanently fails. This catches the trade.
+        // Requires both bars clearly positive (> 0.05) to exclude near-zero/crossing situations.
+        boolean sustainedUptrend = histogramThreshold <= 0.0
+            && macdLine > signalLine
+            && histogram > 0.05
+            && prevHistogram > 0.05;
+
         // Bearish Crossover: MACD crosses BELOW Signal
         boolean bearishCrossover = prevMacdLine >= prevSignalLine && macdLine < signalLine;
 
-        if (strongUptrend && positionQty == 0) {
-            var reason = String.format("MACD Buy (Confirmed Uptrend): %.2f / %.2f", macdLine, signalLine);
+        if ((strongUptrend || sustainedUptrend) && positionQty == 0) {
+            String mode = strongUptrend ? "Growing" : "Sustained";
+            var reason = String.format("MACD Buy (%s Uptrend): %.2f / %.2f", mode, macdLine, signalLine);
             logger.info("{}: BUY signal - {}", symbol, reason);
             return new TradingSignal.Buy(reason);
         } else if (bearishCrossover && positionQty > 0) {

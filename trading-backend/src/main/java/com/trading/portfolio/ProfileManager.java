@@ -720,10 +720,16 @@ public class ProfileManager implements Runnable {
             }
         }
         
+        // Scalp-priority scan: always evaluate high-liquidity symbols for scalp every cycle,
+        // even when not in the current main batch rotation.
+        if (config.isScalpStrategyEnabled()) {
+            runScalpPriorityScan(symbolsToProcess, equity, buyingPower, regime, currentVix, profilePrefix);
+        }
+
         // Log portfolio status
-        logger.info("{} Portfolio: {} active positions", 
+        logger.info("{} Portfolio: {} active positions",
             profilePrefix, portfolio.getActivePositionCount());
-        
+
         // Evaluate and adjust parameters autonomously
         adaptiveManager.evaluateAndAdjust();
         
@@ -1080,9 +1086,52 @@ public class ProfileManager implements Runnable {
         }
     }
     
+    /**
+     * Lightweight scalp-only pass over high-liquidity symbols not in the current main batch.
+     * Calls ScalpStrategy directly — skips the full MTF/regime analysis — so it's fast enough
+     * to run on 5-9 additional symbols every 20-second cycle without rate-limit pressure.
+     */
+    private void runScalpPriorityScan(Set<String> alreadyProcessed, double equity, double buyingPower,
+                                      MarketRegime regime, double currentVix, String profilePrefix) {
+        if (regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.STRONG_BEAR
+                || regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.HIGH_VOLATILITY) {
+            return;
+        }
+        int maxPositions = config.getMaxPositionsAtOnce();
+        for (String symbol : config.getScalpSymbols()) {
+            if (alreadyProcessed.contains(symbol)) continue; // already scanned this cycle
+            if (portfolio.getActivePositionCount() >= maxPositions) break; // at capacity
+            try {
+                var bar = client.getLatestBar(symbol);
+                if (bar.isEmpty()) continue;
+                double price = bar.get().close();
+                double qty = portfolio.getPosition(symbol).map(com.trading.risk.TradePosition::quantity).orElse(0.0);
+                if (qty > 0) continue; // already have position in this symbol
+
+                var signal = strategyManager.evaluateScalpOnly(symbol, price, qty);
+                if (!(signal instanceof TradingSignal.ScalpBuy scalpBuy)) continue;
+                if (database.hasOpenTrade(symbol, brokerName)) continue;
+
+                java.time.LocalDate today = java.time.LocalDate.now();
+                if (!today.equals(scalpCountDate)) {
+                    staticScalpDailyCount.set(0);
+                    scalpCountDate = today;
+                }
+                scalpOverrides = new Double[]{scalpBuy.stopLossPercent(), scalpBuy.takeProfitPercent()};
+                try {
+                    handleBuy(symbol, price, equity, buyingPower, currentVix, regime, profilePrefix);
+                } finally {
+                    scalpOverrides = null;
+                }
+            } catch (Exception e) {
+                logger.debug("{} Scalp priority check failed for {}: {}", profilePrefix, symbol, e.getMessage());
+            }
+        }
+    }
+
     private void handleBuy(String symbol, double currentPrice, double equity,
                           double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
-        
+
         // ========== DOUBLE-ENTRY RACE GUARD (cross-profile safe) ==========
         // putIfAbsent is atomic: whichever profile wins the CAS owns the entry, the other returns.
         // This closes the race where MAIN and EXPERIMENTAL both pass a containsKey check at the
@@ -1218,6 +1267,27 @@ public class ProfileManager implements Runnable {
             return;
         }
 
+        // ========== MAIN STRATEGY EOD CUTOFF ==========
+        // Main strategy targets 1.5% TP and needs 3-4 hours to mature in a WEAK_BULL grind.
+        // Entries within 2 hours of EOD cannot hit 1.5% before forced exit — they produce
+        // flat or small losses. Scalp is exempt: 0.7% TP is achievable in minutes and its
+        // window (14:00–15:00) falls inside this 2-hour block.
+        // Root: Aug 3 2026, bug cascade delayed entries to 14:10 — MSFT/XOP closed at -0.02%/-0.46%.
+        if (scalpOverrides == null && config.isEodExitEnabled()) {
+            try {
+                var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
+                var mainCutoff = eodTime.minusMinutes(config.getMainEodEntryCutoffMinutes());
+                var nowET = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York")).toLocalTime();
+                if (!nowET.isBefore(mainCutoff)) {
+                    logger.info("{} {}: BUY BLOCKED — within {}min of EOD (main strategy needs 3+ hrs for 1.5% TP)",
+                        profilePrefix, symbol, config.getMainEodEntryCutoffMinutes());
+                    return;
+                }
+            } catch (Exception e) {
+                logger.warn("{} {}: Could not parse EOD time for main-entry cutoff: {}", profilePrefix, symbol, e.getMessage());
+            }
+        }
+
         // ========== INVERSE ETF / BEARISH ENTRY GUARD (Tier 3.11) ==========
         // Buying inverse ETFs (SQQQ, SH, PSQ, RWM, DOG) is only valid when market
         // conditions genuinely confirm a bear market.  Two gates:
@@ -1326,11 +1396,13 @@ public class ProfileManager implements Runnable {
         }
         
         // ========== GAP-DOWN PROTECTION ==========
-        // Prevent buying into a stock that is already down significantly from yesterday's close.
-        // Strategy signals are based on daily bars (yesterday's data). If the stock gaps down
-        // today, the signal is stale and we'd be buying into weakness.
-        // Threshold = stop_loss * 0.67: block if already 2/3 of the way to stop loss before entry.
-        // MAIN (1.5% SL) → block at ~1.0% | EXPERIMENTAL (1.0% SL) → block at ~0.67%
+        // Prevent buying into a stock that is drifting lower from yesterday's close.
+        // Applies to gaps between 1-5%: these signal stale BUY data from daily bars + active selling.
+        // Gaps >5% are earnings/news resets to a new equilibrium — MTF signal already accounts for
+        // post-gap price action, so let it through (AMD -7.3% post-earnings Aug 5 2026 blocked at
+        // 1% threshold even with 92% MTF BUY — was a valid post-earnings recovery entry).
+        // Stop-loss is anchored to entry price (not yesterday's close), so large gaps don't shrink
+        // the stop margin — the gap-down block only makes sense for slow intraday drifts.
         try {
             var recentBars = client.getMarketHistory(symbol, 2);
             if (recentBars.size() >= 2) {
@@ -1340,7 +1412,9 @@ public class ProfileManager implements Runnable {
                 double prevClose = recentBars.get(recentBars.size() - 1).close();
                 double gapDownPct = (prevClose - currentPrice) / prevClose * 100.0;
                 double gapDownThreshold = profile.stopLossPercent();
-                if (gapDownPct >= gapDownThreshold) {
+                // Only block moderate gaps (1-5%) — earnings/news gaps >5% are handled by MTF
+                boolean isEarningsGap = gapDownPct > 5.0;
+                if (gapDownPct >= gapDownThreshold && !isEarningsGap) {
                     String reason = String.format("gap-down %.1f%% from $%.2f", gapDownPct, prevClose);
                     blockedBuys.put(symbol, reason);
                     logger.info("{} {} BUY BLOCKED — gap-down {}% from yesterday close ${} (threshold {}%)",
@@ -1353,6 +1427,10 @@ public class ProfileManager implements Runnable {
                     );
                     return;
                 } else {
+                    if (isEarningsGap && gapDownPct >= gapDownThreshold) {
+                        logger.info("{} {} gap-down {}% — earnings/news gap, allowing MTF to decide",
+                            profilePrefix, symbol, String.format("%.1f", gapDownPct));
+                    }
                     blockedBuys.remove(symbol); // gap resolved — clear block
                 }
             }
@@ -1969,7 +2047,7 @@ public class ProfileManager implements Runnable {
             // Determine optimal order type (limit vs market) based on conditions
             var orderCtx = new OrderContext(
                 symbol, "buy", currentPrice, equity, currentVix, regime,
-                profile.strategyType(), false, false, false
+                profile.strategyType(), false, false, false, positionSize
             );
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
             Double entryLimitPrice = orderDecision.limitPrice();

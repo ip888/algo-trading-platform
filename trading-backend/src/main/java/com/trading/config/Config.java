@@ -841,6 +841,16 @@ public class Config {
     public int getEodEntryCutoffMinutes() {
         return getIntProperty("EOD_ENTRY_CUTOFF_MINUTES", 15);
     }
+
+    /**
+     * Minutes before EOD exit to stop accepting new MAIN strategy entries.
+     * Scalp entries (scalpOverrides != null) are exempt — they use a 0.7% TP achievable in minutes.
+     * Main strategy targets 1.5% and needs 3-4 hours in a WEAK_BULL grind.
+     * Default 120 → no main entries after 13:45 with EOD at 15:45.
+     */
+    public int getMainEodEntryCutoffMinutes() {
+        return getIntProperty("MAIN_EOD_ENTRY_CUTOFF_MINUTES", 120);
+    }
     
     // ==================== Time-Based Profit Taking ====================
     
@@ -1757,5 +1767,12 @@ public class Config {
     }
     public double getScalpVolumeMultiplier() {
         return getDoubleProperty("SCALP_VOLUME_MULTIPLIER", 1.1);
+    }
+
+    /** High-liquidity symbols always scanned for scalp every cycle, regardless of main batch rotation. */
+    public java.util.List<String> getScalpSymbols() {
+        String raw = getProperty("SCALP_SYMBOLS", "SPY,QQQ,IWM,NVDA,AAPL,META,MSFT,AMD,TSLA");
+        return java.util.Arrays.stream(raw.split(","))
+            .map(String::trim).filter(s -> !s.isEmpty()).toList();
     }
 }

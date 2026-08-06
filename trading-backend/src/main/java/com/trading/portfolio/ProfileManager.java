@@ -1373,10 +1373,19 @@ public class ProfileManager implements Runnable {
         // ========== PRICE IMPROVEMENT CHECK ==========
         // After a loss exit, only re-enter if price has dropped at least 1% from exit price.
         // Prevents buying back at the same price you just sold at a loss.
+        // NOT applied when current price is ABOVE exit price: the stock recovered after the stop —
+        // that is a valid re-entry (AMD stopped at $486, recovered to $492 with 90% MTF BUY =
+        // post-earnings bounce continuing upward, not re-entering into the same weakness).
         Double lastExit = lastExitPrices.get(symbol);
         if (lastExit != null) {
             double improvementPercent = ((lastExit - currentPrice) / lastExit) * 100.0;
-            if (improvementPercent < MIN_PRICE_IMPROVEMENT_PERCENT) {
+            boolean priceAboveExit = currentPrice > lastExit;
+            if (priceAboveExit) {
+                // Stock recovered above exit — clear the gate and allow re-entry
+                logger.info("{} {} price ${} above last exit ${} — stop was at a low, allowing re-entry",
+                    profilePrefix, symbol, String.format("%.2f", currentPrice), String.format("%.2f", lastExit));
+                lastExitPrices.remove(symbol);
+            } else if (improvementPercent < MIN_PRICE_IMPROVEMENT_PERCENT) {
                 blockedBuys.put(symbol, String.format("waiting for price: need %.1f%% below $%.2f exit", MIN_PRICE_IMPROVEMENT_PERCENT, lastExit));
                 logger.info("{} {} PRICE IMPROVEMENT CHECK FAILED - last exit=${}, now=${}, need {}% drop but only {}%",
                     profilePrefix, symbol, String.format("%.2f", lastExit), String.format("%.2f", currentPrice),
@@ -1387,12 +1396,13 @@ public class ProfileManager implements Runnable {
                     "INFO"
                 );
                 return;
+            } else {
+                // Price has dropped enough below exit — clear gate and allow entry
+                logger.info("{} {} PRICE IMPROVED {}% below last exit ${} — allowing re-entry",
+                    profilePrefix, symbol, String.format("%.2f", improvementPercent), String.format("%.2f", lastExit));
+                blockedBuys.remove(symbol);
+                lastExitPrices.remove(symbol);
             }
-            // Price has improved enough — clear the gate and allow entry
-            logger.info("{} {} PRICE IMPROVED {}% below last exit ${} — allowing re-entry",
-                profilePrefix, symbol, String.format("%.2f", improvementPercent), String.format("%.2f", lastExit));
-            blockedBuys.remove(symbol);
-            lastExitPrices.remove(symbol);
         }
         
         // ========== GAP-DOWN PROTECTION ==========

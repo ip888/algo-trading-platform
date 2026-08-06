@@ -19,19 +19,16 @@ import static org.mockito.Mockito.*;
 /**
  * ScalpStrategy unit tests.
  *
- * Entry fires when ALL five conditions hold:
+ * Entry fires when ALL conditions hold:
  *   1. In scalp time window (9:45–11:30 or 14:00–15:00 ET)
- *   2. RSI crossed above 50 (prev < 50, current ≥ 50)
- *   3. RSI ≤ rsiBuyMax (58)
- *   4. currentPrice ≥ VWAP
- *   5. Last bar volume ≥ 1.3× 20-bar average
+ *   2. RSI in range [rsiBuyMin, rsiBuyMax] (default 45–58) AND RSI ≥ 50
+ *   3. currentPrice ≥ VWAP
+ *   4. Last bar volume ≥ volumeMultiplier × 20-bar average
+ *   5. No per-symbol cooldown active (45 min between entries on same symbol)
  *
  * Tests that exercise the full entry-decision logic use a subclass that overrides
  * computeIndicators() to inject precise RSI/VWAP/volume values, keeping each test
  * focused on exactly one guard condition.
- *
- * Tests that validate the guard checks (disabled, position, daily limit, time window)
- * use the real strategy with a morning-window clock injected via setNowSupplier().
  *
  * Config and BrokerClient use SUBCLASS mock maker — required on Java 25 (ByteBuddy
  * default does not support Java 25).
@@ -49,8 +46,8 @@ class ScalpStrategyTest {
     // so tests are independent of complex price-series RSI maths.
     private static class ControlledScalpStrategy extends ScalpStrategy {
         private double rsi = 52.0;
-        private double rsiPrev = 47.0;
-        private double vwap = 498.0; // below currentPrice=500 → priceAboveVwap=true
+        private double rsiPrev = 51.0; // prev doesn't gate entry; kept for log output
+        private double vwap = 498.0;   // below currentPrice=500 → priceAboveVwap=true
         private double volumeRatio = 1.5; // above default multiplier 1.3
 
         ControlledScalpStrategy(BrokerClient client, Config config) {
@@ -85,13 +82,19 @@ class ScalpStrategyTest {
 
         // Fix clock to 10:00 AM ET so isInScalpWindow() returns true in every test
         fixedNow = ZonedDateTime.now(ET).withHour(10).withMinute(0).withSecond(0).withNano(0);
+
+        // Reset static state between tests — ScalpStrategy shares counters and cooldowns
+        // across instances because the class is static-scoped for cross-profile sharing.
+        ScalpStrategy.clearCooldown("SPY");
+        ScalpStrategy.clearCooldown("QQQ");
+        ScalpStrategy.clearCooldown("NVDA");
     }
 
     /** Returns a controlled strategy with a fixed morning clock. */
     private ControlledScalpStrategy controlled() throws Exception {
         var s = new ControlledScalpStrategy(mockClient, mockConfig);
         s.setNowSupplier(() -> fixedNow);
-        // Return minimal bars so the bar-fetch path doesn't throw NPE
+        s.setDailyScalpCount(0, fixedNow.toLocalDate());
         var minBars = minimalBars(fixedNow);
         when(mockClient.getBars(any(), any(), anyInt())).thenReturn(minBars);
         return s;
@@ -101,6 +104,7 @@ class ScalpStrategyTest {
     private ScalpStrategy realStrategy() {
         var s = new ScalpStrategy(mockClient, mockConfig);
         s.setNowSupplier(() -> fixedNow);
+        s.setDailyScalpCount(0, fixedNow.toLocalDate());
         return s;
     }
 
@@ -176,7 +180,7 @@ class ScalpStrategyTest {
     @DisplayName("all conditions met → ScalpBuy with configured SL/TP")
     void allConditionsMet_scalpBuy() throws Exception {
         var s = controlled();
-        // defaults: RSI=52 (in window), rsiPrev=47 (<50, crossover), VWAP=498 (<500), vol=1.5×
+        // RSI=52 in [45–58], above 50, VWAP=498 < price=500, vol=1.5× > 1.3×
         var signal = s.evaluate("SPY", 500.0, 0);
 
         assertInstanceOf(TradingSignal.ScalpBuy.class, signal,
@@ -185,23 +189,25 @@ class ScalpStrategyTest {
         assertEquals(0.35, sb.stopLossPercent(), 0.001);
         assertEquals(0.70, sb.takeProfitPercent(), 0.001);
         assertTrue(sb.reason().contains("Scalp:"));
+        assertEquals(1, s.getDailyScalpCount(), "Daily counter should increment on entry");
     }
 
     @Test
-    @DisplayName("RSI did not cross above 50 (rsiPrev ≥ 50) → HOLD")
-    void rsiAlreadyAbove50_noCrossover_holds() throws Exception {
+    @DisplayName("RSI in range but below 50 → HOLD (no bullish bias)")
+    void rsiBelowMidpoint_holds() throws Exception {
         var s = controlled();
-        s.setIndicators(52.0, 51.0, 498.0, 1.5); // rsiPrev=51 → no crossover
+        // RSI=47 is in [45–58] but below 50 — bearish/neutral momentum, do not enter
+        s.setIndicators(47.0, 46.0, 498.0, 1.5);
         var signal = s.evaluate("SPY", 500.0, 0);
         assertFalse(signal instanceof TradingSignal.ScalpBuy,
-            "Should not fire when RSI doesn't cross above 50");
+            "Should not fire when RSI is below 50 midpoint");
     }
 
     @Test
-    @DisplayName("RSI above buy max (>58) → HOLD even with crossover")
+    @DisplayName("RSI above buy max (>58) → HOLD even when above VWAP with volume")
     void rsiTooHigh_holds() throws Exception {
         var s = controlled();
-        s.setIndicators(62.0, 47.0, 498.0, 1.5); // rsi=62 > max=58
+        s.setIndicators(62.0, 60.0, 498.0, 1.5); // rsi=62 > max=58
         var signal = s.evaluate("SPY", 500.0, 0);
         assertFalse(signal instanceof TradingSignal.ScalpBuy,
             "Should not fire when RSI is above buy max");
@@ -211,7 +217,7 @@ class ScalpStrategyTest {
     @DisplayName("price below VWAP → HOLD")
     void priceBelowVwap_holds() throws Exception {
         var s = controlled();
-        s.setIndicators(52.0, 47.0, 502.0, 1.5); // VWAP=502 > price=500
+        s.setIndicators(52.0, 51.0, 502.0, 1.5); // VWAP=502 > price=500
         var signal = s.evaluate("SPY", 500.0, 0);
         assertFalse(signal instanceof TradingSignal.ScalpBuy,
             "Should not fire when price is below VWAP");
@@ -221,10 +227,57 @@ class ScalpStrategyTest {
     @DisplayName("low volume → HOLD")
     void lowVolume_holds() throws Exception {
         var s = controlled();
-        s.setIndicators(52.0, 47.0, 498.0, 0.8); // vol ratio=0.8 < multiplier=1.3
+        s.setIndicators(52.0, 51.0, 498.0, 0.8); // vol ratio=0.8 < multiplier=1.3
         var signal = s.evaluate("SPY", 500.0, 0);
         assertFalse(signal instanceof TradingSignal.ScalpBuy,
             "Should not fire when volume is below the confirmation threshold");
+    }
+
+    @Test
+    @DisplayName("per-symbol cooldown blocks re-entry after a scalp fires")
+    void cooldown_blocksReEntryOnSameSymbol() throws Exception {
+        var s = controlled();
+
+        // First entry — should fire
+        var first = s.evaluate("SPY", 500.0, 0);
+        assertInstanceOf(TradingSignal.ScalpBuy.class, first, "First entry should fire");
+
+        // Immediately after — cooldown active, must block
+        var second = s.evaluate("SPY", 500.0, 0);
+        assertFalse(second instanceof TradingSignal.ScalpBuy,
+            "Second entry within 45 min should be blocked by cooldown");
+        assertTrue(((TradingSignal.Hold) second).reason().contains("cooldown"),
+            "Hold reason should mention cooldown");
+    }
+
+    @Test
+    @DisplayName("cooldown is per-symbol — different symbol can still enter")
+    void cooldown_doesNotBlockDifferentSymbol() throws Exception {
+        var s = controlled();
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(minimalBars(fixedNow));
+
+        // Fire SPY
+        s.evaluate("SPY", 500.0, 0);
+        assertEquals(1, s.getDailyScalpCount());
+
+        // QQQ has no cooldown — should fire independently
+        ScalpStrategy.clearCooldown("QQQ");
+        var qqq = s.evaluate("QQQ", 500.0, 0); // same price as SPY so price ≥ injected VWAP=498
+        assertInstanceOf(TradingSignal.ScalpBuy.class, qqq,
+            "QQQ should enter even when SPY is on cooldown");
+        assertEquals(2, s.getDailyScalpCount());
+    }
+
+    @Test
+    @DisplayName("rsiPrev no longer gates entry — fires even when rsiPrev was already above 50")
+    void rsiPrevAbove50_stillFires() throws Exception {
+        var s = controlled();
+        // Both prev and current RSI above 50 — old crossover logic would block this;
+        // new RSI-in-range logic should allow it.
+        s.setIndicators(52.0, 51.0, 498.0, 1.5);
+        var signal = s.evaluate("SPY", 500.0, 0);
+        assertInstanceOf(TradingSignal.ScalpBuy.class, signal,
+            "Should fire when RSI is in range and above 50, regardless of rsiPrev");
     }
 
     // ── helper unit tests ─────────────────────────────────────────────────────

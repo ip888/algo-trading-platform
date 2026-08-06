@@ -18,10 +18,10 @@ import java.util.function.Supplier;
  *
  * Entry conditions (all must be true):
  *   1. Time window: 9:45–11:30 AM ET (morning momentum) or 14:00–15:00 ET (afternoon momentum)
- *   2. RSI crossed above 50 on the current bar (previous bar RSI < 50, current ≥ 50)
- *   3. RSI ≤ rsiBuyMax (default 58) — not entering an already-extended intraday move
- *   4. Current price ≥ VWAP (calculated from all intraday bars so far today)
- *   5. Last bar's volume ≥ volumeMultiplier × 20-bar average (institutional confirmation)
+ *   2. RSI in range [rsiBuyMin, rsiBuyMax] (default 40–62) AND RSI ≥ 50 (bullish bias)
+ *   3. Current price ≥ VWAP (calculated from all intraday bars so far today)
+ *   4. Last bar's volume ≥ volumeMultiplier × 20-bar average (institutional confirmation)
+ *   5. No cooldown active for this symbol (45 min between entries on the same symbol)
  *
  * Returns {@link TradingSignal.ScalpBuy} with tight SL/TP embedded in the signal, so
  * ProfileManager bypasses the profile's swing-trade targets and uses scalp-specific levels.
@@ -45,6 +45,12 @@ public class ScalpStrategy {
     // contribute to the same daily limit (prevents 2×SCALP_MAX_DAILY_TRADES total).
     private static volatile int dailyScalpCount = 0;
     private static volatile LocalDate lastCounterDate = null;
+
+    // Per-symbol cooldown: after a scalp entry, block the same symbol for N minutes.
+    // Prevents hammering the same symbol on every 20-second cycle when conditions hold.
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> lastScalpEntryMs =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long SYMBOL_COOLDOWN_MS = 45 * 60 * 1000L; // 45 minutes
 
     public ScalpStrategy(BrokerClient client, Config config) {
         this.client = client;
@@ -105,31 +111,39 @@ public class ScalpStrategy {
         double volMultiplier = config.getScalpVolumeMultiplier();
 
         // --- Entry conditions ---
+        // RSI-in-range: fires whenever RSI is between rsiBuyMin and rsiBuyMax (default 40–62).
+        // Previously required RSI to cross from <50 to ≥50 on the current bar — that crossover
+        // never fired in WEAK_BULL because stocks open with RSI already >50 and stay there.
         boolean rsiInWindow = rsi >= rsiBuyMin && rsi <= rsiBuyMax;
-        boolean rsiCrossedAbove50 = rsiPrev < 50.0 && rsi >= 50.0;
+        boolean rsiAbove50 = rsi >= 50.0;        // bullish bias — must be above midpoint
         boolean priceAboveVwap = vwap > 0 && currentPrice >= vwap;
         boolean volumeConfirmed = volumeRatio >= volMultiplier;
+        boolean onCooldown = isOnCooldown(symbol);
 
-        logger.debug("Scalp {}: RSI={:.1f}↑{:.1f} VWAP=${:.2f} price=${:.2f} vol={:.1f}x [window={} cross={} aboveVwap={} vol={}]",
+        logger.info("Scalp {}: RSI={} (prev={}) VWAP=${} price=${} vol={}x [inWindow={} rsiOk={} above50={} vwap={} vol={} cooldown={}]",
             symbol,
             String.format("%.1f", rsi), String.format("%.1f", rsiPrev),
             String.format("%.2f", vwap), String.format("%.2f", currentPrice),
             String.format("%.1f", volumeRatio),
-            isInScalpWindow(), rsiCrossedAbove50, priceAboveVwap, volumeConfirmed);
+            isInScalpWindow(), rsiInWindow, rsiAbove50, priceAboveVwap, volumeConfirmed, onCooldown);
 
-        if (rsiInWindow && rsiCrossedAbove50 && priceAboveVwap && volumeConfirmed) {
+        if (rsiInWindow && rsiAbove50 && priceAboveVwap && volumeConfirmed && !onCooldown) {
             dailyScalpCount++;
+            lastScalpEntryMs.put(symbol, System.currentTimeMillis());
             String reason = String.format(
-                "Scalp: RSI %.1f crossed 50 (prev %.1f), above VWAP $%.2f, vol %.1f× avg [%d/%d today]",
-                rsi, rsiPrev, vwap, volumeRatio, dailyScalpCount, config.getScalpMaxDailyTrades());
+                "Scalp: RSI %.1f in window [%.0f–%.0f], above VWAP $%.2f, vol %.1f× avg [%d/%d today]",
+                rsi, rsiBuyMin, rsiBuyMax, vwap, volumeRatio, dailyScalpCount, config.getScalpMaxDailyTrades());
             logger.info("{}: SCALP BUY — {}", symbol, reason);
             return new TradingSignal.ScalpBuy(reason,
                 config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent());
         }
 
-        return new TradingSignal.Hold(
-            String.format("Scalp: waiting (RSI=%.1f/prev=%.1f cross=%b vwap=%b vol=%b)",
-                rsi, rsiPrev, rsiCrossedAbove50, priceAboveVwap, volumeConfirmed));
+        String blockReason = !rsiInWindow ? String.format("RSI=%.1f outside [%.0f–%.0f]", rsi, rsiBuyMin, rsiBuyMax)
+            : !rsiAbove50 ? String.format("RSI=%.1f below 50", rsi)
+            : !priceAboveVwap ? String.format("price $%.2f below VWAP $%.2f", currentPrice, vwap)
+            : !volumeConfirmed ? String.format("vol %.1f× < %.1f×", volumeRatio, volMultiplier)
+            : String.format("cooldown (%.0f min remaining)", cooldownMinutesLeft(symbol));
+        return new TradingSignal.Hold("Scalp: " + blockReason);
     }
 
     /**
@@ -189,6 +203,18 @@ public class ScalpStrategy {
     /** Visible for testing — injects a fixed clock so time-window checks are deterministic. */
     void setNowSupplier(Supplier<ZonedDateTime> supplier) { this.nowSupplier = supplier; }
 
+    private boolean isOnCooldown(String symbol) {
+        Long last = lastScalpEntryMs.get(symbol);
+        return last != null && (System.currentTimeMillis() - last) < SYMBOL_COOLDOWN_MS;
+    }
+
+    private double cooldownMinutesLeft(String symbol) {
+        Long last = lastScalpEntryMs.get(symbol);
+        if (last == null) return 0.0;
+        long elapsedMs = System.currentTimeMillis() - last;
+        return Math.max(0.0, (SYMBOL_COOLDOWN_MS - elapsedMs) / 60_000.0);
+    }
+
     /** Visible for testing. */
     int getDailyScalpCount() { return dailyScalpCount; }
 
@@ -197,4 +223,10 @@ public class ScalpStrategy {
         dailyScalpCount = count;
         lastCounterDate = date;
     }
+
+    /** Visible for testing — clear per-symbol cooldown so tests can fire multiple entries. */
+    static void clearCooldown(String symbol) { lastScalpEntryMs.remove(symbol); }
+
+    /** Visible for testing — inject a last-entry timestamp to simulate an active cooldown. */
+    static void setCooldown(String symbol, long epochMs) { lastScalpEntryMs.put(symbol, epochMs); }
 }

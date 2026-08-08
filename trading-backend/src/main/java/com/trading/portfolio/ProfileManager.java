@@ -124,6 +124,13 @@ public class ProfileManager implements Runnable {
         = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long PENDING_BUY_TTL_MS = 5 * 60 * 1000L; // 5 minutes
 
+    // Entry stagger: enforce 90-second minimum spacing between any two new entries (cross-profile).
+    // Prevents simultaneous entries on correlated symbols during the same evaluation cycle —
+    // if SPY and QQQ both signal BUY on the same bar, entering both within seconds doubles
+    // concentration risk on the same market move. One entry per 90s lets the first trade breathe.
+    private static volatile long lastEntryEpochMs = 0L;
+    private static final long MIN_ENTRY_SPACING_MS = 90_000L; // 90 seconds
+
     // STATIC: Cross-profile active position tracker.
     // When MAIN holds XLP, EXPERIMENTAL must not open XLP — doubling exposure on a
     // losing position (XLP × 2 on Jul 7 2026) doubles the loss and inflates concentration risk.
@@ -1056,6 +1063,32 @@ public class ProfileManager implements Runnable {
                     return;
                 }
 
+                // ========== FIX 1: PROFIT GATE ON MOMENTUM SELL ==========
+                // When position is profitable but below the breakeven trigger, the trailing stop
+                // is already managing the exit. Momentum SELL at this point exits winners too early
+                // (avg +0.22% vs +0.58% when trailing stop manages). Suppress SELL and let the
+                // trailing stop handle the exit once the position matures past the breakeven level.
+                double breakevenTriggerPct = config.getBreakevenTriggerPercent();
+                if (lossPercent > 0 && lossPercent < breakevenTriggerPct) {
+                    logger.info("{} {}: Momentum SELL suppressed — +{}% (below breakeven gate {}%), trailing stop managing",
+                        profilePrefix, symbol,
+                        String.format("%.2f", lossPercent),
+                        String.format("%.1f", breakevenTriggerPct));
+                    updateTrailingStop(symbol, currentPrice, position, profilePrefix);
+                    return;
+                }
+
+                // ========== FIX 2: MIN-HOLD BYPASS FOR LOSING POSITIONS ==========
+                // The 1-hour min-hold is for PDT compliance on profitable/flat positions.
+                // When a position is clearly losing (-0.25%), holding for 1 hour compounds the
+                // damage — let momentum SELL cut losses immediately without waiting for min-hold.
+                if (lossPercent <= -0.25) {
+                    logger.info("{} {}: Early loss cut — {}%, bypassing min-hold restriction",
+                        profilePrefix, symbol, String.format("%.2f", lossPercent));
+                    handleSell(symbol, currentPrice, position, profilePrefix);
+                    return;
+                }
+
                 // Check if position has been held long enough (PDT compliance)
                 int minHoldHours = config.getMinHoldTimeHours();
                 if (!position.canSell(minHoldHours)) {
@@ -1162,6 +1195,19 @@ public class ProfileManager implements Runnable {
             return;
         }
 
+        // ========== ENTRY STAGGER (90-second minimum spacing) ==========
+        // Prevents back-to-back entries on correlated symbols that signal simultaneously.
+        // When SPY and QQQ both return BUY on the same 20-second cycle, both would be entered
+        // within seconds of each other — doubling exposure to the same directional move.
+        // The 90-second gate lets the first position breathe before the second can open.
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastEntryEpochMs < MIN_ENTRY_SPACING_MS) {
+            long secsLeft = (MIN_ENTRY_SPACING_MS - (nowMs - lastEntryEpochMs)) / 1000;
+            logger.info("{} {} BUY SKIPPED — entry stagger: {}s until next entry allowed",
+                profilePrefix, symbol, secsLeft);
+            return;
+        }
+
         // ========== DAILY LOSS CIRCUIT BREAKER ==========
         if (config.isDailyMaxLossEnabled()) {
             double maxLoss = -Math.abs(equity * config.getDailyMaxLossPercent() / 100.0);
@@ -1176,6 +1222,18 @@ public class ProfileManager implements Runnable {
                     "WARN");
                 return;
             }
+        }
+
+        // ========== LOSING POSITION GATE (Fix 5) ==========
+        // If any existing position is already down >0.20%, block new entries until it recovers
+        // or is closed. Adding capital while a position is losing compounds directional risk —
+        // both trades would suffer together if the move against us continues.
+        if (hasSignificantlyLosingPosition(profilePrefix, symbol)) {
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] ⛔ %s blocked — an existing position is in significant loss",
+                    profile.name(), symbol),
+                "WARN");
+            return;
         }
 
         // ========== DAILY PROFIT TARGET HALT ==========
@@ -2011,6 +2069,28 @@ public class ProfileManager implements Runnable {
             positionSize = capped;
         }
 
+        // ========== AFTERNOON POSITION SIZING (Fix 6) ==========
+        // After 13:30 ET, liquidity drops, bid-ask spreads widen, and afternoon reversals are
+        // more common. Reduce position size to limit afternoon exposure while still allowing
+        // entries for scalp signals (which have their own 14:00–15:00 window).
+        // Factor = afternoonPct / normalPct — scales all sizing paths proportionally.
+        var etNow = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
+        if (etNow.getHour() > 13 || (etNow.getHour() == 13 && etNow.getMinute() >= 30)) {
+            double afternoonPct = config.getAfternoonPositionSizingPercent(); // default 0.12
+            double normalPct    = config.getPositionSizingFixedPercent();     // default 0.20
+            if (normalPct > 0 && afternoonPct < normalPct) {
+                double afternoonFactor = afternoonPct / normalPct;
+                double prevSize = positionSize;
+                positionSize = positionSize * afternoonFactor;
+                logger.info("{} {}: ⏰ Afternoon sizing (13:30+ ET): {} → {} shares ({}% → {}% sizing)",
+                    profilePrefix, symbol,
+                    String.format("%.3f", prevSize),
+                    String.format("%.3f", positionSize),
+                    String.format("%.0f", normalPct * 100),
+                    String.format("%.0f", afternoonPct * 100));
+            }
+        }
+
         var newPosition = new TradePosition(
             symbol,
             currentPrice,
@@ -2147,6 +2227,7 @@ public class ProfileManager implements Runnable {
         // Update portfolio and cross-profile tracker atomically
         portfolio.setPosition(symbol, Optional.of(newPosition));
         globalHeldSymbols.put(symbol, profilePrefix);
+        lastEntryEpochMs = System.currentTimeMillis(); // arm entry stagger for next 90s
 
         // Record trade with full market context for adaptive learning (regime, VIX, breadth)
         String entryStrategyTag = scalpOverrides != null ? "SCALP" : profile.strategyType();
@@ -2174,6 +2255,36 @@ public class ProfileManager implements Runnable {
             // Always release the in-flight lock — covers success, early returns, and thrown exceptions.
             pendingBuySymbols.remove(pendingBuyKey);
         }
+    }
+
+    /**
+     * Returns true if this profile already holds a position that is losing more than 0.20%.
+     * Blocks new entries while an existing position is bleeding — prevents compounding risk
+     * by adding fresh capital when the account is already under stress.
+     */
+    private boolean hasSignificantlyLosingPosition(String profilePrefix, String candidateSymbol) {
+        for (var entry : globalHeldSymbols.entrySet()) {
+            if (!entry.getValue().equals(profilePrefix)) continue;
+            String heldSymbol = entry.getKey();
+            try {
+                var bar = client.getLatestBar(heldSymbol);
+                if (bar.isEmpty()) continue;
+                double heldCurrentPrice = bar.get().close();
+                var pos = portfolio.getPosition(heldSymbol);
+                if (pos.isEmpty()) continue;
+                double entryPrice = pos.get().entryPrice();
+                double lossPct = (heldCurrentPrice - entryPrice) / entryPrice * 100.0;
+                if (lossPct <= -0.20) {
+                    logger.info("{} {} BUY BLOCKED — {} already at {}% loss, holding off new entries",
+                        profilePrefix, candidateSymbol, heldSymbol, String.format("%.2f", lossPct));
+                    return true;
+                }
+            } catch (Exception e) {
+                logger.debug("{} hasSignificantlyLosingPosition: error checking {}: {}",
+                    profilePrefix, heldSymbol, e.getMessage());
+            }
+        }
+        return false;
     }
 
     private void handleSell(String symbol, double currentPrice, TradePosition position,
@@ -3442,17 +3553,21 @@ public class ProfileManager implements Runnable {
                 }
             }
             
-            // Get profile-specific targets — may be extended if trailing target is active
-            double takeProfitPercent = profile.takeProfitPercent();
+            // Get profile-specific targets — may be extended if trailing target is active.
+            // VIX-scaled TP: low-VIX environments have narrower intraday ranges; the static
+            // 1.5% target is rarely reachable at VIX=12 (typical WEAK_BULL). Use VIX*0.075
+            // clamped to [0.60%, 1.50%] so the bot exits at realistic levels instead of
+            // holding all day for a target the market never gives.
+            double takeProfitPercent = config.getVixScaledTakeProfit(latestVix);
                 double stopLossPercent = profile.stopLossPercent();
 
                 // When the multi-level trailing stop has locked in profit (stop > entry),
-                // extend the TP ceiling to 2× profile default so the winner can keep running.
+                // extend the TP ceiling to 2× VIX-scaled TP so the winner can keep running.
                 // The trailing stop will eventually close it when momentum stalls.
                 if (config.isTrailingTargetsEnabled()) {
                     double trailStop = trailingTargetManager.getCurrentStop(symbol);
                     if (trailStop > entryPrice) {
-                        takeProfitPercent = profile.takeProfitPercent() * 2.0;
+                        takeProfitPercent = config.getVixScaledTakeProfit(latestVix) * 2.0;
                     }
                 }
                 

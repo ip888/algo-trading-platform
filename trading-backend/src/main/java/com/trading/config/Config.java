@@ -794,6 +794,16 @@ public class Config {
     public double getPositionSizingFixedPercent() {
         return getDoubleProperty("POSITION_SIZING_FIXED_PERCENT", 0.10);
     }
+
+    /**
+     * Afternoon position sizing percentage (after 13:30 ET).
+     * Reduced from the normal fixed percent to limit exposure during low-liquidity
+     * afternoon hours when spreads widen and trend reversals are more common.
+     * Default: 0.12 (12% of equity, vs 20% normal)
+     */
+    public double getAfternoonPositionSizingPercent() {
+        return getDoubleProperty("POSITION_SIZING_AFTERNOON_PERCENT", 0.12);
+    }
     
     /**
      * Get maximum position size as percent of equity.
@@ -1004,6 +1014,17 @@ public class Config {
     
     public double getBreakevenTriggerPercent() {
         return getDoubleProperty("BREAKEVEN_TRIGGER_PERCENT", 0.5);
+    }
+
+    /**
+     * VIX-scaled take-profit: lower VIX = tighter range = lower realistic TP.
+     * Formula: clamp(VIX × 0.075, 0.60, 1.50)
+     * Examples: VIX=12 → 0.90%, VIX=15 → 1.13%, VIX=20 → 1.50%.
+     * Allows the bot to exit sooner on quiet days instead of waiting for an
+     * unreachable 1.5% target while the market grinds sideways.
+     */
+    public double getVixScaledTakeProfit(double vix) {
+        return Math.max(0.60, Math.min(1.50, vix * 0.075));
     }
     
     // ==================== Stop Loss Cooldown ====================

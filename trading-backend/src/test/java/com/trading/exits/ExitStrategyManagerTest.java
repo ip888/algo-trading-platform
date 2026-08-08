@@ -281,20 +281,21 @@ class ExitStrategyManagerTest {
         void partialExitShouldNotRetriggerAfterMarking() {
             TradePosition position = createTestPosition();
             TradePosition markedPosition = position.markPartialExit(1);
-            
+
             double profitTarget = TAKE_PROFIT - ENTRY_PRICE;
             double priceAt30Percent = ENTRY_PRICE + (profitTarget * 0.30);
-            
+
             ExitDecision decision = exitStrategyManager.evaluateExit(
                 markedPosition, priceAt30Percent, NORMAL_VOLATILITY, new HashMap<>()
             );
-            
+
             // After marking first partial exit, should not trigger again at same level
             if (decision.type() == ExitType.PARTIAL_PROFIT) {
                 // Should be for a higher level (2 or 3), not level 1
-                assertFalse(decision.reason().contains("25%"), 
+                assertFalse(decision.reason().contains("25%"),
                     "Should not re-trigger first partial exit");
             }
         }
     }
+
 }

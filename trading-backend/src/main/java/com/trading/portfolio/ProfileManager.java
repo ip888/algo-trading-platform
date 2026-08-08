@@ -139,6 +139,13 @@ public class ProfileManager implements Runnable {
     private static final java.util.concurrent.ConcurrentHashMap<String, String> globalHeldSymbols
         = new java.util.concurrent.ConcurrentHashMap<>();
 
+    // STATIC: Symbols currently held as scalp positions (entered via ScalpBuy signal).
+    // Scalp exits are binary — SL or full TP only, no partial exits, no scale-out at 1R.
+    // ExitStrategyManager short-circuits to the simple TP/SL check when a symbol is in this set.
+    // Cleared alongside globalHeldSymbols via clearPositionTracking() on every exit path.
+    private static final java.util.Set<String> scalpHeldSymbols
+        = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     // Scalp override: non-null while handleBuy is executing for a ScalpBuy signal.
     // Carries [stopLossPercent, takeProfitPercent] to bypass the profile's swing-trade targets.
     // Cleared in a finally block — never bleeds into subsequent normal entries.
@@ -913,7 +920,7 @@ public class ProfileManager implements Runnable {
                             "WARN"
                         );
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                        clearPositionTracking(symbol);
                         applyPostExitCooldown(symbol, currentPrice, exitPnl, profilePrefix, "max loss");
                         success = true;
                         return;
@@ -951,7 +958,7 @@ public class ProfileManager implements Runnable {
                         // Record trade close
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                        clearPositionTracking(symbol);
                         applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "time-based");
 
                         TradingWebSocketHandler.broadcastActivity(
@@ -2227,6 +2234,9 @@ public class ProfileManager implements Runnable {
         // Update portfolio and cross-profile tracker atomically
         portfolio.setPosition(symbol, Optional.of(newPosition));
         globalHeldSymbols.put(symbol, profilePrefix);
+        if (scalpOverrides != null) {
+            scalpHeldSymbols.add(symbol);
+        }
         lastEntryEpochMs = System.currentTimeMillis(); // arm entry stagger for next 90s
 
         // Record trade with full market context for adaptive learning (regime, VIX, breadth)
@@ -2287,6 +2297,18 @@ public class ProfileManager implements Runnable {
         return false;
     }
 
+    /**
+     * Central cleanup for every exit path. Keeps globalHeldSymbols, scalpHeldSymbols,
+     * trailingTargetManager, and breakevenStopsActive in sync regardless of how a position exits
+     * (TP, SL, time-based, EOD, reconciliation, regime flip, cleanup).
+     */
+    private void clearPositionTracking(String symbol) {
+        globalHeldSymbols.remove(symbol);
+        scalpHeldSymbols.remove(symbol);
+        trailingTargetManager.removePosition(symbol);
+        breakevenStopsActive.remove(symbol);
+    }
+
     private void handleSell(String symbol, double currentPrice, TradePosition position,
                            String profilePrefix) throws Exception {
 
@@ -2313,7 +2335,7 @@ public class ProfileManager implements Runnable {
         
         // Update portfolio and cross-profile tracker
         portfolio.setPosition(symbol, Optional.empty());
-        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+        clearPositionTracking(symbol);
 
         // Set re-entry cooldown to prevent immediate re-buy
         long cooldownMs = config.getStopLossCooldownMs();
@@ -2524,8 +2546,7 @@ public class ProfileManager implements Runnable {
                                     client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                                     double earningsPnl = (currentPrice - entryPrice) * qty;
                                     portfolio.setPosition(symbol, Optional.empty());
-                                    globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
-                                    breakevenStopsActive.remove(symbol);
+                                    clearPositionTracking(symbol);
                                     database.closeTrade(symbol, java.time.Instant.now(), currentPrice, earningsPnl, brokerName);
                                     updateDailyPnL(profilePrefix, earningsPnl);
                                     applyPostExitCooldown(symbol, currentPrice, earningsPnl, profilePrefix, "PRE_EARNINGS");
@@ -2555,9 +2576,12 @@ public class ProfileManager implements Runnable {
                         }
                     }
 
-                    // Evaluate exit decision using enhanced strategy
+                    // Evaluate exit decision using enhanced strategy.
+                    // Scalp positions bypass partial exits and scale-out at 1R — they exit
+                    // cleanly at the stored 0.40% TP or 0.25% SL as a single full-size order.
+                    boolean isScalpPosition = scalpHeldSymbols.contains(symbol);
                     var exitDecision = exitStrategyManager.evaluateExit(
-                        position, currentPrice, volatility, portfolioPositions
+                        position, currentPrice, volatility, portfolioPositions, isScalpPosition
                     );
                     
                     if (exitDecision.type() != com.trading.exits.ExitStrategyManager.ExitType.NONE) {
@@ -2588,8 +2612,7 @@ public class ProfileManager implements Runnable {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
                                 double tradePnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
-                                globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
-                                breakevenStopsActive.remove(symbol);
+                                clearPositionTracking(symbol);
                                 database.closeTrade(symbol, java.time.Instant.now(), currentPrice, tradePnl, brokerName);
                                 updateDailyPnL(profilePrefix, tradePnl);
                                 // Set re-entry cooldown after full exit
@@ -2675,7 +2698,7 @@ public class ProfileManager implements Runnable {
                                 client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                                 double pnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
-                                globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                                clearPositionTracking(symbol);
                                 database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
                                 updateDailyPnL(profilePrefix, pnl);
                                 applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
@@ -2793,8 +2816,7 @@ public class ProfileManager implements Runnable {
                         client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
                         double maxLossPnl = (currentPrice - entryPrice) * qty;
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
-                        breakevenStopsActive.remove(symbol);
+                        clearPositionTracking(symbol);
                         database.closeTrade(symbol, java.time.Instant.now(), currentPrice, maxLossPnl, brokerName);
                         updateDailyPnL(profilePrefix, maxLossPnl);
                         // Set re-entry cooldown + per-symbol cooldown + circuit-breaker tracking.
@@ -2994,8 +3016,7 @@ public class ProfileManager implements Runnable {
                     // entered twice within 9 minutes on July 6, 2026).
                     stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                     portfolio.setPosition(symbol, Optional.empty());
-                    globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol);
-                    breakevenStopsActive.remove(symbol);
+                    clearPositionTracking(symbol);
                     removed++;
                     logger.info("{} Reconciliation: removed stale position {} (not found at broker) — {}-min re-entry cooldown armed",
                         profilePrefix, symbol, config.getStopLossCooldownMs() / 60000);
@@ -3417,7 +3438,7 @@ public class ProfileManager implements Runnable {
                 cancelExistingOrders(profilePrefix, symbol);
                 client.placeOrder(symbol, qty, "sell", "market", "day", null);
                 portfolio.setPosition(symbol, Optional.empty());
-                globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                clearPositionTracking(symbol);
 
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] 🧹 CLEANUP: Closed %s (P&L: $%.2f) - reducing to %d positions",
@@ -3536,7 +3557,7 @@ public class ProfileManager implements Runnable {
                     database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                     if (!eodDecision.isPartial()) {
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                        clearPositionTracking(symbol);
                         pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
                     }
                     
@@ -3628,7 +3649,7 @@ public class ProfileManager implements Runnable {
 
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
                         portfolio.setPosition(symbol, Optional.empty());
-                        globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                        clearPositionTracking(symbol);
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
                         pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
@@ -3782,7 +3803,7 @@ public class ProfileManager implements Runnable {
                     client.placeOrder(symbol, qty, "sell", "market", "day", null);
                     broadcastOrderData(symbol, qty, "sell", "market", "filled", currentPrice);
                     portfolio.setPosition(symbol, Optional.empty());
-                    globalHeldSymbols.remove(symbol); trailingTargetManager.removePosition(symbol); breakevenStopsActive.remove(symbol);
+                    clearPositionTracking(symbol);
                     // Close DB record immediately so hasOpenTrade() returns false on the next
                     // cycle. Without this, orphan cleanup runs 1-2 cycles later, leaving a window
                     // where isGoodEntryTime() is true + hasOpenTrade() is false → re-entry.

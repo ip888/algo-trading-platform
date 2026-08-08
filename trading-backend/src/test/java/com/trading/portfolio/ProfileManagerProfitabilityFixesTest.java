@@ -2,6 +2,7 @@ package com.trading.portfolio;
 
 import com.trading.analysis.MarketRegimeDetector.MarketRegime;
 import com.trading.api.model.Bar;
+import com.trading.exits.ExitStrategyManager;
 import com.trading.risk.TradePosition;
 import org.junit.jupiter.api.*;
 
@@ -301,6 +302,93 @@ class ProfileManagerProfitabilityFixesTest extends ProfileManagerTestBase {
         when(mockConfig.getBreakevenTriggerPercent()).thenReturn(0.5);
         assertEquals(0.5, mockConfig.getBreakevenTriggerPercent(), 0.001,
             "Breakeven trigger must be 0.5% — positions below this are suppressed from SELL");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Scalp exit isolation — ExitStrategyManager.evaluateExit(isScalp=true)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * NVDA scalp: entry=$875, SL=-0.25% ($872.81), TP=+0.40% ($878.50).
+     * Uses mockConfig because Config requires live API credentials in tests.
+     * The scalp-specific logic in evaluateExit() reads no Config flags — it short-circuits
+     * before any feature-flag checks — so the mock's default answers are sufficient.
+     */
+    private TradePosition scalpPosition() {
+        double entry = 875.0;
+        return new TradePosition("NVDA", entry, 1.0,
+            entry * (1 - 0.0025),   // SL -0.25% = $872.8125
+            entry * (1 + 0.0040),   // TP +0.40% = $878.50
+            Instant.now());
+    }
+
+    @Test
+    @DisplayName("Scalp isScalp=true: partial L1 at +0.10% must NOT fire")
+    void scalp_atL1Level_noPartialExit() {
+        var mgr = new ExitStrategyManager(mockConfig);
+        var pos = scalpPosition();
+        double priceAtL1 = pos.entryPrice() + 0.25 * (pos.takeProfit() - pos.entryPrice());
+        var d = mgr.evaluateExit(pos, priceAtL1, 0.01, java.util.Map.of(), true);
+        assertEquals(ExitStrategyManager.ExitType.NONE, d.type(),
+            "Scalp at L1 (+0.10%) must produce NONE — partials are disabled for scalp");
+    }
+
+    @Test
+    @DisplayName("Scalp isScalp=true: scale-out at +0.25% (+1R) must NOT fire")
+    void scalp_atScaleOutLevel_noScaleOut() {
+        var mgr = new ExitStrategyManager(mockConfig);
+        var pos = scalpPosition();
+        double oneR = pos.entryPrice() - pos.stopLoss();
+        double priceAt1R = pos.entryPrice() + oneR;
+        var d = mgr.evaluateExit(pos, priceAt1R, 0.01, java.util.Map.of(), true);
+        assertEquals(ExitStrategyManager.ExitType.NONE, d.type(),
+            "Scalp at +1R (+0.25%) must produce NONE — scale-out is disabled for scalp");
+    }
+
+    @Test
+    @DisplayName("Scalp isScalp=true: partial L3 at +0.30% must NOT fire")
+    void scalp_atL3Level_noPartialExit() {
+        var mgr = new ExitStrategyManager(mockConfig);
+        var pos = scalpPosition();
+        double priceAtL3 = pos.entryPrice() + 0.75 * (pos.takeProfit() - pos.entryPrice());
+        var d = mgr.evaluateExit(pos, priceAtL3, 0.01, java.util.Map.of(), true);
+        assertEquals(ExitStrategyManager.ExitType.NONE, d.type(),
+            "Scalp at L3 (+0.30%) must produce NONE — partials are disabled for scalp");
+    }
+
+    @Test
+    @DisplayName("Scalp isScalp=true: full TP at +0.40% fires as one clean full exit")
+    void scalp_atTakeProfit_fullExitFires() {
+        var mgr = new ExitStrategyManager(mockConfig);
+        var pos = scalpPosition();
+        var d = mgr.evaluateExit(pos, pos.takeProfit(), 0.01, java.util.Map.of(), true);
+        assertEquals(ExitStrategyManager.ExitType.TAKE_PROFIT, d.type(),
+            "Scalp TP must fire as a clean full exit at the stored 0.40% TP price");
+        assertFalse(d.isPartial(), "Scalp TP must be a full exit, never partial");
+    }
+
+    @Test
+    @DisplayName("Scalp isScalp=true: SL at -0.25% fires as full exit")
+    void scalp_atStopLoss_stopFires() {
+        var mgr = new ExitStrategyManager(mockConfig);
+        var pos = scalpPosition();
+        var d = mgr.evaluateExit(pos, pos.stopLoss(), 0.01, java.util.Map.of(), true);
+        assertEquals(ExitStrategyManager.ExitType.STOP_LOSS, d.type(),
+            "Scalp SL must fire as a full exit when price reaches the stop");
+        assertFalse(d.isPartial(), "Stop loss must always be a full exit");
+    }
+
+    @Test
+    @DisplayName("Non-scalp isScalp=false: partial L1 at +0.10% DOES fire (control test)")
+    void nonScalp_atL1Level_partialFires() {
+        when(mockConfig.isScaleOutEnabled()).thenReturn(false); // isolate: only test partial, not scale-out
+        var mgr = new ExitStrategyManager(mockConfig);
+        var pos = scalpPosition();
+        double priceAtL1 = pos.entryPrice() + 0.25 * (pos.takeProfit() - pos.entryPrice());
+        var d = mgr.evaluateExit(pos, priceAtL1, 0.01, java.util.Map.of(), false);
+        assertEquals(ExitStrategyManager.ExitType.PARTIAL_PROFIT, d.type(),
+            "MAIN position at L1 must trigger partial exit — verifies the scalp guard is the only difference");
+        assertTrue(d.isPartial());
     }
 
     @Test

@@ -96,11 +96,23 @@ public class ExitStrategyManager {
     // 1/2/3 are taken by the percentage-of-target partials; we use slot 4.
     private static final int SCALE_OUT_1R_LEVEL = 4;
     
-    /**
-     * Evaluate all exit strategies and return the highest priority exit decision.
-     */
+    /** Backward-compatible overload — treats position as non-scalp (MAIN strategy). */
     public ExitDecision evaluateExit(TradePosition position, double currentPrice,
                                      double currentVolatility, Map<String, Double> portfolioPositions) {
+        return evaluateExit(position, currentPrice, currentVolatility, portfolioPositions, false);
+    }
+
+    /**
+     * Evaluate all exit strategies and return the highest priority exit decision.
+     *
+     * @param isScalp true when the position was entered via a ScalpBuy signal.
+     *                Scalp exits are binary (SL or full TP only) — partial exits and scale-out
+     *                at 1R are bypassed so the tight 0.40% target closes as one clean round-trip
+     *                instead of being shredded into 4-5 partial sells at 0.10/0.20/0.25/0.30/0.40%.
+     */
+    public ExitDecision evaluateExit(TradePosition position, double currentPrice,
+                                     double currentVolatility, Map<String, Double> portfolioPositions,
+                                     boolean isScalp) {
 
         // Priority 0: Catastrophic loss (trumps everything).
         // Last-line defense for the META scenario — a broker-side stop that silently
@@ -119,16 +131,26 @@ public class ExitStrategyManager {
 
         // Priority 1: Stop loss (always highest priority)
         if (position.isStopLossHit(currentPrice)) {
-            return ExitDecision.fullExit(ExitType.STOP_LOSS, 
+            return ExitDecision.fullExit(ExitType.STOP_LOSS,
                 "Stop loss hit", currentPrice);
         }
-        
+
         // Priority 2: Full take profit
         if (position.isTakeProfitHit(currentPrice)) {
-            return ExitDecision.fullExit(ExitType.TAKE_PROFIT, 
+            return ExitDecision.fullExit(ExitType.TAKE_PROFIT,
                 "Take profit target hit", currentPrice);
         }
-        
+
+        // Scalp short-circuit: SL and TP are the only valid exits.
+        // Partial exits (L1/L2/L3 at 25/50/75% of TP) and scale-out at +1R both fire
+        // well below the 0.40% scalp target and fragment the position into 4-5 small sells
+        // at +0.10%/+0.20%/+0.25%/+0.30%/+0.40%, cutting the average realized gain in half.
+        // All other exit types (time-decay, volatility spike, correlation) are also irrelevant
+        // for positions designed to close in minutes, not hours.
+        if (isScalp) {
+            return ExitDecision.noExit();
+        }
+
         // Priority 2.5: Scale-out at +1R (Tier 2.6).
         // Banking part of the position at +1R locks in a guaranteed profit and dramatically
         // improves expectancy by neutralizing the back-half if price reverses to break-even.

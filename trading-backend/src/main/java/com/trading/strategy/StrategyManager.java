@@ -103,8 +103,10 @@ public final class StrategyManager {
 
                 logger.debug("Multi-timeframe: {}", mtfAnalysis.getSummary());
 
-                // If timeframes are not aligned and alignment is required, hold
-                if (!mtfAnalysis.aligned() && mtfAnalysis.confidence() < 0.6) {
+                // Hold when NOT aligned OR confidence too low — both conditions must be met
+                // to proceed (aligned AND confident). AND was wrong: it let through cases
+                // where alignment was absent but confidence happened to be ≥0.6.
+                if (!mtfAnalysis.aligned() || mtfAnalysis.confidence() < 0.6) {
                     logger.info("{}: Timeframes not aligned ({}), holding",
                         symbol, mtfAnalysis.getAlignedCount() + "/" + mtfAnalysis.signals().size());
                     return new TradingSignal.Hold("Timeframes not aligned");
@@ -339,7 +341,9 @@ public final class StrategyManager {
                 if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
                     double sma20 = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
                     double rsi = RSIStrategy.calculateRSI(history, 14);
-                    if (currentPrice > sma20 && rsi >= 35.0 && rsi <= 78.0) {
+                    // Tightened window 35-78 → 45-65: avoids entering on oversold bounces (35-45)
+                    // and extended momentum (65-78) that are both high-risk in a weak bull.
+                    if (currentPrice > sma20 && rsi >= 45.0 && rsi <= 65.0) {
                         activeStrategy = "MTF Trend Entry (Weak Bull)";
                         logger.info("{}: WEAK_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
                             symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
@@ -348,7 +352,7 @@ public final class StrategyManager {
                             "WEAK_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
                             currentPrice, sma20, rsi));
                     } else {
-                        logger.info("{}: WEAK_BULL MTF entry blocked — price ${} vs SMA-20 ${}, RSI {} (need price>SMA, RSI 35-78)",
+                        logger.info("{}: WEAK_BULL MTF entry blocked — price ${} vs SMA-20 ${}, RSI {} (need price>SMA, RSI 45-65)",
                             symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
                             String.format("%.1f", rsi));
                     }
@@ -510,6 +514,17 @@ public final class StrategyManager {
             logger.info("{}: MACD BUY blocked — RSI weak ({} < 35, momentum not confirmed)",
                 symbol, String.format("%.1f", rsi));
             return new TradingSignal.Hold(String.format("MACD BUY filtered: RSI too weak (%.1f < 35)", rsi));
+        }
+        // RSI direction: block if momentum is actively fading (RSI dropped >1 point from prev bar).
+        // Entering on a declining RSI means chasing a move that's already exhausting.
+        if (history.size() >= 16) {
+            double prevRsi = RSIStrategy.calculateRSI(history.subList(0, history.size() - 1), 14);
+            if (rsi < prevRsi - 1.0) {
+                logger.info("{}: MACD BUY blocked — RSI fading ({} < prev {} − 1, momentum exhausting)",
+                    symbol, String.format("%.1f", rsi), String.format("%.1f", prevRsi));
+                return new TradingSignal.Hold(
+                    String.format("MACD BUY filtered: RSI fading (%.1f, was %.1f)", rsi, prevRsi));
+            }
         }
         return signal;
     }

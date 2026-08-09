@@ -376,45 +376,45 @@ public class MultiTimeframeAnalyzer {
         // Primary trend from longest timeframe
         TrendDirection primary = signals.get(signals.size() - 1).trend();
         
-        // OPTIMIZED: More aggressive in strong uptrends
-        // If majority bullish (> 50%) and not in downtrend, allow BUY
-        double bullishPct = (double) bullish / signals.size();
-        
-        if (primary == TrendDirection.STRONG_UP && bullishPct >= 0.5) {
-            // Strong uptrend + majority bullish = BUY
-            logger.debug("STRONG_UP with {}% bullish timeframes - recommending BUY", 
-                String.format("%.0f", bullishPct * 100));
-            return SignalType.BUY;
-        }
-        
-        if (bullishPct >= 0.6 && avgStrength >= 0.4) {
-            // 60%+ bullish with decent strength = BUY
-            logger.debug("{}% bullish timeframes with {}% strength - recommending BUY",
-                String.format("%.0f", bullishPct * 100), String.format("%.0f", avgStrength * 100));
-            return SignalType.BUY;
-        }
-        
-        // Use adaptive parameters for alignment requirement
-        boolean requireAlignment = adaptiveManager != null ? 
-            adaptiveManager.isAdaptiveRequireAlignment() : 
+        // Check alignment requirement first — bullishPct shortcuts must respect this config.
+        // Previously the shortcuts ran before the alignment check, making
+        // MULTI_TIMEFRAME_MIN_ALIGNED have no effect on majority-bullish markets.
+        boolean requireAlignment = adaptiveManager != null ?
+            adaptiveManager.isAdaptiveRequireAlignment() :
             config.isMultiTimeframeRequireAlignment();
-        
+
+        double bullishPct = (double) bullish / signals.size();
+
         if (!requireAlignment || aligned) {
+            // Strong uptrend + majority bullish = BUY
+            if (primary == TrendDirection.STRONG_UP && bullishPct >= 0.5) {
+                logger.debug("STRONG_UP with {}% bullish timeframes - recommending BUY",
+                    String.format("%.0f", bullishPct * 100));
+                return SignalType.BUY;
+            }
+
+            // 60%+ bullish with decent strength = BUY
+            if (bullishPct >= 0.6 && avgStrength >= 0.4) {
+                logger.debug("{}% bullish timeframes with {}% strength - recommending BUY",
+                    String.format("%.0f", bullishPct * 100), String.format("%.0f", avgStrength * 100));
+                return SignalType.BUY;
+            }
+
             // Use entry timeframe (15M by default) for signal
             String entryTF = config.getMultiTimeframeEntryTimeframe();
-            
+
             Optional<TimeframeSignal> entrySignal = signals.stream()
                 .filter(s -> s.timeframe().toString().contains(entryTF))
                 .findFirst();
-            
+
             if (entrySignal.isPresent()) {
                 return entrySignal.get().signal();
             }
-            
+
             // Fallback to shortest timeframe
             return signals.get(0).signal();
         }
-        
+
         return SignalType.HOLD;
     }
     

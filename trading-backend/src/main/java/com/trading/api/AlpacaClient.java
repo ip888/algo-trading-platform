@@ -527,6 +527,14 @@ public final class AlpacaClient implements BrokerClient {
             }
         }
         
+        // Strip today's forming daily bar so indicators never see an incomplete close.
+        if ("1Day".equals(timeframe)) {
+            java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("America/New_York"));
+            bars.removeIf(b -> b.timestamp()
+                .atZone(java.time.ZoneId.of("America/New_York"))
+                .toLocalDate()
+                .isEqual(today));
+        }
         logger.debug("Retrieved {} {} bars for {}", bars.size(), timeframe, symbol);
         return bars;
     }
@@ -553,7 +561,15 @@ public final class AlpacaClient implements BrokerClient {
             }
         }
         
-        logger.debug("Retrieved {} bars for {}", bars.size(), symbol);
+        // Strip today's forming daily bar — it's incomplete until 4PM ET close.
+        // Indicators (MACD, RSI, MA) computed on a live bar compare a settled
+        // daily close to an intraday snapshot, producing misleading signals.
+        java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("America/New_York"));
+        bars.removeIf(b -> b.timestamp()
+            .atZone(java.time.ZoneId.of("America/New_York"))
+            .toLocalDate()
+            .isEqual(today));
+        logger.debug("Retrieved {} bars for {} (today's forming bar stripped)", bars.size(), symbol);
         return bars;
     }
 

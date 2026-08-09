@@ -43,7 +43,10 @@ public class ScalpStrategy {
 
     // Static: shared across MAIN and EXPERIMENTAL instances so both profiles
     // contribute to the same daily limit (prevents 2×SCALP_MAX_DAILY_TRADES total).
-    private static volatile int dailyScalpCount = 0;
+    // AtomicInteger prevents a race on the check-then-increment sequence when both
+    // profiles evaluate the same symbol concurrently.
+    private static final java.util.concurrent.atomic.AtomicInteger dailyScalpCount =
+        new java.util.concurrent.atomic.AtomicInteger(0);
     private static volatile LocalDate lastCounterDate = null;
 
     // Per-symbol cooldown: after a scalp entry, block the same symbol for N minutes.
@@ -69,10 +72,10 @@ public class ScalpStrategy {
         }
 
         resetDailyCounterIfNeeded();
-        if (dailyScalpCount >= config.getScalpMaxDailyTrades()) {
+        if (dailyScalpCount.get() >= config.getScalpMaxDailyTrades()) {
             return new TradingSignal.Hold(
                 String.format("Scalp: daily limit reached (%d/%d)",
-                    dailyScalpCount, config.getScalpMaxDailyTrades()));
+                    dailyScalpCount.get(), config.getScalpMaxDailyTrades()));
         }
 
         if (!isInScalpWindow()) {
@@ -128,11 +131,11 @@ public class ScalpStrategy {
             isInScalpWindow(), rsiInWindow, rsiAbove50, priceAboveVwap, volumeConfirmed, onCooldown);
 
         if (rsiInWindow && rsiAbove50 && priceAboveVwap && volumeConfirmed && !onCooldown) {
-            dailyScalpCount++;
+            int count = dailyScalpCount.incrementAndGet();
             lastScalpEntryMs.put(symbol, System.currentTimeMillis());
             String reason = String.format(
                 "Scalp: RSI %.1f in window [%.0f–%.0f], above VWAP $%.2f, vol %.1f× avg [%d/%d today]",
-                rsi, rsiBuyMin, rsiBuyMax, vwap, volumeRatio, dailyScalpCount, config.getScalpMaxDailyTrades());
+                rsi, rsiBuyMin, rsiBuyMax, vwap, volumeRatio, count, config.getScalpMaxDailyTrades());
             logger.info("{}: SCALP BUY — {}", symbol, reason);
             return new TradingSignal.ScalpBuy(reason,
                 config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent());
@@ -172,9 +175,17 @@ public class ScalpStrategy {
         return sumV > 0 ? sumTPV / sumV : 0.0;
     }
 
-    /** Ratio of last bar's volume to the 20-bar lookback average (excluding last bar). */
+    /** Ratio of last complete bar's volume to the 20-bar lookback average (excluding the last bar). */
     double volumeRatio(List<Bar> bars) {
         int last = bars.size() - 1;
+        // Skip the forming bar: its 15-min window hasn't closed, so volume is still accumulating.
+        // Comparing incomplete volume to settled bars gives a misleadingly high ratio.
+        Bar lastBar = bars.get(last);
+        java.time.Instant barEnd = lastBar.timestamp().plusSeconds(15 * 60);
+        if (barEnd.isAfter(java.time.Instant.now())) {
+            last--;
+        }
+        if (last < 1) return 0.0;
         int from = Math.max(0, last - VOLUME_LOOKBACK);
         double avg = bars.subList(from, last).stream()
             .mapToLong(Bar::volume)
@@ -195,7 +206,7 @@ public class ScalpStrategy {
     private void resetDailyCounterIfNeeded() {
         LocalDate today = nowSupplier.get().toLocalDate();
         if (!today.equals(lastCounterDate)) {
-            dailyScalpCount = 0;
+            dailyScalpCount.set(0);
             lastCounterDate = today;
         }
     }
@@ -216,11 +227,11 @@ public class ScalpStrategy {
     }
 
     /** Visible for testing. */
-    int getDailyScalpCount() { return dailyScalpCount; }
+    int getDailyScalpCount() { return dailyScalpCount.get(); }
 
     /** Visible for testing — allows injecting a known count. */
     void setDailyScalpCount(int count, LocalDate date) {
-        dailyScalpCount = count;
+        dailyScalpCount.set(count);
         lastCounterDate = date;
     }
 

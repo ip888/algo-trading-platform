@@ -526,6 +526,15 @@ public class ProfileManager implements Runnable {
                 bearishRegimeMarketStart = null;
             }
 
+            // VIX spike override: bypass the cached regime when VIX > 25.
+            // The cache can be up to REGIME_UPDATE_INTERVAL minutes stale — a spike
+            // from 18 → 28 mid-session would be invisible until the next cache refresh.
+            if (currentVix > 25.0 && regime != MarketRegime.HIGH_VOLATILITY) {
+                logger.warn("{} ⚠️ VIX spike override: {} → HIGH_VOLATILITY (VIX={})",
+                    profilePrefix, regime, String.format("%.1f", currentVix));
+                regime = MarketRegime.HIGH_VOLATILITY;
+            }
+
             targetSymbols = symbolSelector.selectSymbols(regime);
             logger.debug("{} {}", profilePrefix, regimeAnalysis.getSummary());
 
@@ -3015,6 +3024,10 @@ public class ProfileManager implements Runnable {
                     // cycle. This is the root cause of rapid same-symbol re-entries (e.g. NVDA
                     // entered twice within 9 minutes on July 6, 2026).
                     stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
+                    // Cancel any native stop/trailing-stop orders that survived the broker-side fill.
+                    // Without this, a native stop placed by updateTrailingStop() can trigger on a flat
+                    // account and create an accidental short position.
+                    cancelExistingOrders(profilePrefix, symbol);
                     portfolio.setPosition(symbol, Optional.empty());
                     clearPositionTracking(symbol);
                     removed++;

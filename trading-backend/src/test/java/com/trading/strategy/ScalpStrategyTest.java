@@ -296,13 +296,16 @@ class ScalpStrategyTest {
     }
 
     @Test
-    @DisplayName("volumeRatio: lastBar / 20-bar avg (excluding last)")
+    @DisplayName("volumeRatio: lastBar / 20-bar avg (excluding last), forming bar skipped")
     void volumeRatio_correctFormula() throws Exception {
         var s = realStrategy();
-        // 2 bars: avg of [bar0] = 1000, last = 2000 → ratio = 2.0
+        // Use timestamps well in the past so neither bar is treated as forming.
+        // bar0: 2h ago (1 000 vol avg), bar1: 1h ago (2 000 vol → ratio 2.0)
+        Instant t0 = Instant.now().minusSeconds(7200);
+        Instant t1 = Instant.now().minusSeconds(3600);
         var bars = List.of(
-            new Bar(Instant.now(), 100.0, 101.0, 99.0, 100.0, 1_000L),
-            new Bar(Instant.now(), 101.0, 102.0, 100.0, 101.0, 2_000L)
+            new Bar(t0, 100.0, 101.0, 99.0, 100.0, 1_000L),
+            new Bar(t1, 101.0, 102.0, 100.0, 101.0, 2_000L)
         );
         assertEquals(2.0, s.volumeRatio(bars), 0.01);
     }

@@ -141,6 +141,26 @@ public class ScalpStrategy {
                 config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent());
         }
 
+        // --- VWAP reclaim entry ---
+        // When price crosses above VWAP from below with momentum, institutional buyers
+        // are re-establishing positions at the day's average cost — reliable intraday signal.
+        // Uses a slightly wider RSI window (45–65) since the reclaim itself confirms bullish bias.
+        if (!onCooldown && vwap > 0 && bars.size() >= 2 && volumeConfirmed) {
+            double prevClose = bars.get(bars.size() - 2).close();
+            boolean vwapReclaim = prevClose < vwap && currentPrice >= vwap;
+            boolean rsiBuilding = rsi >= 45.0 && rsi <= 65.0;
+            if (vwapReclaim && rsiBuilding) {
+                int count = dailyScalpCount.incrementAndGet();
+                lastScalpEntryMs.put(symbol, System.currentTimeMillis());
+                String reason = String.format(
+                    "Scalp VWAP reclaim: $%.2f crossed above VWAP $%.2f, RSI=%.1f, vol=%.1f× [%d/%d today]",
+                    currentPrice, vwap, rsi, volumeRatio, count, config.getScalpMaxDailyTrades());
+                logger.info("{}: SCALP BUY (VWAP reclaim) — {}", symbol, reason);
+                return new TradingSignal.ScalpBuy(reason,
+                    config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent());
+            }
+        }
+
         String blockReason = !rsiInWindow ? String.format("RSI=%.1f outside [%.0f–%.0f]", rsi, rsiBuyMin, rsiBuyMax)
             : !rsiAbove50 ? String.format("RSI=%.1f below 50", rsi)
             : !priceAboveVwap ? String.format("price $%.2f below VWAP $%.2f", currentPrice, vwap)
@@ -195,12 +215,18 @@ public class ScalpStrategy {
         return bars.get(last).volume() / avg;
     }
 
-    /** Morning window 9:45–11:30 AM ET or afternoon momentum window 14:00–15:00 ET. */
+    /**
+     * Scalp entry windows:
+     *   Morning   09:45–11:30 — primary momentum window
+     *   Midday    11:30–13:00 — trend continuation in active markets
+     *   Afternoon 14:00–15:00 — second momentum burst before close
+     */
     boolean isInScalpWindow() {
         LocalTime t = nowSupplier.get().toLocalTime();
-        boolean morning = !t.isBefore(LocalTime.of(9, 45)) && t.isBefore(LocalTime.of(11, 30));
-        boolean afternoon = !t.isBefore(LocalTime.of(14, 0)) && t.isBefore(LocalTime.of(15, 0));
-        return morning || afternoon;
+        boolean morning   = !t.isBefore(LocalTime.of(9,  45)) && t.isBefore(LocalTime.of(11, 30));
+        boolean midday    = !t.isBefore(LocalTime.of(11, 30)) && t.isBefore(LocalTime.of(13,  0));
+        boolean afternoon = !t.isBefore(LocalTime.of(14,  0)) && t.isBefore(LocalTime.of(15,  0));
+        return morning || midday || afternoon;
     }
 
     private void resetDailyCounterIfNeeded() {

@@ -103,10 +103,9 @@ public final class StrategyManager {
 
                 logger.debug("Multi-timeframe: {}", mtfAnalysis.getSummary());
 
-                // Hold when NOT aligned OR confidence too low — both conditions must be met
-                // to proceed (aligned AND confident). AND was wrong: it let through cases
-                // where alignment was absent but confidence happened to be ≥0.6.
-                if (!mtfAnalysis.aligned() || mtfAnalysis.confidence() < 0.6) {
+                // Hold only when BOTH not-aligned AND low confidence — high-confidence
+                // signals with imperfect timeframe alignment are still tradeable.
+                if (!mtfAnalysis.aligned() && mtfAnalysis.confidence() < 0.6) {
                     logger.info("{}: Timeframes not aligned ({}), holding",
                         symbol, mtfAnalysis.getAlignedCount() + "/" + mtfAnalysis.signals().size());
                     return new TradingSignal.Hold("Timeframes not aligned");
@@ -293,9 +292,30 @@ public final class StrategyManager {
                 } else {
                     // Regular assets: MACD Trend Following, gated by RSI to prevent extended entries
                     activeStrategy = "MACD Trend";
-                    yield rsiFilteredBuy(
+                    var macdSig = rsiFilteredBuy(
                         macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history),
                         history, symbol, positionQty);
+                    if (!(macdSig instanceof TradingSignal.Hold)) yield macdSig;
+
+                    // RSI dip-buy fallback: MACD histogram hasn't crossed yet but price has
+                    // pulled back to a healthy RSI level inside a confirmed uptrend.
+                    // Entry condition: price above SMA-20 (trend intact) + RSI 42–55 (dip zone).
+                    // Captures the "first pullback in a new uptrend" before the daily MACD
+                    // generates its delayed crossover signal.
+                    if (positionQty == 0 && history.size() >= 20) {
+                        double sma20 = history.stream()
+                            .skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
+                        double rsiNow = RSIStrategy.calculateRSI(history, 14);
+                        if (currentPrice > sma20 && rsiNow >= 42.0 && rsiNow <= 55.0) {
+                            activeStrategy = "RSI Dip Buy (Strong Bull)";
+                            logger.info("{}: STRONG_BULL dip-buy — price ${} above SMA-20 ${}, RSI {}",
+                                symbol, String.format("%.2f", currentPrice),
+                                String.format("%.2f", sma20), String.format("%.1f", rsiNow));
+                            yield new TradingSignal.Buy(String.format(
+                                "STRONG_BULL dip: SMA-20 intact, RSI=%.1f (pullback entry)", rsiNow));
+                        }
+                    }
+                    yield macdSig; // HOLD
                 }
             }
             case STRONG_BEAR -> {
@@ -341,9 +361,9 @@ public final class StrategyManager {
                 if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
                     double sma20 = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
                     double rsi = RSIStrategy.calculateRSI(history, 14);
-                    // Tightened window 35-78 → 45-65: avoids entering on oversold bounces (35-45)
-                    // and extended momentum (65-78) that are both high-risk in a weak bull.
-                    if (currentPrice > sma20 && rsi >= 45.0 && rsi <= 65.0) {
+                    // RSI window 38-72: avoids deep oversold (RSI<38 = momentum collapse)
+                    // and extreme extension (RSI>72), covers the full normal bull range.
+                    if (currentPrice > sma20 && rsi >= 38.0 && rsi <= 72.0) {
                         activeStrategy = "MTF Trend Entry (Weak Bull)";
                         logger.info("{}: WEAK_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
                             symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
@@ -352,7 +372,7 @@ public final class StrategyManager {
                             "WEAK_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
                             currentPrice, sma20, rsi));
                     } else {
-                        logger.info("{}: WEAK_BULL MTF entry blocked — price ${} vs SMA-20 ${}, RSI {} (need price>SMA, RSI 45-65)",
+                        logger.info("{}: WEAK_BULL MTF entry blocked — price ${} vs SMA-20 ${}, RSI {} (need price>SMA, RSI 38-72)",
                             symbol, String.format("%.2f", currentPrice), String.format("%.2f", sma20),
                             String.format("%.1f", rsi));
                     }
@@ -515,15 +535,18 @@ public final class StrategyManager {
                 symbol, String.format("%.1f", rsi));
             return new TradingSignal.Hold(String.format("MACD BUY filtered: RSI too weak (%.1f < 35)", rsi));
         }
-        // RSI direction: block if momentum is actively fading (RSI dropped >1 point from prev bar).
-        // Entering on a declining RSI means chasing a move that's already exhausting.
-        if (history.size() >= 16) {
+        // RSI direction: only block when RSI has dropped sharply (>3 pts) in RANGE_BOUND.
+        // In trending markets RSI oscillates bar-to-bar and a mild tick-down is normal noise,
+        // not a signal of exhaustion. Only meaningful in mean-reversion / range conditions
+        // where a fading bounce is the main risk. Tolerance raised to 3pt to avoid
+        // filtering valid MACD entries on normal daily bar fluctuation.
+        if (history.size() >= 16 && currentRegime == com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND) {
             double prevRsi = RSIStrategy.calculateRSI(history.subList(0, history.size() - 1), 14);
-            if (rsi < prevRsi - 1.0) {
-                logger.info("{}: MACD BUY blocked — RSI fading ({} < prev {} − 1, momentum exhausting)",
+            if (rsi < prevRsi - 3.0) {
+                logger.info("{}: MACD BUY blocked — RSI fading in RANGE_BOUND ({} < prev {} − 3)",
                     symbol, String.format("%.1f", rsi), String.format("%.1f", prevRsi));
                 return new TradingSignal.Hold(
-                    String.format("MACD BUY filtered: RSI fading (%.1f, was %.1f)", rsi, prevRsi));
+                    String.format("MACD BUY filtered: RSI fading in range (%.1f, was %.1f)", rsi, prevRsi));
             }
         }
         return signal;

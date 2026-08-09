@@ -376,30 +376,28 @@ public class MultiTimeframeAnalyzer {
         // Primary trend from longest timeframe
         TrendDirection primary = signals.get(signals.size() - 1).trend();
         
-        // Check alignment requirement first — bullishPct shortcuts must respect this config.
-        // Previously the shortcuts ran before the alignment check, making
-        // MULTI_TIMEFRAME_MIN_ALIGNED have no effect on majority-bullish markets.
+        double bullishPct = (double) bullish / signals.size();
+
+        // Strong-trend shortcuts fire regardless of strict alignment — when the primary
+        // (daily) timeframe is STRONG_UP and a majority of timeframes agree, that IS
+        // directional consensus even if the 15-min bar is momentarily flat.
+        if (primary == TrendDirection.STRONG_UP && bullishPct >= 0.5) {
+            logger.debug("STRONG_UP with {}% bullish timeframes - recommending BUY",
+                String.format("%.0f", bullishPct * 100));
+            return SignalType.BUY;
+        }
+        if (bullishPct >= 0.6 && avgStrength >= 0.4) {
+            logger.debug("{}% bullish timeframes with {}% strength - recommending BUY",
+                String.format("%.0f", bullishPct * 100), String.format("%.0f", avgStrength * 100));
+            return SignalType.BUY;
+        }
+
+        // For ambiguous signals, alignment requirement kicks in.
         boolean requireAlignment = adaptiveManager != null ?
             adaptiveManager.isAdaptiveRequireAlignment() :
             config.isMultiTimeframeRequireAlignment();
 
-        double bullishPct = (double) bullish / signals.size();
-
         if (!requireAlignment || aligned) {
-            // Strong uptrend + majority bullish = BUY
-            if (primary == TrendDirection.STRONG_UP && bullishPct >= 0.5) {
-                logger.debug("STRONG_UP with {}% bullish timeframes - recommending BUY",
-                    String.format("%.0f", bullishPct * 100));
-                return SignalType.BUY;
-            }
-
-            // 60%+ bullish with decent strength = BUY
-            if (bullishPct >= 0.6 && avgStrength >= 0.4) {
-                logger.debug("{}% bullish timeframes with {}% strength - recommending BUY",
-                    String.format("%.0f", bullishPct * 100), String.format("%.0f", avgStrength * 100));
-                return SignalType.BUY;
-            }
-
             // Use entry timeframe (15M by default) for signal
             String entryTF = config.getMultiTimeframeEntryTimeframe();
 

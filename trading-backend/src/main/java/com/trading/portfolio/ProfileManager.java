@@ -354,6 +354,21 @@ public class ProfileManager implements Runnable {
         // Create Phase 3 components
         this.mlEntryScorer = new com.trading.scoring.MLEntryScorer(config, marketAnalyzer, sentimentAnalyzer);
         this.trailingTargetManager = new com.trading.exits.TrailingTargetManager(config);
+        // Restore trailing-stop state for any positions still open at broker.
+        // Without this, a redeploy mid-session resets the multi-level trail to level 0,
+        // reverting the stop to entry-time distance and giving back protected gains.
+        try {
+            var trailingStates = database.loadBotStateWithPrefix("trailing:");
+            for (var entry : trailingStates.entrySet()) {
+                // key format: "trailing:SYMBOL:broker"
+                String[] parts = entry.getKey().split(":", 3);
+                if (parts.length == 3 && brokerName.equalsIgnoreCase(parts[2])) {
+                    trailingTargetManager.restoreFromEncoded(parts[1], entry.getValue());
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("[{}] Failed to restore trailing-target states: {}", profile.name(), e.getMessage());
+        }
         this.adaptivePositionSizer = new com.trading.sizing.AdaptivePositionSizer(config);
         this.timeDecayExitManager = new com.trading.exits.TimeDecayExitManager(config);
         this.momentumDetector = new com.trading.exits.MomentumAccelerationDetector(config);
@@ -2316,6 +2331,7 @@ public class ProfileManager implements Runnable {
         scalpHeldSymbols.remove(symbol);
         trailingTargetManager.removePosition(symbol);
         breakevenStopsActive.remove(symbol);
+        database.deleteBotState("trailing:" + symbol + ":" + brokerName);
     }
 
     private void handleSell(String symbol, double currentPrice, TradePosition position,
@@ -2431,6 +2447,13 @@ public class ProfileManager implements Runnable {
         if (updatedPosition.stopLoss() > position.stopLoss()) {
             portfolio.setPosition(symbol, Optional.of(updatedPosition));
             database.updateStop(symbol, brokerName, updatedPosition.stopLoss());
+            // Persist trailing-target state so it survives a JVM restart.
+            // Without this, the multi-level trail level resets to 0 on redeploy and the
+            // stop reverts to entry-time calculation, potentially giving back captured gains.
+            String trailingEncoded = trailingTargetManager.getEncodedState(symbol);
+            if (trailingEncoded != null) {
+                database.saveBotState("trailing:" + symbol + ":" + brokerName, trailingEncoded);
+            }
 
             logger.info("{} {}: Trailing stop updated: ${} -> ${}",
                 profilePrefix, symbol,

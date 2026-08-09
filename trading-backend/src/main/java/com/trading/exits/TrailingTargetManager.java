@@ -112,6 +112,44 @@ public class TrailingTargetManager {
     public void removePosition(String symbol) {
         trailingStates.remove(symbol);
     }
+
+    /**
+     * Encode current state as a compact string for DB persistence.
+     * Format: "currentStop,level,lockedPercent,partialTaken"
+     * Returns null if no state exists for the symbol.
+     */
+    public String getEncodedState(String symbol) {
+        TrailingState state = trailingStates.get(symbol);
+        if (state == null || state.currentStop <= 0) return null;
+        return String.format("%.6f,%d,%.6f,%b",
+            state.currentStop, state.level, state.lockedPercent, state.partialTaken);
+    }
+
+    /**
+     * Restore trailing state from a persisted encoded string (see getEncodedState).
+     * Called during startup to recover state lost on JVM restart.
+     */
+    public void restoreFromEncoded(String symbol, String encoded) {
+        if (encoded == null || encoded.isBlank()) return;
+        try {
+            String[] parts = encoded.split(",", 4);
+            if (parts.length < 4) return;
+            double currentStop = Double.parseDouble(parts[0]);
+            int level = Integer.parseInt(parts[1]);
+            double lockedPercent = Double.parseDouble(parts[2]);
+            boolean partialTaken = Boolean.parseBoolean(parts[3]);
+            TrailingState state = trailingStates.computeIfAbsent(symbol, k -> new TrailingState());
+            state.currentStop = currentStop;
+            state.level = level;
+            state.lockedPercent = lockedPercent;
+            state.partialTaken = partialTaken;
+            logger.info("Restored trailing state for {}: stop=${} level={} locked={}% partialTaken={}",
+                symbol, String.format("%.2f", currentStop), level,
+                String.format("%.1f", lockedPercent), partialTaken);
+        } catch (Exception e) {
+            logger.warn("Failed to restore trailing state for {} from '{}': {}", symbol, encoded, e.getMessage());
+        }
+    }
     
     /**
      * Internal state tracking for each position

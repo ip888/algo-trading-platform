@@ -289,7 +289,30 @@ public final class StrategyManager {
                 if (isMomentumAsset) {
                     // Momentum assets in strong bull: Use Momentum Strategy (buy strength)
                     activeStrategy = "Momentum (Strong Bull)";
-                    yield momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    var momSig = momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                    if (!(momSig instanceof TradingSignal.Hold)) yield momSig;
+                    // Momentum said HOLD — RSI is likely above 65 in an extended bull run.
+                    // In STRONG_BULL, RSI 65-72 is normal continuation; fall back to MACD.
+                    activeStrategy = "MACD Trend (Strong Bull, Mom Fallback)";
+                    var macdFallback = rsiFilteredBuy(
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.0),
+                        history, symbol, positionQty, 72.0);
+                    if (!(macdFallback instanceof TradingSignal.Hold)) yield macdFallback;
+                    // Last resort: high-confidence MTF with price above SMA-20 and RSI in range
+                    if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
+                        double sma20mtf = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
+                        double rsiMtf = RSIStrategy.calculateRSI(history, 14);
+                        if (currentPrice > sma20mtf && rsiMtf >= 38.0 && rsiMtf <= 75.0) {
+                            activeStrategy = "MTF Trend Entry (Strong Bull)";
+                            logger.info("{}: STRONG_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
+                                symbol, String.format("%.2f", currentPrice),
+                                String.format("%.2f", sma20mtf), String.format("%.1f", rsiMtf));
+                            yield new TradingSignal.Buy(String.format(
+                                "STRONG_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
+                                currentPrice, sma20mtf, rsiMtf));
+                        }
+                    }
+                    yield momSig; // HOLD
                 } else {
                     // Regular assets: MACD Trend Following, gated by RSI to prevent extended entries
                     activeStrategy = "MACD Trend";

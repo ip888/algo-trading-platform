@@ -134,10 +134,12 @@ class StrategyManagerTest {
         }
 
         @Test
-        @DisplayName("STRONG_BULL with momentum asset uses Momentum strategy")
+        @DisplayName("STRONG_BULL with momentum asset uses Momentum or MACD-fallback strategy")
         void strongBullMomentumAsset() {
             manager.evaluateWithHistory("GLD", price, 0.0, history, MarketRegime.STRONG_BULL);
-            assertEquals("Momentum (Strong Bull)", manager.getActiveStrategy());
+            String strategy = manager.getActiveStrategy();
+            assertTrue(strategy.contains("Strong Bull"),
+                "STRONG_BULL momentum asset should route through Strong Bull path, got: " + strategy);
         }
 
         @Test

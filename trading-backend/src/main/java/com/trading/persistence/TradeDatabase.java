@@ -100,6 +100,61 @@ public class TradeDatabase {
             "Schema migration: Added 'vix_at_entry' column");
         runMigration("ALTER TABLE trades ADD COLUMN breadth_at_entry REAL",
             "Schema migration: Added 'breadth_at_entry' column (% sectors advancing at entry)");
+        runMigration("ALTER TABLE trades ADD COLUMN entry_reason TEXT",
+            "Schema migration: Added 'entry_reason' column (signal description at entry)");
+        runMigration("ALTER TABLE trades ADD COLUMN exit_reason TEXT",
+            "Schema migration: Added 'exit_reason' column (stop_loss|take_profit|eod_cleanup|etc)");
+
+        // blocked_entries: persisted log of every rejected entry with the filter reason.
+        // 30-day TTL — pruned at startup. Answers "what did the bot NOT trade and why?"
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS blocked_entries (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts       TEXT    NOT NULL DEFAULT (datetime('now')),
+                symbol   TEXT    NOT NULL,
+                profile  TEXT,
+                reason   TEXT    NOT NULL,
+                price    REAL,
+                regime   TEXT,
+                vix      REAL
+            )""",
+            "Schema migration: Added blocked_entries table");
+        runMigration("CREATE INDEX IF NOT EXISTS idx_blocked_ts ON blocked_entries(ts)",
+            "Schema migration: Added idx_blocked_ts index");
+
+        // daily_summary: one row per trading day — permanent record, never pruned.
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS daily_summary (
+                date           TEXT PRIMARY KEY,
+                trades         INTEGER DEFAULT 0,
+                wins           INTEGER DEFAULT 0,
+                losses         INTEGER DEFAULT 0,
+                net_pnl        REAL    DEFAULT 0,
+                regime         TEXT,
+                vix_open       REAL,
+                blocked_count  INTEGER DEFAULT 0,
+                notes          TEXT
+            )""",
+            "Schema migration: Added daily_summary table");
+
+        // regime_log: timestamp of every regime change with confidence and context.
+        // 60-day TTL — pruned at startup.
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS regime_log (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts             TEXT    NOT NULL DEFAULT (datetime('now')),
+                regime         TEXT    NOT NULL,
+                confidence     REAL,
+                breadth        REAL,
+                trend          TEXT,
+                volume_profile TEXT
+            )""",
+            "Schema migration: Added regime_log table");
+        runMigration("CREATE INDEX IF NOT EXISTS idx_regime_ts ON regime_log(ts)",
+            "Schema migration: Added idx_regime_ts index");
+
+        // Prune old observability data on startup so the volume doesn't grow unbounded.
+        pruneOldObservabilityData();
 
         // bot_state: lightweight key-value store for in-memory state that must survive restarts.
         // Covers: post-loss cooldowns, consecutive-loss counts, circuit-breaker drawdown.
@@ -1249,6 +1304,212 @@ public class TradeDatabase {
             ps.executeUpdate();
         } catch (SQLException e) {
             logger.warn("deleteBotState failed for key '{}': {}", key, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    // ── exit_reason / entry_reason ───────────────────────────────────────────
+
+    /**
+     * Overload of closeTrade that also stamps the exit_reason on every closed lot.
+     * Call this instead of the 5-arg version whenever the reason is known at the call site.
+     */
+    public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl,
+                           String broker, String exitReason) {
+        record Lot(int id, double entryPrice, double quantity) {}
+        String selectSql = "SELECT id, entry_price, quantity FROM trades " +
+                           "WHERE symbol = ? AND broker = ? AND status = 'OPEN'";
+        String updateSql = "UPDATE trades SET exit_time = ?, exit_price = ?, pnl = ?, " +
+                           "status = 'CLOSED', exit_reason = ? WHERE id = ?";
+        long stamp = lock.writeLock();
+        try {
+            var lots = new java.util.ArrayList<Lot>();
+            try (var sel = connection.prepareStatement(selectSql)) {
+                sel.setString(1, symbol);
+                sel.setString(2, broker);
+                try (var rs = sel.executeQuery()) {
+                    while (rs.next()) {
+                        lots.add(new Lot(rs.getInt("id"), rs.getDouble("entry_price"), rs.getDouble("quantity")));
+                    }
+                }
+            }
+            if (lots.isEmpty()) {
+                logger.warn("closeTrade(reason): no open trade found for {}", symbol);
+                return;
+            }
+            try (var upd = connection.prepareStatement(updateSql)) {
+                for (Lot lot : lots) {
+                    double lotPnl = (exitPrice - lot.entryPrice()) * lot.quantity();
+                    upd.setString(1, exitTime.toString());
+                    upd.setDouble(2, exitPrice);
+                    upd.setDouble(3, lotPnl);
+                    upd.setString(4, exitReason);
+                    upd.setInt(5, lot.id());
+                    upd.addBatch();
+                }
+                upd.executeBatch();
+            }
+            logger.atInfo()
+                .addKeyValue("symbol", symbol)
+                .addKeyValue("exitPrice", exitPrice)
+                .addKeyValue("exitReason", exitReason)
+                .log("[TRADE_CLOSE] Trade closed");
+        } catch (SQLException e) {
+            logger.error("closeTrade(reason) failed for {}", symbol, e);
+            closeTrade(symbol, exitTime, exitPrice, pnl, broker); // fallback
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Update entry_reason on the most recent OPEN trade (called immediately after recordTrade). */
+    public void setEntryReason(String symbol, String broker, String reason) {
+        String sql = "UPDATE trades SET entry_reason = ? " +
+                     "WHERE id = (SELECT id FROM trades WHERE symbol = ? AND broker = ? " +
+                     "            AND status = 'OPEN' ORDER BY entry_time DESC LIMIT 1)";
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, reason);
+            ps.setString(2, symbol);
+            ps.setString(3, broker);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warn("setEntryReason failed for {}: {}", symbol, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    // ── blocked_entries ──────────────────────────────────────────────────────
+
+    /** Persist a blocked entry decision for post-session analysis. Non-fatal — never throws. */
+    public void saveBlockedEntry(String symbol, String profile, String reason,
+                                 double price, String regime, double vix) {
+        String sql = "INSERT INTO blocked_entries (symbol, profile, reason, price, regime, vix) " +
+                     "VALUES (?, ?, ?, ?, ?, ?)";
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, symbol);
+            ps.setString(2, profile);
+            ps.setString(3, reason);
+            ps.setDouble(4, price);
+            ps.setString(5, regime);
+            ps.setDouble(6, vix);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warn("saveBlockedEntry failed for {}: {}", symbol, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    // ── daily_summary ────────────────────────────────────────────────────────
+
+    /** Upsert today's trading summary. Called once at EOD cleanup completion. */
+    public void saveDailySummary(String date, int trades, int wins, int losses,
+                                 double netPnl, String regime, double vixOpen, int blockedCount) {
+        String sql = """
+            INSERT INTO daily_summary (date, trades, wins, losses, net_pnl, regime, vix_open, blocked_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                trades = excluded.trades, wins = excluded.wins, losses = excluded.losses,
+                net_pnl = excluded.net_pnl, regime = excluded.regime,
+                vix_open = excluded.vix_open, blocked_count = excluded.blocked_count
+            """;
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, date);
+            ps.setInt(2, trades);
+            ps.setInt(3, wins);
+            ps.setInt(4, losses);
+            ps.setDouble(5, netPnl);
+            ps.setString(6, regime);
+            ps.setDouble(7, vixOpen);
+            ps.setInt(8, blockedCount);
+            ps.executeUpdate();
+            logger.info("[DAILY_SUMMARY] {} trades={} wins={} losses={} pnl=${} regime={} blocked={}",
+                date, trades, wins, losses, String.format("%.2f", netPnl), regime, blockedCount);
+        } catch (SQLException e) {
+            logger.warn("saveDailySummary failed: {}", e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Count today's closed trades (wins and losses separately). Returns int[]{total, wins, losses}. */
+    public int[] getTodayTradeCounts() {
+        String sql = "SELECT COUNT(*) as total, " +
+                     "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, " +
+                     "SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses " +
+                     "FROM trades WHERE status = 'CLOSED' AND DATE(exit_time) = DATE('now')";
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql);
+             var rs = ps.executeQuery()) {
+            if (rs.next()) {
+                return new int[]{rs.getInt("total"), rs.getInt("wins"), rs.getInt("losses")};
+            }
+        } catch (SQLException e) {
+            logger.warn("getTodayTradeCounts failed: {}", e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return new int[]{0, 0, 0};
+    }
+
+    /** Count today's blocked entries. */
+    public int getTodayBlockedCount() {
+        String sql = "SELECT COUNT(*) as cnt FROM blocked_entries WHERE DATE(ts) = DATE('now')";
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql);
+             var rs = ps.executeQuery()) {
+            if (rs.next()) return rs.getInt("cnt");
+        } catch (SQLException e) {
+            logger.warn("getTodayBlockedCount failed: {}", e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return 0;
+    }
+
+    // ── regime_log ───────────────────────────────────────────────────────────
+
+    /** Record a regime change. Non-fatal — never throws. */
+    public void saveRegimeLog(String regime, double confidence, double breadth,
+                              String trend, String volumeProfile) {
+        String sql = "INSERT INTO regime_log (regime, confidence, breadth, trend, volume_profile) " +
+                     "VALUES (?, ?, ?, ?, ?)";
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, regime);
+            ps.setDouble(2, confidence);
+            ps.setDouble(3, breadth);
+            ps.setString(4, trend);
+            ps.setString(5, volumeProfile);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warn("saveRegimeLog failed: {}", e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    // ── TTL pruning ──────────────────────────────────────────────────────────
+
+    /** Remove stale observability data on startup. Called once from createTables(). */
+    private void pruneOldObservabilityData() {
+        long stamp = lock.writeLock();
+        try (var stmt = connection.createStatement()) {
+            int blockedDeleted = stmt.executeUpdate(
+                "DELETE FROM blocked_entries WHERE ts < datetime('now', '-30 days')");
+            int regimeDeleted = stmt.executeUpdate(
+                "DELETE FROM regime_log WHERE ts < datetime('now', '-60 days')");
+            if (blockedDeleted > 0 || regimeDeleted > 0) {
+                logger.info("Pruned {} blocked_entries and {} regime_log rows older than TTL",
+                    blockedDeleted, regimeDeleted);
+            }
+        } catch (SQLException e) {
+            logger.warn("pruneOldObservabilityData failed (non-fatal): {}", e.getMessage());
         } finally {
             lock.unlockWrite(stamp);
         }

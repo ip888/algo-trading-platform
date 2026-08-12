@@ -7,6 +7,25 @@
     </encoder>
   </appender>
 
+  <!--
+    Rolling daily log files. In production (Fly.io) DATA_DIR=/data so logs go to /data/logs/.
+    In local/test environments DATA_DIR is unset, defaulting to /tmp — always writable.
+    14-day history, 200 MB total cap. Download: fly sftp get /data/logs/trading-YYYY-MM-DD.log
+    Grep markers: grep '\[BUY_BLOCKED\]' /data/logs/trading-2026-08-11.log
+  -->
+  <property name="LOG_DIR" value="${DATA_DIR:-/tmp}/logs"/>
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${LOG_DIR}/trading.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>${LOG_DIR}/trading-%d{yyyy-MM-dd}.log</fileNamePattern>
+      <maxHistory>14</maxHistory>
+      <totalSizeCap>200MB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{30} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
   <!-- Silence verbose third-party libraries -->
   <logger name="org.eclipse.jetty"             level="WARN"/>
   <logger name="io.javalin"                    level="WARN"/>
@@ -20,6 +39,7 @@
 
   <root level="WARN">
     <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="FILE"/>
   </root>
 
 </configuration>

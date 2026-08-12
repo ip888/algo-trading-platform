@@ -501,8 +501,10 @@ public class ProfileManager implements Runnable {
         List<String> targetSymbols;
         double currentVix;
         
+        com.trading.analysis.MarketRegimeDetector.MarketRegimeAnalysis lastRegimeAnalysis = null;
         if (config.isRegimeDetectionEnabled()) {
             var regimeAnalysis = regimeDetector.getCurrentRegime();
+            lastRegimeAnalysis = regimeAnalysis;
             regime = regimeAnalysis.regime();
             currentVix = regimeAnalysis.vix();
 
@@ -584,6 +586,18 @@ public class ProfileManager implements Runnable {
 
         // Store latest market state for use in profit target checks
         this.latestVix = currentVix;
+        if (regime != this.latestRegime) {
+            logger.info("[REGIME_CHANGE] {} {}→{} vix={}", profile.name(),
+                this.latestRegime != null ? this.latestRegime.name() : "INIT", regime.name(),
+                String.format("%.1f", currentVix));
+            var ra = lastRegimeAnalysis;
+            database.saveRegimeLog(
+                regime.name(),
+                ra != null ? ra.confidence() : 1.0,
+                ra != null ? ra.breadth().strength() : 0.0,
+                ra != null ? ra.trend().direction().name() : "UNKNOWN",
+                ra != null ? ra.volume().trend().name() : "UNKNOWN");
+        }
         this.latestRegime = regime;
         this.latestEquity = equity;
 
@@ -937,7 +951,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Max loss exit order placed for {} (attempt {}/{})", profilePrefix, symbol, attempt+1, maxAttempts);
                         // Record trade close
                         double exitPnl = pos.calculatePnL(currentPrice);
-                        database.closeTrade(symbol, Instant.now(), currentPrice, exitPnl, brokerName);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, exitPnl, brokerName, "max_loss");
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]",
                                 profile.name(), symbol, lossPercent, attempt+1),
@@ -980,7 +994,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Time-based exit order placed for {}", profilePrefix, symbol);
 
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_hold_time");
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
                         applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "time-based");
@@ -1327,8 +1341,7 @@ public class ProfileManager implements Runnable {
                 long remHours = postLossCooldown.remainingMs(symbol, now) / (60L * 60 * 1000);
                 int losses = postLossCooldown.getConsecutiveLosses(symbol);
                 String reason = String.format("post-loss cooldown: %dh remaining (%d consec losses)", remHours, losses);
-                blockedBuys.put(symbol, reason);
-                logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                blockBuy(symbol, reason, currentPrice);
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] ⛔ %s post-loss cooldown: %dh left (%d consec losses)",
                         profile.name(), symbol, remHours, losses),
@@ -1347,8 +1360,7 @@ public class ProfileManager implements Runnable {
                 && !(scalpOverrides != null)  // scalpOverrides non-null only during ScalpBuy execution
                 && marketHoursFilter.isInOpeningWindow(config.getNoTradeOpenWindowMinutes())) {
             String reason = "opening-window block: first " + config.getNoTradeOpenWindowMinutes() + "min";
-            blockedBuys.put(symbol, reason);
-            logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+            blockBuy(symbol, reason, currentPrice);
             TradingWebSocketHandler.broadcastActivity(
                 String.format("[%s] ⛔ %s blocked: first %d min after open",
                     profile.name(), symbol, config.getNoTradeOpenWindowMinutes()),
@@ -1404,8 +1416,7 @@ public class ProfileManager implements Runnable {
                     String reason = String.format(
                         "inverse ETF blocked — VIX %.1f < BEAR_ENTRY_VIX_MINIMUM %.1f (STRONG_BEAR requires panic VIX)",
                         currentVix, bearVixMin);
-                    blockedBuys.put(symbol, reason);
-                    logger.warn("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                    blockBuy(symbol, reason, currentPrice);
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] ⛔ %s blocked: VIX %.1f too low for STRONG_BEAR entry (min %.0f)",
                             profile.name(), symbol, currentVix, bearVixMin),
@@ -1423,8 +1434,7 @@ public class ProfileManager implements Runnable {
                 String reason = String.format(
                     "inverse ETF blocked — bearish regime persistence %dmin < required %dmin (%d min remaining)",
                     elapsedMs / 60_000L, config.getBearEntryPersistenceMinutes(), remainingMin);
-                blockedBuys.put(symbol, reason);
-                logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                blockBuy(symbol, reason, currentPrice);
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] ⛔ %s blocked: bearish regime not yet confirmed (%d min remaining)",
                         profile.name(), symbol, remainingMin),
@@ -1447,8 +1457,7 @@ public class ProfileManager implements Runnable {
                     String reason = String.format("earnings blackout: ±%d/±%dh window",
                         config.getEarningsBlackoutHoursBefore(),
                         config.getEarningsBlackoutHoursAfter());
-                    blockedBuys.put(symbol, reason);
-                    logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                    blockBuy(symbol, reason, currentPrice);
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] ⛔ %s earnings blackout active", profile.name(), symbol),
                         "WARN");
@@ -1515,10 +1524,7 @@ public class ProfileManager implements Runnable {
                 boolean isEarningsGap = gapDownPct > 5.0;
                 if (gapDownPct >= gapDownThreshold && !isEarningsGap) {
                     String reason = String.format("gap-down %.1f%% from $%.2f", gapDownPct, prevClose);
-                    blockedBuys.put(symbol, reason);
-                    logger.info("{} {} BUY BLOCKED — gap-down {}% from yesterday close ${} (threshold {}%)",
-                        profilePrefix, symbol, String.format("%.1f", gapDownPct),
-                        String.format("%.2f", prevClose), String.format("%.1f", gapDownThreshold));
+                    blockBuy(symbol, reason, currentPrice);
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] ⛔ BUY BLOCKED: %s gap-down %.1f%% from $%.2f",
                             profile.name(), symbol, gapDownPct, prevClose),
@@ -1557,8 +1563,7 @@ public class ProfileManager implements Runnable {
                 if (hourlyDeclinePct >= 0.3 && currentVsPrevHour >= 0.2) {
                     String reason = String.format("intraday downtrend: last hour -%.1f%%, now -%.1f%% from prev hour",
                         hourlyDeclinePct, currentVsPrevHour);
-                    blockedBuys.put(symbol, reason);
-                    logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                    blockBuy(symbol, reason, currentPrice);
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] ⛔ BUY BLOCKED: %s %s", profile.name(), symbol, reason),
                         "WARN"
@@ -1580,8 +1585,7 @@ public class ProfileManager implements Runnable {
                             String reason = String.format(
                                 "falling knife: $%.2f is %.1f%% below session high $%.2f and %.1f%% below open $%.2f",
                                 currentPrice, pctBelowHigh, sessionHigh, -pctVsOpen, sessionOpen);
-                            blockedBuys.put(symbol, reason);
-                            logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                            blockBuy(symbol, reason, currentPrice);
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] ⛔ BUY BLOCKED: %s %s", profile.name(), symbol, reason),
                                 "WARN");
@@ -1634,8 +1638,7 @@ public class ProfileManager implements Runnable {
                     if (relatedHits >= maxConc) {
                         String reason = String.format("correlation cap: %d existing positions ≥%.2f corr (max %d)",
                             relatedHits, thr, maxConc);
-                        blockedBuys.put(symbol, reason);
-                        logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                        blockBuy(symbol, reason, currentPrice);
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] ⛔ %s correlation cap: %d ≥%.2f (max %d)",
                                 profile.name(), symbol, relatedHits, thr, maxConc),
@@ -2303,6 +2306,14 @@ public class ProfileManager implements Runnable {
             currentVix,
             breadth
         );
+        // Stamp entry_reason: strategy tag + VIX + regime so post-analysis can filter by conditions.
+        String entryReason = String.format("%s | regime=%s vix=%.1f sl=%.2f tp=%.2f",
+            entryStrategyTag, regime != null ? regime.name() : "UNKNOWN", currentVix, stopLoss, takeProfit);
+        database.setEntryReason(symbol, brokerName, entryReason);
+        logger.info("[TRADE_OPEN] {} {} qty={} entry=${} sl=${} tp=${} reason={}",
+            profile.name(), symbol, String.format("%.3f", positionSize),
+            String.format("%.2f", currentPrice), String.format("%.2f", stopLoss),
+            String.format("%.2f", takeProfit), entryStrategyTag);
         // Broadcast trade event
         TradingWebSocketHandler.broadcastTradeEvent(
             symbol, "BUY", currentPrice, positionSize,
@@ -2363,9 +2374,9 @@ public class ProfileManager implements Runnable {
 
         double pnl = position.calculatePnL(currentPrice);
 
-        logger.info("{} {}: SELLING - Entry=${}, Exit=${}, P&L=${}",
-            profilePrefix, symbol, position.entryPrice(), currentPrice,
-            String.format("%.2f", pnl));
+        logger.info("[TRADE_CLOSE] {} {} exit=${} entry=${} pnl=${} reason=signal_sell",
+            profile.name(), symbol, String.format("%.2f", currentPrice),
+            String.format("%.2f", position.entryPrice()), String.format("%.2f", pnl));
 
         // Place sell order (skip if in test mode)
         if (testSimulator == null) {
@@ -2407,6 +2418,8 @@ public class ProfileManager implements Runnable {
                 database.saveBotState("cooldown:" + symbol,
                     expiryMs + "," + consecLosses);
                 database.saveBotState("consec_sl:" + symbol, String.valueOf(consecLosses));
+                logger.info("[COOLDOWN_START] {} {} post-loss cooldown={}h consec={}",
+                    profile.name(), symbol, applied / (60L * 60 * 1000), consecLosses);
             }
         } else {
             // Profitable exit — allow free re-entry at any price, reset consecutive SL counter.
@@ -2437,7 +2450,7 @@ public class ProfileManager implements Runnable {
         }
 
         // Close trade in database
-        database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
+        database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName, "signal_sell");
         updateDailyPnL(profilePrefix, pnl);
 
         // Broadcast trade event
@@ -2603,7 +2616,7 @@ public class ProfileManager implements Runnable {
                                     double earningsPnl = (currentPrice - entryPrice) * qty;
                                     portfolio.setPosition(symbol, Optional.empty());
                                     clearPositionTracking(symbol);
-                                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, earningsPnl, brokerName);
+                                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, earningsPnl, brokerName, "pre_earnings");
                                     updateDailyPnL(profilePrefix, earningsPnl);
                                     applyPostExitCooldown(symbol, currentPrice, earningsPnl, profilePrefix, "PRE_EARNINGS");
                                     TradingWebSocketHandler.broadcastActivity(
@@ -2669,7 +2682,7 @@ public class ProfileManager implements Runnable {
                                 double tradePnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
                                 clearPositionTracking(symbol);
-                                database.closeTrade(symbol, java.time.Instant.now(), currentPrice, tradePnl, brokerName);
+                                database.closeTrade(symbol, java.time.Instant.now(), currentPrice, tradePnl, brokerName, "strategy_exit");
                                 updateDailyPnL(profilePrefix, tradePnl);
                                 // Set re-entry cooldown after full exit
                                 stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
@@ -2755,7 +2768,7 @@ public class ProfileManager implements Runnable {
                                 double pnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
                                 clearPositionTracking(symbol);
-                                database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
+                                database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName, "regime_flip");
                                 updateDailyPnL(profilePrefix, pnl);
                                 applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
                                 pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
@@ -2873,7 +2886,7 @@ public class ProfileManager implements Runnable {
                         double maxLossPnl = (currentPrice - entryPrice) * qty;
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
-                        database.closeTrade(symbol, java.time.Instant.now(), currentPrice, maxLossPnl, brokerName);
+                        database.closeTrade(symbol, java.time.Instant.now(), currentPrice, maxLossPnl, brokerName, "max_loss");
                         updateDailyPnL(profilePrefix, maxLossPnl);
                         // Set re-entry cooldown + per-symbol cooldown + circuit-breaker tracking.
                         applyPostExitCooldown(symbol, currentPrice, maxLossPnl, profilePrefix, "MAX_LOSS_UNTRACKED");
@@ -3148,7 +3161,7 @@ public class ProfileManager implements Runnable {
                         java.time.Instant fillTime = filledAtStr.isEmpty()
                             ? java.time.Instant.now()
                             : java.time.Instant.parse(filledAtStr);
-                        database.closeTrade(sym, fillTime, fillPrice, 0, brokerName);
+                        database.closeTrade(sym, fillTime, fillPrice, 0, brokerName, "reconciliation");
                         logger.info("{} Orphan recovery: closed {} with real fill price ${} from order history",
                             profilePrefix, sym, String.format("%.2f", fillPrice));
                     }
@@ -3508,7 +3521,7 @@ public class ProfileManager implements Runnable {
                 
                 // Record trade close
                 double currentPrice = Math.abs(pos.marketValue() / qty);
-                database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName);
+                database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_positions_cleanup");
                 
             } catch (Exception e) {
                 logger.error("{} Failed to close {} during cleanup", profilePrefix, symbol, e);
@@ -3614,7 +3627,7 @@ public class ProfileManager implements Runnable {
                     client.placeOrder(symbol, exitQty, "sell", "market", "day", null);
 
                     double pnlDollars = (currentPrice - entryPrice) * exitQty;
-                    database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
+                    database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName, "eod_profit_lock");
                     if (!eodDecision.isPartial()) {
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
@@ -3707,7 +3720,7 @@ public class ProfileManager implements Runnable {
                         CircuitBreakerState cbTp = circuitBreakers.get(brokerName);
                         if (cbTp != null) cbTp.recordTrade(pnlDollars);
 
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName);
+                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName, "take_profit");
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
 
@@ -3867,7 +3880,7 @@ public class ProfileManager implements Runnable {
                     // Close DB record immediately so hasOpenTrade() returns false on the next
                     // cycle. Without this, orphan cleanup runs 1-2 cycles later, leaving a window
                     // where isGoodEntryTime() is true + hasOpenTrade() is false → re-entry.
-                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName);
+                    database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName, "eod_cleanup");
 
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] EOD EXIT: %s - Closed %.3f shares | P&L: $%.2f (%.2f%%)",
@@ -3901,6 +3914,43 @@ public class ProfileManager implements Runnable {
                     logger.warn("{} ✅ END OF DAY EXIT COMPLETE - {} carried overnight: {}",
                         profilePrefix, carriedSymbols.size(), carriedSymbols);
                 }
+                // Write daily summary to DB and send push notification (async, non-blocking).
+                String eodRegime = latestRegime != null ? latestRegime.name() : "UNKNOWN";
+                double eodVix = latestVix;
+                String eodDate = today.toString();
+                Thread.ofVirtual().name("eod-summary").start(() -> {
+                    try {
+                        var counts = database.getTodayTradeCounts();
+                        double netPnl = database.getTodayPnL();
+                        int blocked = database.getTodayBlockedCount();
+                        database.saveDailySummary(eodDate, counts[0], counts[1], counts[2],
+                            netPnl, eodRegime, eodVix, blocked);
+                        // ntfy.sh push notification — set NTFY_TOPIC env var to enable.
+                        String ntfyTopic = System.getenv("NTFY_TOPIC");
+                        if (ntfyTopic != null && !ntfyTopic.isBlank()) {
+                            String msg = String.format(
+                                "[%s] EOD %s: %d trades (%d✓ %d✗) P&L $%.2f | regime=%s blocked=%d",
+                                profile.name(), eodDate, counts[0], counts[1], counts[2],
+                                netPnl, eodRegime, blocked);
+                            try {
+                                var req = java.net.http.HttpRequest.newBuilder()
+                                    .uri(java.net.URI.create("https://ntfy.sh/" + ntfyTopic))
+                                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(msg))
+                                    .header("Title", "Trading Bot EOD")
+                                    .header("Priority", netPnl >= 0 ? "default" : "high")
+                                    .build();
+                                java.net.http.HttpClient.newHttpClient()
+                                    .send(req, java.net.http.HttpResponse.BodyHandlers.discarding());
+                                logger.info("[DAILY_SUMMARY] ntfy push sent: {}", msg);
+                            } catch (Exception ntfyEx) {
+                                logger.warn("ntfy push failed: {}", ntfyEx.getMessage());
+                            }
+                        }
+                    } catch (Exception ex) {
+                        logger.warn("EOD summary thread failed: {}", ex.getMessage());
+                    }
+                });
+
                 // Run end-of-session Claude review after all exits are confirmed complete.
                 // Async — non-blocking so EOD latency is unaffected.
                 String claudeApiKey = System.getenv("CLAUDE_API_KEY");
@@ -4167,15 +4217,26 @@ public class ProfileManager implements Runnable {
         var now = java.time.ZonedDateTime.now(NY);
         var closeToday = now.toLocalDate().atTime(16, 0).atZone(NY);
         if (now.isBefore(closeToday)) {
-            // Still in trading day — block until today's close
             return java.time.Duration.between(now, closeToday).toMillis();
         }
-        // After close — block only until next market open (9:30 AM next weekday)
         var nextOpen = closeToday.toLocalDate().plusDays(1).atTime(9, 30).atZone(NY);
         while (nextOpen.getDayOfWeek() == java.time.DayOfWeek.SATURDAY ||
                nextOpen.getDayOfWeek() == java.time.DayOfWeek.SUNDAY) {
             nextOpen = nextOpen.plusDays(1);
         }
         return java.time.Duration.between(now, nextOpen).toMillis();
+    }
+
+    /**
+     * Central blocked-buy handler: stamps blockedBuys map, persists to DB, and emits
+     * a structured [BUY_BLOCKED] log line. All entry gates call this instead of
+     * writing to blockedBuys + logger separately, so every rejection is captured.
+     */
+    private void blockBuy(String symbol, String reason, double price) {
+        blockedBuys.put(symbol, reason);
+        logger.info("[BUY_BLOCKED] {} {} price=${} reason={}",
+            profile.name(), symbol, String.format("%.2f", price), reason);
+        database.saveBlockedEntry(symbol, profile.name(), reason, price,
+            latestRegime != null ? latestRegime.name() : "UNKNOWN", latestVix);
     }
 }

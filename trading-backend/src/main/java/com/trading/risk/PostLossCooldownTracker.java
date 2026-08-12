@@ -99,4 +99,10 @@ public final class PostLossCooldownTracker {
         cooldownExpiry.put(symbol, expiryMs);
         if (consecLosses > 0) consecutiveLosses.put(symbol, consecLosses);
     }
+
+    /** Restore consecutive-loss count without activating a cooldown (called for expired cooldowns). */
+    public void restoreLossCount(String symbol, int count) {
+        if (symbol == null || symbol.isBlank() || count <= 0) return;
+        consecutiveLosses.put(symbol, count);
+    }
 }

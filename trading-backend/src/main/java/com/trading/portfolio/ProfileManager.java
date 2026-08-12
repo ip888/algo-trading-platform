@@ -1565,6 +1565,30 @@ public class ProfileManager implements Runnable {
                     );
                     return;
                 }
+
+                // Falling-knife filter: catches "dead cat bounce" entries where a 1-hour bounce
+                // fires a MACD signal but the stock is still deep in a session downtrend.
+                // NVDA example (Aug 10 2026): high=$222, re-entered at $218 (-1.8%) after 3h cooldown.
+                // Exempt scalp — ScalpStrategy already requires price > VWAP as its own intraday filter.
+                if (scalpOverrides == null) {
+                    double sessionHigh = intradayBars.stream().mapToDouble(b -> b.high()).max().orElse(0.0);
+                    double sessionOpen = intradayBars.get(0).open();
+                    if (sessionHigh > 0 && sessionOpen > 0) {
+                        double pctBelowHigh = (sessionHigh - currentPrice) / sessionHigh * 100.0;
+                        double pctVsOpen    = (currentPrice - sessionOpen) / sessionOpen * 100.0;
+                        if (pctBelowHigh >= 1.5 && pctVsOpen < -0.5) {
+                            String reason = String.format(
+                                "falling knife: $%.2f is %.1f%% below session high $%.2f and %.1f%% below open $%.2f",
+                                currentPrice, pctBelowHigh, sessionHigh, -pctVsOpen, sessionOpen);
+                            blockedBuys.put(symbol, reason);
+                            logger.info("{} {} BUY BLOCKED — {}", profilePrefix, symbol, reason);
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] ⛔ BUY BLOCKED: %s %s", profile.name(), symbol, reason),
+                                "WARN");
+                            return;
+                        }
+                    }
+                }
             }
         } catch (Exception e) {
             logger.debug("{} Could not check intraday trend for {}: {}", profilePrefix, symbol, e.getMessage());
@@ -4048,7 +4072,17 @@ public class ProfileManager implements Runnable {
                 int consecLosses = Integer.parseInt(parts[1].trim());
                 if (expiryMs <= now) {
                     database.deleteBotState(entry.getKey());
-                    database.deleteBotState("consec_sl:" + symbol);
+                    // Keep consec_sl — count resets only on a win, not on cooldown expiry.
+                    // Bug: previously deleted consec_sl here, so NVDA re-entered every morning
+                    // with count=0, always getting the base 6h cooldown instead of 12h extended.
+                    if (consecLosses > 0) {
+                        consecutiveStopLosses.put(symbol, consecLosses);
+                        tracker.restoreLossCount(symbol, consecLosses);
+                        logger.info("[{}] Cooldown expired for {} — {} consec losses carried forward (resets on win only)",
+                            profile.name(), symbol, consecLosses);
+                    } else {
+                        database.deleteBotState("consec_sl:" + symbol);
+                    }
                     expired++;
                     continue;
                 }

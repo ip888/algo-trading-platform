@@ -74,9 +74,12 @@ public class PortfolioRebalancer {
             currentAllocations.put(entry.getKey(), allocation);
         }
         
-        // Target: equal weight allocation
+        // Target: the configured fixed-sizing percent per position.
+        // Equal weight (1/N) is wrong here — it targets 100% in 1 position when the bot
+        // intentionally sizes each trade at 20% of equity. Using the fixed percent means
+        // 1 position at 20% = 0% drift, 2 positions at 20% each = 0% drift, as expected.
         int numPositions = currentPositions.size();
-        double targetAllocation = numPositions > 0 ? 1.0 / numPositions : 0.0;
+        double targetAllocation = config.getPositionSizingFixedPercent();
         
         // Calculate drifts
         List<AllocationDrift> drifts = new ArrayList<>();
@@ -147,7 +150,7 @@ public class PortfolioRebalancer {
         Map<String, Double> orders = new HashMap<>();
         
         int numPositions = currentPositions.size();
-        double targetValue = totalEquity / numPositions;
+        double targetValue = totalEquity * config.getPositionSizingFixedPercent();
         
         for (var entry : currentPositions.entrySet()) {
             String symbol = entry.getKey();

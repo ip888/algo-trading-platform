@@ -57,15 +57,11 @@ public final class RiskManager {
         // Log tier info on initialization
         CapitalTierManager.logTierInfo(initialCapital);
 
-        logger.info("RiskManager initialized: SL={}%, TP={}%, Trail={}%, MaxDD={}%",
+        logger.debug("RiskManager initialized: SL={}%, TP={}%, Trail={}%, MaxDD={}%",
             String.format("%.2f", stopLossPct * 100),
             String.format("%.2f", takeProfitPct * 100),
             String.format("%.2f", trailingStopPct * 100),
             String.format("%.1f", maxDrawdown * 100));
-
-        if (positionSizer != null) {
-            logger.info("RiskManager initialized with AdvancedPositionSizer");
-        }
     }
     
     /**

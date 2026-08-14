@@ -785,19 +785,15 @@ public class ProfileManager implements Runnable {
         // Evaluate and adjust parameters autonomously
         adaptiveManager.evaluateAndAdjust();
         
-        // Analyze portfolio correlation (weekly)
+        // Analyze correlation of OPEN positions only (not full watchlist)
         if (portfolio.getActivePositionCount() >= 2) {
             try {
-                var symbols = portfolio.getSymbols();
-                var correlation = correlationCalculator.analyzePortfolio(symbols);
-                
+                var openSymbols = new java.util.ArrayList<>(portfolio.getActiveStoredSymbols());
+                var correlation = correlationCalculator.analyzePortfolio(openSymbols);
                 if (!correlation.highCorrelations().isEmpty()) {
-                    logger.warn("{} ⚠️ High correlation detected in portfolio (diversification: {})",
-                        profilePrefix, String.format("%.2f", correlation.diversificationScore()));
+                    logger.debug("{} Open position correlation: diversification={}", profilePrefix,
+                        String.format("%.2f", correlation.diversificationScore()));
                 }
-                
-                logger.debug("{} Portfolio diversification score: {}",
-                    profilePrefix, String.format("%.2f", correlation.diversificationScore()));
             } catch (Exception e) {
                 logger.debug("{} Could not analyze correlation: {}", profilePrefix, e.getMessage());
             }
@@ -3605,7 +3601,6 @@ public class ProfileManager implements Runnable {
             
             // ========== PHASE 2 EXIT STRATEGIES ==========
             // Create temporary position for Phase 2 exit evaluation
-            // Use RiskManager to get configured stop/target values
             var riskManager = new RiskManager(latestEquity > 0 ? latestEquity : capital);
             var tempPosition = new TradePosition(
                 symbol,

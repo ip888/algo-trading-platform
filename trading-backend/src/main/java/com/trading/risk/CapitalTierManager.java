@@ -207,10 +207,7 @@ public final class CapitalTierManager {
      */
     public static void logTierInfo(double equity) {
         TierParameters params = getParameters(equity);
-        logger.info("═══════════════════════════════════════════════════════");
-        logger.info("💰 Capital Tier Analysis for ${}", String.format("%.2f", equity));
-        logger.info("   {}", params.getSummary());
-        logger.info("   {}", params.recommendation());
-        logger.info("═══════════════════════════════════════════════════════");
+        logger.debug("Capital tier for ${}: {} — {}", String.format("%.2f", equity),
+            params.getSummary(), params.recommendation());
     }
 }

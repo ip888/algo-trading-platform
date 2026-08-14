@@ -180,7 +180,10 @@
       "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml test)",
       "Bash(mvn -q -DfailOnError=false -e compile -Dmaven.compiler.compilerArgs=\"\")",
       "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml clean compile)",
-      "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml clean test)"
+      "Bash(mvn -f /Users/igor/projects/java-edu/trading-backend/pom.xml clean test)",
+      "Bash(sqlite3 /tmp/trades_may19.db ' *)",
+      "Bash(/usr/libexec/java_home -v 25)",
+      "Bash(JAVA_HOME=$\\(/usr/libexec/java_home -v 25 || /usr/libexec/java_home\\) mvn test --no-transfer-progress -q)"
     ],
     "additionalDirectories": [
       "/Users/igor/.claude/plans",

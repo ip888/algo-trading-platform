@@ -2641,6 +2641,29 @@ public class ProfileManager implements Runnable {
                         }
                     }
 
+                    // Flat-position time decay: exit stalled positions held N hours with < threshold% P&L.
+                    // Frees capital for better opportunities instead of waiting for EOD exit.
+                    if (!scalpHeldSymbols.contains(symbol) && timeDecayExitManager.shouldExit(position, currentPrice)) {
+                        String tdReason = timeDecayExitManager.getExitReason(position, currentPrice);
+                        logger.info("{} ⏰ TIME-DECAY EXIT: {} — {}", profilePrefix, symbol, tdReason);
+                        try {
+                            cancelExistingOrders(profilePrefix, symbol);
+                            client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
+                            double tdPnl = (currentPrice - entryPrice) * qty;
+                            portfolio.setPosition(symbol, Optional.empty());
+                            clearPositionTracking(symbol);
+                            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, tdPnl, brokerName, "time_decay");
+                            updateDailyPnL(profilePrefix, tdPnl);
+                            applyPostExitCooldown(symbol, currentPrice, tdPnl, profilePrefix, "TIME_DECAY");
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] ⏰ TIME-DECAY EXIT: %s — %s", profile.name(), symbol, tdReason), "WARN");
+                            pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            continue;
+                        } catch (Exception e) {
+                            logger.error("{} Time-decay exit failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                        }
+                    }
+
                     // Evaluate exit decision using enhanced strategy.
                     // Scalp positions bypass partial exits and scale-out at 1R — they exit
                     // cleanly at the stored 0.40% TP or 0.25% SL as a single full-size order.

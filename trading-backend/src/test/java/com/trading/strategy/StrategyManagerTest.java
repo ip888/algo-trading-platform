@@ -107,11 +107,12 @@ class StrategyManagerTest {
         private final double price = history.get(history.size() - 1);
 
         @Test
-        @DisplayName("WEAK_BEAR routes to MACD (not RSI mean-reversion)")
+        @DisplayName("WEAK_BEAR routes inverse ETFs to MACD (inverse ETF path)")
         void weakBearUsesMacd() {
+            // SH is an inverse ETF → routed to the dedicated inverse-ETF MACD path in WEAK_BEAR
             manager.evaluateWithHistory("SH", price, 0.0, history, MarketRegime.WEAK_BEAR);
-            assertEquals("MACD Trend (Weak Bear)", manager.getActiveStrategy(),
-                "WEAK_BEAR should use MACD, not RSI (inverse ETF fix)");
+            assertEquals("MACD (Inverse ETF, Weak Bear)", manager.getActiveStrategy(),
+                "WEAK_BEAR inverse ETF should use the MACD (Inverse ETF, Weak Bear) path");
         }
 
         @Test
@@ -150,9 +151,15 @@ class StrategyManagerTest {
         }
 
         @Test
-        @DisplayName("RANGE_BOUND uses Mean Reversion")
+        @DisplayName("RANGE_BOUND uses Mean Reversion when price hits lower band")
         void rangeBoundMeanReversion() {
-            manager.evaluateWithHistory("SPY", price, 0.0, history, MarketRegime.RANGE_BOUND);
+            // Build a flat-then-dip history: 29 bars oscillating 99.5/100.5, then sharp dip to 95.
+            // Price 95 falls below lower Bollinger Band (~97.3), triggering Mean Reversion.
+            // History stays < 50 bars so the SMA-50 declining guard is skipped.
+            List<Double> flatThenDip = new ArrayList<>();
+            for (int i = 0; i < 29; i++) flatThenDip.add(i % 2 == 0 ? 99.5 : 100.5);
+            flatThenDip.add(95.0);
+            manager.evaluateWithHistory("SPY", 95.0, 0.0, flatThenDip, MarketRegime.RANGE_BOUND);
             assertEquals("Mean Reversion", manager.getActiveStrategy());
         }
 

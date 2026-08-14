@@ -2641,6 +2641,52 @@ public class ProfileManager implements Runnable {
                         }
                     }
 
+                    // Winner runner: when TP is first hit, sell 50% at TP and lock a profitable
+                    // stop on the remaining 50%, then let it trail higher rather than full-exit.
+                    // Level 4 in the partial-exit bitmask = "runner already launched."
+                    if (!scalpHeldSymbols.contains(symbol)
+                            && config.isWinnerRunnerEnabled()
+                            && !position.hasPartialExit(4)
+                            && position.isTakeProfitHit(currentPrice)) {
+                        double lockedStop = position.entryPrice()
+                            + (position.takeProfit() - position.entryPrice()) * config.getRunnerLockPct();
+                        double halfQty = qty * 0.5; // live qty so we never over-sell
+                        try {
+                            cancelExistingOrders(profilePrefix, symbol);
+                            client.placeOrderDirect(symbol, halfQty, "sell", "market", "day", null);
+                            double runnerPnl = (currentPrice - entryPrice) * halfQty;
+                            updateDailyPnL(profilePrefix, runnerPnl);
+                            // Mark all partial levels done (1-3 are superseded; 4 = runner guard)
+                            // and raise TP to 1.5× original so the runner half can run further
+                            var marked = position.markPartialExit(1).markPartialExit(2)
+                                .markPartialExit(3).markPartialExit(4);
+                            double runnerTp = position.takeProfit()
+                                + (position.takeProfit() - position.entryPrice()) * 0.5;
+                            var runnerPos = new com.trading.risk.TradePosition(
+                                symbol, position.entryPrice(), position.quantity(),
+                                lockedStop, runnerTp,
+                                position.entryTime(), Math.max(position.highestPrice(), currentPrice),
+                                marked.partialExitsExecuted());
+                            portfolio.setPosition(symbol, Optional.of(runnerPos));
+                            database.updatePartialExits(symbol, brokerName, marked.partialExitsExecuted());
+                            database.updateStop(symbol, brokerName, lockedStop);
+                            double lockedPnlPct = (lockedStop - position.entryPrice()) / position.entryPrice() * 100;
+                            logger.info("{} 🏃 RUNNER TP: {} sold half ({} @ ${}) — locked stop ${} (+{}%)",
+                                profilePrefix, symbol,
+                                String.format("%.4f", halfQty),
+                                String.format("%.2f", currentPrice),
+                                String.format("%.2f", lockedStop),
+                                String.format("%.2f", lockedPnlPct));
+                            TradingWebSocketHandler.broadcastActivity(
+                                String.format("[%s] 🏃 RUNNER TP: %s — half sold at $%.2f, runner stop locked at $%.2f (+%.2f%%)",
+                                    profile.name(), symbol, currentPrice, lockedStop, lockedPnlPct), "INFO");
+                            pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            continue;
+                        } catch (Exception e) {
+                            logger.error("{} Runner TP failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                        }
+                    }
+
                     // Flat-position time decay: exit stalled positions held N hours with < threshold% P&L.
                     // Frees capital for better opportunities instead of waiting for EOD exit.
                     if (!scalpHeldSymbols.contains(symbol) && timeDecayExitManager.shouldExit(position, currentPrice)) {

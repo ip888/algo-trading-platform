@@ -1606,6 +1606,14 @@ public class Config {
         return getBooleanProperty("PER_SYMBOL_COOLDOWN_ENABLED", true);
     }
 
+    // Winner runner: after TP is hit, sell 50% and let remaining 50% trail with a locked-in stop
+    public boolean isWinnerRunnerEnabled() {
+        return getBooleanProperty("WINNER_RUNNER_ENABLED", true);
+    }
+    public double getRunnerLockPct() {
+        return getDoubleProperty("RUNNER_LOCK_PCT", 0.70); // lock in 70% of TP distance as minimum profit
+    }
+
     // ATR-scaled stops
     public boolean isAtrStopsEnabled() {
         return getBooleanProperty("ATR_STOPS_ENABLED", true);

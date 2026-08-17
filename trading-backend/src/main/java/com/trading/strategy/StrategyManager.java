@@ -297,11 +297,14 @@ public final class StrategyManager {
                         macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.0),
                         history, symbol, positionQty, 72.0);
                     if (!(macdFallback instanceof TradingSignal.Hold)) yield macdFallback;
-                    // Last resort: high-confidence MTF with price above SMA-20 and RSI in range
+                    // Last resort: high-confidence MTF with price above SMA-20 and RSI in range.
+                    // RSI cap raised 75→80: in STRONG_BULL+VIX≤12, momentum stocks (GLD, OIH)
+                    // legitimately sustain RSI 75-80 for weeks — that's trend continuation, not
+                    // exhaustion. Still guarded by 80%+ MTF confidence + price > SMA-20.
                     if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
                         double sma20mtf = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
                         double rsiMtf = RSIStrategy.calculateRSI(history, 14);
-                        if (currentPrice > sma20mtf && rsiMtf >= 38.0 && rsiMtf <= 75.0) {
+                        if (currentPrice > sma20mtf && rsiMtf >= 38.0 && rsiMtf <= 80.0) {
                             activeStrategy = "MTF Trend Entry (Strong Bull)";
                             logger.info("{}: STRONG_BULL high-MTF trend entry — price ${} above SMA-20 ${}, RSI {}",
                                 symbol, String.format("%.2f", currentPrice),
@@ -309,6 +312,13 @@ public final class StrategyManager {
                             yield new TradingSignal.Buy(String.format(
                                 "STRONG_BULL MTF entry: price above SMA-20 (%.2f > %.2f), RSI=%.1f",
                                 currentPrice, sma20mtf, rsiMtf));
+                        } else {
+                            logger.info("{}: MTF Trend Entry skipped — price ${} vs SMA-20 ${}, RSI {} [aboveSma={} rsiOk={}]",
+                                symbol,
+                                String.format("%.2f", currentPrice), String.format("%.2f", sma20mtf),
+                                String.format("%.1f", rsiMtf),
+                                currentPrice > sma20mtf,
+                                rsiMtf >= 38.0 && rsiMtf <= 80.0);
                         }
                     }
                     yield momSig; // HOLD

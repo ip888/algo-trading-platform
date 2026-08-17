@@ -2650,7 +2650,10 @@ public class ProfileManager implements Runnable {
                             && position.isTakeProfitHit(currentPrice)) {
                         double lockedStop = position.entryPrice()
                             + (position.takeProfit() - position.entryPrice()) * config.getRunnerLockPct();
-                        double halfQty = qty * 0.5; // live qty so we never over-sell
+                        // Use the profile's own tracked qty (not alpacaPos.quantity() which aggregates
+                        // all profiles). If MAIN+EXPERIMENTAL both hold NVDA, Alpaca reports 2×qty
+                        // and halfQty would equal the full MAIN position → 403 insufficient-qty error.
+                        double halfQty = Math.min(position.quantity() * 0.5, qty);
                         try {
                             cancelExistingOrders(profilePrefix, symbol);
                             client.placeOrderDirect(symbol, halfQty, "sell", "market", "day", null);

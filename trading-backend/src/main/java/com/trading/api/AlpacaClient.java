@@ -512,8 +512,17 @@ public final class AlpacaClient implements BrokerClient {
         
         var startStr = start.format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME);
 
-        String url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s",
-                symbol, timeframe, limit, java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8));
+        // For intraday timeframes: sort=desc returns the most recent `limit` bars (newest first),
+        // so today's data is always included regardless of how wide the start window is.
+        // The IEX feed with sort=asc + a wide start window would exhaust limit on old bars,
+        // leaving today's bars unfetched (confirmed: IEX returned bars only up to Aug 10 on Aug 14).
+        // Daily bars keep sort=asc — the "strip today's forming bar" logic below relies on stable ordering.
+        boolean isIntraday = !"1Day".equals(timeframe);
+        String sortParam = isIntraday ? "&sort=desc" : "";
+        String url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s%s",
+                symbol, timeframe, limit,
+                java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8),
+                sortParam);
 
         var response = sendRequest(url, "GET");
         var root = objectMapper.readTree(response);
@@ -526,7 +535,12 @@ public final class AlpacaClient implements BrokerClient {
                 bars.add(objectMapper.treeToValue(barNode, Bar.class));
             }
         }
-        
+
+        // Intraday bars were fetched newest-first; reverse to oldest-first for indicator calculations.
+        if (isIntraday) {
+            java.util.Collections.reverse(bars);
+        }
+
         // Strip today's forming daily bar so indicators never see an incomplete close.
         if ("1Day".equals(timeframe)) {
             java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("America/New_York"));

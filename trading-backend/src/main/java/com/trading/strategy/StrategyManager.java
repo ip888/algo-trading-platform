@@ -202,19 +202,18 @@ public final class StrategyManager {
                     logger.info("{}: Blocked {} BUY — low volume", symbol, activeStrategy);
                     return new TradingSignal.Hold("Low volume — BUY not confirmed");
                 }
-                // 3. Block if the symbol is already down > 0.7% from yesterday's close.
+                // 3. Block if the symbol is already down > 0.5% from yesterday's close.
                 // MACD uses daily bars — a BUY signal from yesterday's data does not mean today
                 // is a good day to enter. If the stock is actively declining intraday, entering
                 // long adds to an active downtrend.
-                // Threshold 1.0→0.7%: NVDA fell -0.84% from yesterday close before first entry
-                // (Aug 10 2026) — 1.0% threshold let it through. 0.7% catches this without
-                // blocking post-earnings gaps >5% (those are exempt via the earnings-gap check)
-                // or normal morning chop (typically ≤0.3–0.4% on calm days).
+                // Threshold history: 1.0% → 0.7% (Aug 10 NVDA, fell -0.84%) → 0.5% (Aug 17 AMD,
+                // fell -0.68% and slipped through the 0.7% gate, hit stop immediately).
+                // Matches the MTF-path gate at line 164. Normal morning chop ≤0.3–0.4% is unaffected.
                 if (!closes.isEmpty()) {
                     double yesterdayClose = closes.get(closes.size() - 1);
                     if (yesterdayClose > 0) {
                         double intradayPct = (currentPrice - yesterdayClose) / yesterdayClose * 100.0;
-                        if (intradayPct < -0.70) {
+                        if (intradayPct < -0.50) {
                             logger.info("{}: Blocked {} BUY — down {}% on the day vs yesterday close",
                                 symbol, activeStrategy, String.format("%.2f", intradayPct));
                             return new TradingSignal.Hold(

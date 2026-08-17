@@ -86,11 +86,12 @@ public class ScalpStrategy {
         try {
             bars = client.getBars(symbol, "15Min", 100);
         } catch (Exception e) {
-            logger.debug("Scalp: failed to fetch 15-min bars for {}: {}", symbol, e.getMessage());
+            logger.warn("Scalp {}: failed to fetch 15-min bars: {}", symbol, e.getMessage());
             return new TradingSignal.Hold("Scalp: bar fetch failed");
         }
 
         if (bars.size() < RSI_PERIOD + 2) {
+            logger.warn("Scalp {}: only {} bars returned (need {}), skipping", symbol, bars.size(), RSI_PERIOD + 2);
             return new TradingSignal.Hold("Scalp: insufficient 15-min history");
         }
 
@@ -99,6 +100,11 @@ public class ScalpStrategy {
             .filter(b -> b.timestamp().atZone(ET).toLocalDate().equals(today))
             .toList();
         if (todayBars.isEmpty()) {
+            // Log the most recent bar's date to diagnose IEX feed delay / wrong-day issue
+            var lastBarDate = bars.isEmpty() ? "none" :
+                bars.get(bars.size() - 1).timestamp().atZone(ET).toLocalDate().toString();
+            logger.warn("Scalp {}: no intraday bars for today ({}) — most recent bar date: {}",
+                symbol, today, lastBarDate);
             return new TradingSignal.Hold("Scalp: no intraday bars for VWAP");
         }
 
@@ -122,15 +128,20 @@ public class ScalpStrategy {
         boolean priceAboveVwap = vwap > 0 && currentPrice >= vwap;
         boolean volumeConfirmed = volumeRatio >= volMultiplier;
         boolean onCooldown = isOnCooldown(symbol);
+        // Last 15-min bar must close above the previous bar — confirms upward momentum.
+        // Without this, RSI+VWAP conditions can be met on a consolidating/declining stock
+        // (XLE Aug 17: RSI=ok, VWAP=ok, vol=ok, but stock was flat→down, hit SL immediately).
+        boolean lastBarUp = bars.size() >= 2 &&
+            bars.get(bars.size() - 1).close() > bars.get(bars.size() - 2).close();
 
-        logger.info("Scalp {}: RSI={} (prev={}) VWAP=${} price=${} vol={}x [inWindow={} rsiOk={} above50={} vwap={} vol={} cooldown={}]",
+        logger.info("Scalp {}: RSI={} (prev={}) VWAP=${} price=${} vol={}x [inWindow={} rsiOk={} above50={} vwap={} vol={} barUp={} cooldown={}]",
             symbol,
             String.format("%.1f", rsi), String.format("%.1f", rsiPrev),
             String.format("%.2f", vwap), String.format("%.2f", currentPrice),
             String.format("%.1f", volumeRatio),
-            isInScalpWindow(), rsiInWindow, rsiAbove50, priceAboveVwap, volumeConfirmed, onCooldown);
+            isInScalpWindow(), rsiInWindow, rsiAbove50, priceAboveVwap, volumeConfirmed, lastBarUp, onCooldown);
 
-        if (rsiInWindow && rsiAbove50 && priceAboveVwap && volumeConfirmed && !onCooldown) {
+        if (rsiInWindow && rsiAbove50 && priceAboveVwap && volumeConfirmed && lastBarUp && !onCooldown) {
             int count = dailyScalpCount.incrementAndGet();
             lastScalpEntryMs.put(symbol, System.currentTimeMillis());
             String reason = String.format(

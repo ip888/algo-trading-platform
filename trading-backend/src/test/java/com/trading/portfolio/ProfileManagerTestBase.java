@@ -165,5 +165,9 @@ abstract class ProfileManagerTestBase {
         // breakevenStopsActive is a final field with inline init — bypassed by allocateInstance.
         // Must initialize manually or clearPositionTracking() NPEs on breakevenStopsActive.remove().
         setField("breakevenStopsActive", java.util.concurrent.ConcurrentHashMap.newKeySet());
+        // timeDecayExitManager is a final instance field set in constructor — null after allocateInstance.
+        // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() for all tracked positions;
+        // without this, it NPEs silently (caught by the outer try/catch) and regime exits never run.
+        setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
     }
 }

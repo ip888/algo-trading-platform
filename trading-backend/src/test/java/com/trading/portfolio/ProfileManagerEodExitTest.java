@@ -183,6 +183,14 @@ class ProfileManagerEodExitTest {
         setField("orderTypeSelector", new com.trading.execution.SmartOrderTypeSelector());
         setField("exitStrategyManager", new com.trading.exits.ExitStrategyManager(mockConfig));
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
+
+        // breakevenStopsActive is a final field with inline init — bypassed by allocateInstance.
+        // clearPositionTracking() (called from EOD exit) NPEs on breakevenStopsActive.remove()
+        // without this, the exception is swallowed and database.closeTrade() is never reached.
+        setField("breakevenStopsActive", java.util.concurrent.ConcurrentHashMap.newKeySet());
+
+        // timeDecayExitManager is a final field initialized in constructor — null after allocateInstance.
+        setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
     }
 
     // ===================== Tests: isGoodEntryTime EOD block =====================
@@ -325,7 +333,7 @@ class ProfileManagerEodExitTest {
         invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         // DB must be closed right after the sell, not via later orphan cleanup
-        verify(mockDatabase).closeTrade(eq("AAPL"), any(), anyDouble(), anyDouble(), eq("alpaca"));
+        verify(mockDatabase).closeTrade(eq("AAPL"), any(), anyDouble(), anyDouble(), eq("alpaca"), anyString());
     }
 
     @Test
@@ -386,8 +394,8 @@ class ProfileManagerEodExitTest {
 
         verify(mockClient).placeOrder("AAPL", 2.0, "sell", "market", "day", null);
         verify(mockClient).placeOrder("QQQ", 1.5, "sell", "market", "day", null);
-        verify(mockDatabase).closeTrade(eq("AAPL"), any(), anyDouble(), anyDouble(), eq("alpaca"));
-        verify(mockDatabase).closeTrade(eq("QQQ"), any(), anyDouble(), anyDouble(), eq("alpaca"));
+        verify(mockDatabase).closeTrade(eq("AAPL"), any(), anyDouble(), anyDouble(), eq("alpaca"), anyString());
+        verify(mockDatabase).closeTrade(eq("QQQ"), any(), anyDouble(), anyDouble(), eq("alpaca"), anyString());
     }
 
     @Test

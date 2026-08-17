@@ -162,5 +162,8 @@ abstract class ProfileManagerTestBase {
         // (isMarketBreadthFilter() returns false → isMarketHealthy() always returns true).
         setField("marketBreadthAnalyzer",
             new com.trading.analysis.MarketBreadthAnalyzer(mockConfig));
+        // breakevenStopsActive is a final field with inline init — bypassed by allocateInstance.
+        // Must initialize manually or clearPositionTracking() NPEs on breakevenStopsActive.remove().
+        setField("breakevenStopsActive", java.util.concurrent.ConcurrentHashMap.newKeySet());
     }
 }

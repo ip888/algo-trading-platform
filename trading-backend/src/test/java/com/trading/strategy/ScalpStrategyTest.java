@@ -108,12 +108,39 @@ class ScalpStrategyTest {
         return s;
     }
 
-    /** 20 minimal bars all today, constant price 500, normal volume. */
+    /** 20 minimal bars all today. The last bar closes at 500.5 (above previous 500.0) so
+     *  lastBarUp = true and the primary scalp entry can fire when all indicator conditions hold. */
     private List<Bar> minimalBars(ZonedDateTime now) {
         List<Bar> bars = new ArrayList<>();
         for (int i = 0; i < 20; i++) {
             Instant ts = now.minusMinutes((long)(20 - i) * 15).toInstant();
-            bars.add(new Bar(ts, 500.0, 501.0, 499.0, 500.0, 1_000_000L));
+            double close = (i == 19) ? 500.5 : 500.0; // last bar closes up → lastBarUp = true
+            bars.add(new Bar(ts, 500.0, 501.0, 499.0, close, 1_000_000L));
+        }
+        return bars;
+    }
+
+    /** 20 minimal bars where the last bar closes DOWN (lastBarUp = false). */
+    private List<Bar> decliningBars(ZonedDateTime now) {
+        List<Bar> bars = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            Instant ts = now.minusMinutes((long)(20 - i) * 15).toInstant();
+            double close = (i == 19) ? 499.5 : 500.0; // last bar closes down → lastBarUp = false
+            bars.add(new Bar(ts, 500.0, 501.0, 499.0, close, 1_000_000L));
+        }
+        return bars;
+    }
+
+    /** 20 bars where bar[18] (prevClose) < VWAP (498) to trigger VWAP reclaim check. */
+    private List<Bar> vwapReclaimBars(ZonedDateTime now, boolean lastBarUp) {
+        List<Bar> bars = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            Instant ts = now.minusMinutes((long)(20 - i) * 15).toInstant();
+            double close;
+            if (i == 18) close = 496.0;       // prevClose < vwap(498) → vwapReclaim possible
+            else if (i == 19) close = lastBarUp ? 497.0 : 495.0; // lastBarUp or down
+            else close = 500.0;
+            bars.add(new Bar(ts, 500.0, 501.0, 495.0, close, 1_000_000L));
         }
         return bars;
     }
@@ -278,6 +305,65 @@ class ScalpStrategyTest {
         var signal = s.evaluate("SPY", 500.0, 0);
         assertInstanceOf(TradingSignal.ScalpBuy.class, signal,
             "Should fire when RSI is in range and above 50, regardless of rsiPrev");
+    }
+
+    @Test
+    @DisplayName("last bar not up → HOLD with clear diagnostic reason")
+    void lastBarDown_holds() throws Exception {
+        var s = new ControlledScalpStrategy(mockClient, mockConfig);
+        s.setNowSupplier(() -> fixedNow);
+        s.setDailyScalpCount(0, fixedNow.toLocalDate());
+        // All indicator conditions pass (RSI=52, VWAP=498<price=500, vol=1.5×) but last bar closes down
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(decliningBars(fixedNow));
+
+        var signal = s.evaluate("SPY", 500.0, 0);
+
+        assertFalse(signal instanceof TradingSignal.ScalpBuy,
+            "Should not fire when last 15-min bar closes down — " + signal);
+        String reason = ((TradingSignal.Hold) signal).reason();
+        assertTrue(reason.contains("last bar not up"),
+            "Block reason should name the failing condition, got: " + reason);
+    }
+
+    @Test
+    @DisplayName("VWAP reclaim also requires last bar up — HOLD when bar is declining")
+    void vwapReclaim_blockedWhenLastBarDown() throws Exception {
+        // Set up: vwapReclaimBars(lastBarUp=false) has prevClose(496) < vwap(498) < currentPrice(500)
+        // but the last bar closes down (495 < 496). Without lastBarUp guard the VWAP reclaim would fire;
+        // with it, the path is blocked.
+        var s = new ControlledScalpStrategy(mockClient, mockConfig);
+        // RSI=50 (in [45-65] for rsiBuilding), VWAP=498, vol=1.5x — all VWAP reclaim conditions met
+        s.setIndicators(50.0, 49.0, 498.0, 1.5);
+        s.setNowSupplier(() -> fixedNow);
+        s.setDailyScalpCount(0, fixedNow.toLocalDate());
+        // Primary path: rsi=50 in [45-58] AND rsiAbove50 — but lastBarUp=false blocks it.
+        // VWAP reclaim: prevClose(496) < vwap(498), currentPrice(500) >= vwap — also needs lastBarUp.
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(vwapReclaimBars(fixedNow, false));
+
+        var signal = s.evaluate("SPY", 500.0, 0);
+
+        assertFalse(signal instanceof TradingSignal.ScalpBuy,
+            "VWAP reclaim should not fire when last bar is declining — " + signal);
+    }
+
+    @Test
+    @DisplayName("VWAP reclaim fires when last bar is up and price crosses VWAP from below")
+    void vwapReclaim_firesWhenLastBarUp() throws Exception {
+        var s = new ControlledScalpStrategy(mockClient, mockConfig);
+        // RSI=50 (in [45-65] for rsiBuilding), VWAP=498, vol=1.5x
+        // Primary path: rsi=50 in [45-58] AND rsiAbove50 AND priceAboveVwap AND volumeConfirmed AND lastBarUp → fires primary
+        // This test confirms all-conditions-met-via-vwap-reclaim-bars still works
+        s.setIndicators(50.0, 49.0, 498.0, 1.5);
+        s.setNowSupplier(() -> fixedNow);
+        s.setDailyScalpCount(0, fixedNow.toLocalDate());
+        // lastBarUp=true: bar[19].close(497) > bar[18].close(496)
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(vwapReclaimBars(fixedNow, true));
+
+        var signal = s.evaluate("SPY", 500.0, 0);
+
+        // Primary path fires first (RSI=50 in window, above 50, price 500 >= vwap 498, vol ok, lastBarUp=true)
+        assertInstanceOf(TradingSignal.ScalpBuy.class, signal,
+            "Should fire (primary or VWAP reclaim) when all conditions including lastBarUp are met");
     }
 
     // ── helper unit tests ─────────────────────────────────────────────────────

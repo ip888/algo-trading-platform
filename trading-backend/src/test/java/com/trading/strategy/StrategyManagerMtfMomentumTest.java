@@ -190,6 +190,95 @@ class StrategyManagerMtfMomentumTest {
         }
     }
 
+    // ── MTF Trend Entry gate (STRONG_BULL last-resort BUY conditions) ─────────
+    // This block fires when STRONG_BULL + high MTF confidence + positionQty==0.
+    // It requires: history.size()>=20, currentPrice > SMA-20, RSI in [38,80].
+    // The outer evaluate() adds a day-change gate (blocks BUY when stock is down >0.5%).
+    // Tests here verify all four guard conditions and their failure modes.
+
+    // Bars alternating 2 up (0.8) / 2 down (0.4) for moderate uptrend:
+    //   avg_gain ≈ 0.4, avg_loss ≈ 0.2 → RS ≈ 2.0 → RSI ≈ 67 (in [38,80])
+    //   net gain ≈ 0.2/bar → over 100 bars: price 100 → 120.
+    //   SMA-20 of last 20 bars ≈ 118; last bar ≈ 120 → price > SMA-20 ✓
+    private static List<Bar> moderateUptrendBars() {
+        List<Double> closes = new ArrayList<>();
+        double price = 100.0;
+        for (int i = 0; i < 100; i++) {
+            price += (i % 4 < 2) ? 0.8 : -0.4;  // 2 up, 2 down → net +0.2/bar; RSI ≈ 67
+            closes.add(price);
+        }
+        return barsFrom(closes);
+    }
+
+    @Nested
+    @DisplayName("MTF Trend Entry gate — STRONG_BULL last-resort conditions")
+    class MtfTrendEntryConditions {
+
+        @Test
+        @DisplayName("STRONG_BULL + downtrend (price < SMA-20, RSI < 38) → HOLD even with high-confidence MTF BUY")
+        void strongBull_downtrendBlocked() throws Exception {
+            // Aug 17 scenario: OIH RSI=26.6, GLD RSI=26.3, XLE RSI=35.9 — all recovering from
+            // daily sell-offs. High 15-min MTF confidence BUT daily SMA-20 and RSI block entry.
+            when(mockClient.getMarketHistory(eq("GLD"), anyInt())).thenReturn(downtrendingBars());
+            when(mockMtf.analyze("GLD")).thenReturn(mtfBuy("GLD", 0.83));
+
+            var signal = manager.evaluate("GLD", 151.5, 0.0, MarketRegime.STRONG_BULL);
+
+            assertInstanceOf(TradingSignal.Hold.class, signal,
+                "Downtrending GLD (price < SMA-20, RSI likely < 38) must HOLD — " + signal);
+        }
+
+        @Test
+        @DisplayName("STRONG_BULL + moderate uptrend + stock down >0.5% on the day → day-change gate blocks BUY")
+        void strongBull_dayChangeTooNegative_blocked() throws Exception {
+            // All internal MTF Trend Entry conditions pass (SMA-20, RSI 38-80) but the outer
+            // evaluate() day-change guard catches a -0.6% move → blocks the BUY.
+            List<Bar> bars = moderateUptrendBars();
+            double yesterdayClose = bars.get(bars.size() - 1).close(); // last bar = "yesterday"
+            double currentPrice = yesterdayClose * (1.0 - 0.006);     // -0.6% today → triggers gate
+
+            when(mockClient.getMarketHistory(eq("GLD"), anyInt())).thenReturn(bars);
+            when(mockMtf.analyze("GLD")).thenReturn(mtfBuy("GLD", 0.83));
+
+            var signal = manager.evaluate("GLD", currentPrice, 0.0, MarketRegime.STRONG_BULL);
+
+            assertInstanceOf(TradingSignal.Hold.class, signal,
+                "GLD down -0.6% on the day must be blocked by day-change gate — " + signal);
+        }
+
+        @Test
+        @DisplayName("STRONG_BULL + moderate uptrend + flat on day → MTF Trend Entry fires BUY")
+        void strongBull_goodConditions_buyFires() throws Exception {
+            // Moderate uptrend: RSI ≈ 67 (in [38,80]), price > SMA-20, 0% day change.
+            List<Bar> bars = moderateUptrendBars();
+            double currentPrice = bars.get(bars.size() - 1).close(); // exactly yesterday's close
+
+            when(mockClient.getMarketHistory(eq("GLD"), anyInt())).thenReturn(bars);
+            when(mockMtf.analyze("GLD")).thenReturn(mtfBuy("GLD", 0.83));
+
+            var signal = manager.evaluate("GLD", currentPrice, 0.0, MarketRegime.STRONG_BULL);
+
+            assertInstanceOf(TradingSignal.Buy.class, signal,
+                "STRONG_BULL + good uptrend conditions + 0% day change → MTF Trend Entry should BUY — " + signal);
+        }
+
+        @Test
+        @DisplayName("STRONG_BULL + existing position (positionQty > 0) → no re-entry via MTF Trend Entry")
+        void strongBull_existingPosition_noReEntry() throws Exception {
+            List<Bar> bars = moderateUptrendBars();
+            double currentPrice = bars.get(bars.size() - 1).close();
+
+            when(mockClient.getMarketHistory(eq("GLD"), anyInt())).thenReturn(bars);
+            when(mockMtf.analyze("GLD")).thenReturn(mtfBuy("GLD", 0.83));
+
+            // positionQty = 1.5 → MTF Trend Entry gate requires positionQty == 0
+            var signal = manager.evaluate("GLD", currentPrice, 1.5, MarketRegime.STRONG_BULL);
+
+            assertFalse(signal instanceof TradingSignal.Buy,
+                "MTF Trend Entry requires positionQty==0; should not fire while holding — " + signal);
+        }
+    }
+
     @Nested
     @DisplayName("Non-momentum asset with high-confidence MTF BUY")
     class NonMomentumAssetMtfBuy {

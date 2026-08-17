@@ -160,7 +160,7 @@ public class ScalpStrategy {
             double prevClose = bars.get(bars.size() - 2).close();
             boolean vwapReclaim = prevClose < vwap && currentPrice >= vwap;
             boolean rsiBuilding = rsi >= 45.0 && rsi <= 65.0;
-            if (vwapReclaim && rsiBuilding) {
+            if (vwapReclaim && rsiBuilding && lastBarUp) {
                 int count = dailyScalpCount.incrementAndGet();
                 lastScalpEntryMs.put(symbol, System.currentTimeMillis());
                 String reason = String.format(
@@ -176,6 +176,7 @@ public class ScalpStrategy {
             : !rsiAbove50 ? String.format("RSI=%.1f below 50", rsi)
             : !priceAboveVwap ? String.format("price $%.2f below VWAP $%.2f", currentPrice, vwap)
             : !volumeConfirmed ? String.format("vol %.1f× < %.1f×", volumeRatio, volMultiplier)
+            : !lastBarUp ? "last bar not up (flat/declining)"
             : String.format("cooldown (%.0f min remaining)", cooldownMinutesLeft(symbol));
         return new TradingSignal.Hold("Scalp: " + blockReason);
     }

@@ -2050,7 +2050,7 @@ public class ProfileManager implements Runnable {
                     config.getAtrStopFloorPercent());
                 // Cap ATR TP at the profile's configured target — ATR widens for volatility
                 // but should never produce a target harder to reach than the configured goal.
-                double profileTp = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+                double profileTp = currentPrice * (1.0 + config.getVixScaledTakeProfit(latestVix) / 100.0);
                 takeProfit = Math.min(atrTp, profileTp);
                 logger.info("{} {}: ATR={} (n={}) → stop=${} ({}%) tp=${} ({}%)",
                     profilePrefix, symbol,
@@ -2062,7 +2062,7 @@ public class ProfileManager implements Runnable {
                     String.format("%.2f", (takeProfit - currentPrice) / currentPrice * 100.0));
             } else {
                 stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
-                takeProfit = currentPrice * (1.0 + profile.takeProfitPercent() / 100.0);
+                takeProfit = currentPrice * (1.0 + config.getVixScaledTakeProfit(latestVix) / 100.0);
             }
 
             // ========== RANGE_BOUND STOP CAP ==========

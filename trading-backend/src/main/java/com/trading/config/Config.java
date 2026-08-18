@@ -1038,6 +1038,40 @@ public class Config {
         return Math.max(0.50, Math.min(1.0, vix * 0.065));
     }
 
+    // ==================== Power Hours / Lunch Blackout ====================
+
+    /** Block new entries during the low-movement lunch period (typically 11:30am–2:30pm ET). */
+    public boolean isLunchBlackoutEnabled() {
+        return getBooleanProperty("LUNCH_BLACKOUT_ENABLED", false);
+    }
+
+    /** Start of the lunch blackout window in HH:mm format (ET). */
+    public String getLunchBlackoutStart() {
+        return getProperty("LUNCH_BLACKOUT_START", "11:30");
+    }
+
+    /** End of the lunch blackout window in HH:mm format (ET). */
+    public String getLunchBlackoutEnd() {
+        return getProperty("LUNCH_BLACKOUT_END", "14:30");
+    }
+
+    // ==================== VIX Entry Gate ====================
+
+    /** Block new entries when VIX is below the configured minimum. */
+    public boolean isVixEntryGateEnabled() {
+        return getBooleanProperty("VIX_ENTRY_GATE_ENABLED", false);
+    }
+
+    /**
+     * Minimum VIX required to open new positions.
+     * Below VIX=13.3 the VIX-scaled TP (0.83%) is smaller than the SL (1.0%),
+     * creating an unfavorable R:R and a market environment where daily ranges
+     * are too tight for TP to be reliably reachable.
+     */
+    public double getVixEntryMinimum() {
+        return getDoubleProperty("VIX_ENTRY_MINIMUM", 13.0);
+    }
+
     // ==================== Stop Loss Cooldown ====================
     
     /** Cooldown period (ms) after stop loss before re-entry is allowed */

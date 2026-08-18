@@ -34,6 +34,7 @@ public final class StrategyManager {
     private final MomentumStrategy momentumStrategy;
     private final MultiTimeframeAnalyzer multiTimeframeAnalyzer;
     private final ScalpStrategy scalpStrategy;
+    private final OpeningRangeBreakoutStrategy orbStrategy;
     private MarketRegime currentRegime = MarketRegime.RANGE_BOUND;
     private String activeStrategy = "None";
     private double latestVix = 20.0;
@@ -54,6 +55,7 @@ public final class StrategyManager {
         this.momentumStrategy = config != null ? new MomentumStrategy(config) : new MomentumStrategy();
         this.multiTimeframeAnalyzer = multiTimeframeAnalyzer;
         this.scalpStrategy = (config != null && client != null) ? new ScalpStrategy(client, config) : null;
+        this.orbStrategy = new OpeningRangeBreakoutStrategy();
         this.momentumAssets = config != null ? config.getMomentumAssets()
             : java.util.Set.of("GLD","SLV","TLT","XLU","NVDA","TSLA","META","XLE","XLK","XOP","URA","GRID");
         this.inverseEtfAssets = config != null ? config.getInverseEtfSymbols()
@@ -76,6 +78,21 @@ public final class StrategyManager {
     public TradingSignal evaluate(String symbol, double currentPrice, double positionQty,
                                  MarketRegime regime) {
         try {
+            // ── Opening Range Breakout (morning power hour: 10:00–11:30am ET) ──
+            // ORB identifies structural price levels (first 30-min supply/demand balance)
+            // rather than lagging MACD derivatives. During the active window it takes
+            // priority over MTF/MACD for BUY signals; SELL signals (structure failure)
+            // are returned any time during the day. Outside the window it returns HOLD
+            // and falls through to the MTF/MACD path below.
+            if (client != null) {
+                var orbSignal = orbStrategy.evaluate(symbol, currentPrice, positionQty, client);
+                if (orbSignal instanceof TradingSignal.Buy || orbSignal instanceof TradingSignal.Sell) {
+                    logger.info("Regime: {} (Strategy=ORB) → Signal: {}",
+                        regime, orbSignal instanceof TradingSignal.Buy ? "BUY" : "SELL");
+                    return orbSignal;
+                }
+            }
+
             var bars = client.getMarketHistory(symbol, 100);
             var closes = bars.stream().map(Bar::close).toList();
             var volumes = bars.stream().mapToLong(Bar::volume).boxed().toList();

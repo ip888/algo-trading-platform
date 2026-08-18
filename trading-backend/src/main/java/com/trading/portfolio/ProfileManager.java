@@ -1391,6 +1391,38 @@ public class ProfileManager implements Runnable {
             }
         }
 
+        // ========== VIX MINIMUM ENTRY GATE ==========
+        // At VIX < 13, intraday ranges are too tight for 0.83% TP to be reliably reachable
+        // (SPY daily range ≈ 0.4-0.6%). The VIX-scaled TP is already below the SL at these
+        // levels — conserve capital until conditions give entries room to run.
+        if (scalpOverrides == null && config.isVixEntryGateEnabled()
+                && latestVix > 0 && latestVix < config.getVixEntryMinimum()) {
+            logger.info("{} {}: BUY BLOCKED — VIX {:.1f} below minimum {:.1f} (TP {}% unreachable in current range)",
+                profilePrefix, symbol,
+                latestVix, config.getVixEntryMinimum(),
+                String.format("%.2f", config.getVixScaledTakeProfit(latestVix)));
+            return;
+        }
+
+        // ========== LUNCH BLACKOUT / POWER HOURS GATE ==========
+        // The 11:30am–2:30pm ET period in VIX<15 markets has minimal directional movement.
+        // Entries taken during lunch rarely hit TP before the time-decay exit fires (3h flat).
+        // Scalp is exempt — its own time window already handles this via ScalpStrategy.
+        if (scalpOverrides == null && config.isLunchBlackoutEnabled()) {
+            try {
+                var nowET = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York")).toLocalTime();
+                var lunchStart = java.time.LocalTime.parse(config.getLunchBlackoutStart());
+                var lunchEnd = java.time.LocalTime.parse(config.getLunchBlackoutEnd());
+                if (!nowET.isBefore(lunchStart) && nowET.isBefore(lunchEnd)) {
+                    logger.info("{} {}: BUY BLOCKED — lunch blackout ({}-{} ET, low-movement period)",
+                        profilePrefix, symbol, lunchStart, lunchEnd);
+                    return;
+                }
+            } catch (Exception e) {
+                logger.debug("{} Lunch blackout parse error: {}", profilePrefix, e.getMessage());
+            }
+        }
+
         // ========== INVERSE ETF / BEARISH ENTRY GUARD (Tier 3.11) ==========
         // Buying inverse ETFs (SQQQ, SH, PSQ, RWM, DOG) is only valid when market
         // conditions genuinely confirm a bear market.  Two gates:

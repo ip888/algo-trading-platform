@@ -1087,6 +1087,12 @@ public class ProfileManager implements Runnable {
             }
         } else if (signal instanceof TradingSignal.Sell sell) {
             if (qty > 0) {
+                if (currentPosition.isEmpty()) {
+                    // Broker reports position but portfolio has no record: stale state after restart.
+                    // checkAllPositionsForRiskExits handles untracked positions for loss protection.
+                    logger.warn("{} {} SELL skipped — position not tracked (post-restart state)", profilePrefix, symbol);
+                    return;
+                }
                 TradePosition position = currentPosition.get();
                 double lossPercent = position.getLossPercent(currentPrice);
                 double emergencyThreshold = config.getEmergencyStopLossPercent();
@@ -2407,6 +2413,7 @@ public class ProfileManager implements Runnable {
             if (postLossCooldown != null) {
                 long applied = postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
                 int consecLosses = postLossCooldown.getConsecutiveLosses(symbol);
+                consecutiveStopLosses.put(symbol, consecLosses);
                 logger.info("{} {} post-loss cooldown applied: {}h ({} consec losses)",
                     profilePrefix, symbol, applied / (60L * 60 * 1000), consecLosses);
                 // Persist so the cooldown survives a restart
@@ -2416,6 +2423,8 @@ public class ProfileManager implements Runnable {
                 database.saveBotState("consec_sl:" + symbol, String.valueOf(consecLosses));
                 logger.info("[COOLDOWN_START] {} {} post-loss cooldown={}h consec={}",
                     profile.name(), symbol, applied / (60L * 60 * 1000), consecLosses);
+            } else {
+                consecutiveStopLosses.merge(symbol, 1, Integer::sum);
             }
         } else {
             // Profitable exit — allow free re-entry at any price, reset consecutive SL counter.
@@ -2523,12 +2532,6 @@ public class ProfileManager implements Runnable {
      * Only the MAIN profile should execute exits to avoid duplicate orders.
      */
     private void checkAllPositionsForRiskExits(String profilePrefix) {
-        // Only MAIN profile should check and exit all positions
-        // This prevents duplicate exit orders from multiple profiles
-        if (!profile.isMainProfile()) {
-            return;
-        }
-
         if (!config.isMaxLossExitEnabled()) {
             return; // Feature disabled
         }
@@ -2542,7 +2545,10 @@ public class ProfileManager implements Runnable {
         
         try {
             var allPositions = client.getPositions();
-            
+            // Non-MAIN profiles: only process positions this profile owns to avoid
+            // touching MAIN's positions or triggering orphan recovery on foreign symbols.
+            var ownedSymbols = profile.isMainProfile() ? null : portfolio.getAllPositions().keySet();
+
             // Get current portfolio positions for correlation analysis
             Map<String, Double> portfolioPositions = new HashMap<>();
             for (var pos : allPositions) {
@@ -2557,6 +2563,7 @@ public class ProfileManager implements Runnable {
 
             for (var alpacaPos : allPositions) {
                 String symbol = alpacaPos.symbol();
+                if (ownedSymbols != null && !ownedSymbols.contains(symbol)) continue;
                 double qty = alpacaPos.quantity();
 
                 // Skip if a sell order was already placed this cycle (prevents duplicate sells)
@@ -2759,9 +2766,13 @@ public class ProfileManager implements Runnable {
                                     lastExitPrices.put(symbol, currentPrice);
                                     if (postLossCooldown != null) {
                                         postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+                                        consecutiveStopLosses.put(symbol, postLossCooldown.getConsecutiveLosses(symbol));
+                                    } else {
+                                        consecutiveStopLosses.merge(symbol, 1, Integer::sum);
                                     }
-                                } else if (postLossCooldown != null) {
-                                    postLossCooldown.recordWin(symbol);
+                                } else {
+                                    consecutiveStopLosses.remove(symbol);
+                                    if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
                                 }
                                 CircuitBreakerState cbExit = circuitBreakers.get(brokerName);
                                 if (cbExit != null) cbExit.recordTrade(tradePnl);
@@ -2851,6 +2862,11 @@ public class ProfileManager implements Runnable {
 
                     continue; // Position handled by enhanced strategy
                 }
+
+                // Orphan/untracked-position recovery is MAIN's responsibility only.
+                // EXPERIMENTAL positions not in its portfolio are either already closed
+                // or managed by broker-side native stops.
+                if (!profile.isMainProfile()) continue;
 
                 // Settlement-lag guard: when a position is closed the broker may still report the
                 // shares as held for up to ~15 minutes (T+0 settlement lag). Skip orphan registration
@@ -3046,9 +3062,13 @@ public class ProfileManager implements Runnable {
             lastExitPrices.put(symbol, exitPrice);
             if (postLossCooldown != null) {
                 postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
+                consecutiveStopLosses.put(symbol, postLossCooldown.getConsecutiveLosses(symbol));
+            } else {
+                consecutiveStopLosses.merge(symbol, 1, Integer::sum);
             }
-        } else if (pnl > 0 && postLossCooldown != null) {
-            postLossCooldown.recordWin(symbol);
+        } else if (pnl > 0) {
+            consecutiveStopLosses.remove(symbol);
+            if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
         }
         CircuitBreakerState cb = circuitBreakers.get(brokerName);
         if (cb != null) cb.recordTrade(pnl);
@@ -3614,11 +3634,6 @@ public class ProfileManager implements Runnable {
      * Only the MAIN profile should execute exits to avoid duplicate orders.
      */
     private void checkAllPositionsForProfitTargets(String profilePrefix) {
-        // Only MAIN profile should check and exit all positions
-        if (!profile.isMainProfile()) {
-            return;
-        }
-
         // PDT circuit breaker: skip sell attempts if Alpaca recently rejected with 403 PDT
         if (System.currentTimeMillis() < pdtBlockedUntil) {
             logger.debug("{} Skipping profit target checks — PDT blocked for {} more seconds",
@@ -3628,10 +3643,13 @@ public class ProfileManager implements Runnable {
         
         try {
             var alpacaPositions = client.getPositions();
+            // Non-MAIN profiles only process their own positions to avoid touching MAIN's.
+            var ownedSymbols = profile.isMainProfile() ? null : portfolio.getAllPositions().keySet();
             logger.info("{} 🔍 Checking {} positions for take-profit/stop-loss", profilePrefix, alpacaPositions.size());
-            
+
             for (var alpacaPos : alpacaPositions) {
                 String symbol = alpacaPos.symbol();
+                if (ownedSymbols != null && !ownedSymbols.contains(symbol)) continue;
                 double qty = alpacaPos.quantity();
                 double marketValue = alpacaPos.marketValue();
                 double entryPrice = alpacaPos.avgEntryPrice();

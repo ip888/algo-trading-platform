@@ -2067,7 +2067,7 @@ public class ProfileManager implements Runnable {
                     String.format("%.2f", takeProfit),
                     String.format("%.2f", (takeProfit - currentPrice) / currentPrice * 100.0));
             } else {
-                stopLoss = currentPrice * (1.0 - profile.stopLossPercent() / 100.0);
+                stopLoss = currentPrice * (1.0 - config.getVixScaledStopLoss(latestVix) / 100.0);
                 takeProfit = currentPrice * (1.0 + config.getVixScaledTakeProfit(latestVix) / 100.0);
             }
 
@@ -3738,7 +3738,6 @@ public class ProfileManager implements Runnable {
             // clamped to [0.60%, 1.50%] so the bot exits at realistic levels instead of
             // holding all day for a target the market never gives.
             double takeProfitPercent = config.getVixScaledTakeProfit(latestVix);
-                double stopLossPercent = profile.stopLossPercent();
 
                 // When the multi-level trailing stop has locked in profit (stop > entry),
                 // extend the TP ceiling to 2× VIX-scaled TP so the winner can keep running.

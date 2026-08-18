@@ -1026,7 +1026,18 @@ public class Config {
     public double getVixScaledTakeProfit(double vix) {
         return Math.max(0.60, Math.min(1.50, vix * 0.075));
     }
-    
+
+    /**
+     * VIX-scaled stop-loss: mirrors the TP formula to maintain a consistent ~1.15:1 R:R.
+     * Formula: clamp(VIX × 0.065, 0.50, 1.0)
+     * Examples: VIX=11 → 0.72%, VIX=15 → 0.98%, VIX=20+ → 1.0%.
+     * Without this, SL stays flat at 1.0% while TP shrinks with VIX, creating
+     * an unfavorable R:R below VIX=13.3 (need >55% win rate just to break even).
+     */
+    public double getVixScaledStopLoss(double vix) {
+        return Math.max(0.50, Math.min(1.0, vix * 0.065));
+    }
+
     // ==================== Stop Loss Cooldown ====================
     
     /** Cooldown period (ms) after stop loss before re-entry is allowed */

@@ -1392,21 +1392,19 @@ public class ProfileManager implements Runnable {
         }
 
         // ========== VIX MINIMUM ENTRY GATE ==========
-        // At VIX < 13, intraday ranges are too tight for 0.83% TP to be reliably reachable
-        // (SPY daily range ≈ 0.4-0.6%). The VIX-scaled TP is already below the SL at these
-        // levels — conserve capital until conditions give entries room to run.
+        // Only block at extreme complacency (VIX < 10.0). VIX-scaled TP/SL already adjusts
+        // targets to match the prevailing range — the gate exists only as an absolute safety floor.
         if (scalpOverrides == null && config.isVixEntryGateEnabled()
                 && latestVix > 0 && latestVix < config.getVixEntryMinimum()) {
-            logger.info("{} {}: BUY BLOCKED — VIX {:.1f} below minimum {:.1f} (TP {}% unreachable in current range)",
+            logger.info("{} {}: BUY BLOCKED — VIX {} below minimum {} (TP {}% unreachable in current range)",
                 profilePrefix, symbol,
-                latestVix, config.getVixEntryMinimum(),
+                String.format("%.1f", latestVix), String.format("%.1f", config.getVixEntryMinimum()),
                 String.format("%.2f", config.getVixScaledTakeProfit(latestVix)));
             return;
         }
 
         // ========== LUNCH BLACKOUT / POWER HOURS GATE ==========
-        // The 11:30am–2:30pm ET period in VIX<15 markets has minimal directional movement.
-        // Entries taken during lunch rarely hit TP before the time-decay exit fires (3h flat).
+        // Core dead zone (configurable, currently 12:00-13:30 ET) blocks new swing entries.
         // Scalp is exempt — its own time window already handles this via ScalpStrategy.
         if (scalpOverrides == null && config.isLunchBlackoutEnabled()) {
             try {

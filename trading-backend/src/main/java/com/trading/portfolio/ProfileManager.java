@@ -3479,8 +3479,8 @@ public class ProfileManager implements Runnable {
                     }
                 }
 
-                // GTC so the stop persists if the bot restarts before EOD
-                client.placeOrder(symbol, qty, "sell", "stop", "gtc", entryPrice);
+                // placeNativeStopOrder handles fractional→DAY / whole→GTC automatically
+                client.placeNativeStopOrder(symbol, qty, entryPrice);
                 breakevenStopsActive.add(symbol);
 
                 logger.info("{} ✅ Breakeven GTC stop placed for {} at ${} (entry price)",
@@ -3948,7 +3948,7 @@ public class ProfileManager implements Runnable {
                     double stopPrice = Math.round(entryPrice * 100.0) / 100.0; // stop at exact entry
                     boolean stopPlaced = false;
                     try {
-                        client.placeOrder(symbol, qty, "sell", "stop", "gtc", stopPrice);
+                        client.placeNativeStopOrder(symbol, qty, stopPrice);
                         stopPlaced = true;
                         logger.info("{} 📈 {} carrying overnight — P&L +{}%, GTC stop @ ${} (entry, can't lose)",
                             profilePrefix, symbol, String.format("%.2f", pnlPercent),

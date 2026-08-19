@@ -260,9 +260,14 @@ public final class AlpacaClient implements BrokerClient {
                 .put("time_in_force", timeInForce);
             
             if (limitPrice != null) {
+                // Alpaca rejects limit_price on pure stop orders — use placeNativeStopOrder() for stops
+                if ("stop".equals(type)) {
+                    logger.error("BUG: placeOrder called with type=stop and limitPrice={} — use placeNativeStopOrder instead", limitPrice);
+                    throw new IllegalArgumentException("stop orders must not include limit_price — use placeNativeStopOrder()");
+                }
                 order.put("limit_price", String.format("%.2f", limitPrice));
             }
-            
+
             // Extended hours support (only for limit orders)
             if (config.isExtendedHoursEnabled() && "limit".equals(type)) {
                 order.put("extended_hours", true);

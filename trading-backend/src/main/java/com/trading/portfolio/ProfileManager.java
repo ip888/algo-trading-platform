@@ -433,6 +433,18 @@ public class ProfileManager implements Runnable {
             new com.trading.ai.ClaudeSessionReviewer(database, claudeKey).logLastReviewIfPresent();
         }
 
+        // Restore today's realized P&L from DB so the daily loss circuit breaker
+        // survives restarts. Without this, redeploying mid-day resets todayPnL to 0
+        // and the bot can re-enter after hitting the daily loss limit.
+        try {
+            this.todayPnL = database.getTodayPnL();
+            if (this.todayPnL != 0.0) {
+                logger.info("[{}] Restored today's P&L from DB: ${}", profile.name(), String.format("%.2f", this.todayPnL));
+            }
+        } catch (Exception e) {
+            logger.warn("[{}] Failed to restore todayPnL from DB: {}", profile.name(), e.getMessage());
+        }
+
         // Log AI component status
         if (sentimentAnalyzer != null) logger.info("[{}] 🧠 AI: Sentiment Analysis ENABLED", profile.name());
         if (signalPredictor != null) logger.info("[{}] 🤖 AI: ML Prediction ENABLED", profile.name());
@@ -1852,12 +1864,14 @@ public class ProfileManager implements Runnable {
         if (signalPredictor != null) {
             try {
                 var now = LocalDateTime.now();
+                var tradeStats = database.getTradeStatistics();
+                double recentWinRate = tradeStats.total() > 5 ? tradeStats.winRate() : 0.55; // min 6 trades before trusting stats
                 var setup = new com.trading.ai.SignalPredictor.TradingSetup(
                     currentVix,
                     now.getHour(),
                     now.getDayOfWeek(),
-                    1.0, // volume ratio (would need real data)
-                    0.65, // recent win rate (would use actual from analytics)
+                    1.0, // volume ratio (computed by VolumeProfileAnalyzer above, not yet threaded here)
+                    recentWinRate,
                     80 // pattern confidence
                 );
                 
@@ -1884,7 +1898,10 @@ public class ProfileManager implements Runnable {
         
         // Calculate position size using ACTUAL BUYING POWER (not configured capital)
         // This prevents "insufficient buying power" errors
-        double availableCapital = Math.min(buyingPower * 0.95, equity); // Use 95% of buying power for safety
+        // Size against total equity so all positions are equal-sized regardless of deployment order.
+        // Using buyingPower here caused each successive position to be progressively smaller
+        // (buying power shrinks as positions are added). The dollar cap below prevents overspend.
+        double availableCapital = equity;
         // ========== POSITION SIZING ==========
         // Regime-aware Kelly sizing: rolling win-rate stats conditioned on the current
         // market regime produce more accurate Kelly fractions than the lifetime average.
@@ -1952,8 +1969,15 @@ public class ProfileManager implements Runnable {
             }
         }
         
-        logger.info("{} {}: 💰 Position sizing: Available=${}, Calculated={} shares", 
-            profilePrefix, symbol, 
+        // Hard cap: never commit more cash than available buying power to avoid broker rejection
+        if (positionSize > buyingPower * 0.95) {
+            logger.debug("{} {}: Position size ${} capped to buying power ${}",
+                profilePrefix, symbol, String.format("%.2f", positionSize), String.format("%.2f", buyingPower * 0.95));
+            positionSize = buyingPower * 0.95;
+        }
+
+        logger.info("{} {}: 💰 Position sizing: Equity=${}, Calculated={} shares",
+            profilePrefix, symbol,
             String.format("%.2f", availableCapital),
             String.format("%.3f", positionSize));
         
@@ -2004,10 +2028,10 @@ public class ProfileManager implements Runnable {
                     now.getHour(),
                     now.getDayOfWeek(),
                     portfolio.getActivePositionCount(),
-                    10, // max positions
-                    0, // recent losses (would use actual from analytics)
-                    0.0, // sentiment score (would use actual if available)
-                    profile.strategyType().equals("BULLISH")
+                    config.getCorrelationCapMaxConcurrent(),
+                    consecutiveStopLosses.values().stream().mapToInt(Integer::intValue).sum(),
+                    sentimentAnalyzer != null ? sentimentAnalyzer.getSentimentScore(symbol) : 0.0,
+                    true // handleBuy is always a long (bullish) entry
                 );
                 
                 int riskScore = riskPredictor.calculateRiskScore(riskSetup);
@@ -3513,10 +3537,10 @@ public class ProfileManager implements Runnable {
         if (config.isEodExitEnabled()) {
             try {
                 var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
-                var entryDeadline = eodTime.minusMinutes(config.getEodEntryCutoffMinutes());
+                var entryDeadline = eodTime.minusMinutes(config.getMainEodEntryCutoffMinutes());
                 if (!currentTime.isBefore(entryDeadline)) {
                     logger.debug("Entry blocked — within {}min of EOD exit ({} → cutoff {})",
-                        config.getEodEntryCutoffMinutes(), config.getEodExitTime(), entryDeadline);
+                        config.getMainEodEntryCutoffMinutes(), config.getEodExitTime(), entryDeadline);
                     return false;
                 }
             } catch (Exception e) {
@@ -3637,9 +3661,12 @@ public class ProfileManager implements Runnable {
                     "INFO"
                 );
                 
-                // Record trade close
+                // Record trade close and update daily risk tracking
                 double currentPrice = Math.abs(pos.marketValue() / qty);
                 database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_positions_cleanup");
+                updateDailyPnL(profilePrefix, pnl);
+                CircuitBreakerState cb = circuitBreakers.get(brokerName);
+                if (cb != null) cb.recordTrade(pnl);
                 
             } catch (Exception e) {
                 logger.error("{} Failed to close {} during cleanup", profilePrefix, symbol, e);

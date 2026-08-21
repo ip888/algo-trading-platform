@@ -4043,10 +4043,8 @@ public class ProfileManager implements Runnable {
                     });
                 }
             } else {
-                long failedCount = remaining.stream()
-                    .filter(p -> !carriedSymbols.contains(p.symbol())).count();
                 logger.error("{} ⚠️ EOD EXIT INCOMPLETE - {} position(s) failed to close, will retry",
-                    profilePrefix, failedCount);
+                    profilePrefix, remaining.size());
             }
 
         } catch (Exception e) {

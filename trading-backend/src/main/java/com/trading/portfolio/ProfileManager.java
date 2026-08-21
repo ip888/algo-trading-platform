@@ -3918,8 +3918,6 @@ public class ProfileManager implements Runnable {
             logger.warn("{} 🔴 Closing {} position(s) for end of day", profilePrefix, positions.size());
 
             // Close each position
-            var carriedSymbols = new java.util.HashSet<String>();
-            boolean isFriday = (now.getDayOfWeek() == java.time.DayOfWeek.FRIDAY);
             for (var position : positions) {
                 String symbol = position.symbol();
                 double qty = Math.abs(position.quantity());
@@ -3936,36 +3934,7 @@ public class ProfileManager implements Runnable {
                 double pnl = (currentPrice - entryPrice) * qty;
                 double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
 
-                // Carry profitable positions overnight (Mon–Thu only, never Friday).
-                // Threshold raised 0.5% → 1.0%: a position at exactly 0.5% is too close to
-                // flat — it faded to +0.08% by close on Jul 28 2026 (SMH was at 0.47% at 15:55
-                // but drifted to nearly zero, carried overnight unprotected).
-                // Requires 1.0% profit so the GTC stop at entry price gives real cushion.
-                // Places a real GTC stop order at entry price before marking as carried — the old
-                // code only logged "breakeven stop active" without actually placing any order.
-                // If the stop order placement fails, position is force-closed at market instead.
-                if (!isFriday && pnlPercent >= 1.0) {
-                    double stopPrice = Math.round(entryPrice * 100.0) / 100.0; // stop at exact entry
-                    boolean stopPlaced = false;
-                    try {
-                        client.placeNativeStopOrder(symbol, qty, stopPrice);
-                        stopPlaced = true;
-                        logger.info("{} 📈 {} carrying overnight — P&L +{}%, GTC stop @ ${} (entry, can't lose)",
-                            profilePrefix, symbol, String.format("%.2f", pnlPercent),
-                            String.format("%.2f", stopPrice));
-                    } catch (Exception stopEx) {
-                        logger.error("{} ❌ Cannot place overnight stop for {} ({}), force-closing instead",
-                            profilePrefix, symbol, stopEx.getMessage());
-                    }
-                    if (stopPlaced) {
-                        carriedSymbols.add(symbol);
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] 📈 %s overnight: +%.2f%%, stop @ $%.2f", profile.name(), symbol, pnlPercent, stopPrice),
-                            "SUCCESS");
-                        continue; // skip EOD close — stop order is the protection
-                    }
-                    // Stop failed — fall through to normal EOD close below
-                }
+                // No overnight carries — close everything at EOD every day.
 
                 logger.warn("{} 📊 EOD EXIT: {} - Qty: {}, Entry: ${}, Current: ${}, P&L: ${} ({}%)",
                     profilePrefix, symbol, qty, entryPrice, currentPrice, pnl, String.format("%.2f", pnlPercent));
@@ -4018,16 +3987,9 @@ public class ProfileManager implements Runnable {
             // If any sell failed, eodExitExecutedDate stays null → retries every 10s
             // until market closes at 16:00 (30-minute retry window).
             var remaining = client.getPositions();
-            boolean allRemainingCarried = remaining.stream()
-                .allMatch(p -> carriedSymbols.contains(p.symbol()));
-            if (allRemainingCarried) {
+            if (remaining.isEmpty()) {
                 eodExitExecutedDate = today;
-                if (carriedSymbols.isEmpty()) {
-                    logger.warn("{} ✅ END OF DAY EXIT COMPLETE - All positions closed", profilePrefix);
-                } else {
-                    logger.warn("{} ✅ END OF DAY EXIT COMPLETE - {} carried overnight: {}",
-                        profilePrefix, carriedSymbols.size(), carriedSymbols);
-                }
+                logger.warn("{} ✅ END OF DAY EXIT COMPLETE - All positions closed", profilePrefix);
                 // Write daily summary to DB and send push notification (async, non-blocking).
                 String eodRegime = latestRegime != null ? latestRegime.name() : "UNKNOWN";
                 double eodVix = latestVix;

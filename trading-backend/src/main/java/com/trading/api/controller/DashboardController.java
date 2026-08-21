@@ -237,20 +237,21 @@ public final class DashboardController {
         try {
             var client = cachedAlpacaClient;
             var positions = client.getPositions();
-            double takeProfitPercent = config.getMainTakeProfitPercent();
-            
+            double vix = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            double takeProfitPercent = config.getVixScaledTakeProfit(vix > 0 ? vix : 12.0);
+
             for (var pos : positions) {
                 var target = new HashMap<String, Object>();
                 double entryPrice = pos.avgEntryPrice();
                 double currentPrice = Math.abs(pos.marketValue() / pos.quantity());
                 double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100.0;
                 double distancePercent = takeProfitPercent - pnlPercent;
-                
+
                 target.put("symbol", pos.symbol());
                 target.put("currentPnlPercent", pnlPercent);
                 target.put("targetPercent", takeProfitPercent);
                 target.put("distancePercent", distancePercent);
-                target.put("eta", distancePercent < 0.5 ? "Soon" : "-");
+                target.put("eta", distancePercent < 0.3 ? "Soon" : "-");
                 targets.add(target);
             }
         } catch (Exception e) {

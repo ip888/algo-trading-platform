@@ -36,8 +36,10 @@ public class OpeningRangeBreakoutStrategy {
     private static final int MIN_BARS_REQUIRED = 5;      // reject if fewer than 5 bars in window
     private static final ZoneId ET = ZoneId.of("America/New_York");
 
-    // Breakout confirmation: price must exceed range boundary by this % to avoid false breakouts
-    private static final double BREAKOUT_BUFFER_PCT = 0.05;
+    // Breakout confirmation: price must exceed range boundary by this % to avoid false breakouts.
+    // 0.05% (~3¢ on a $57 stock) was too thin — barely-above breakouts reverse immediately.
+    // 0.20% requires a real move beyond the level before committing capital.
+    private static final double BREAKOUT_BUFFER_PCT = 0.20;
 
     record OrbLevel(double high, double low, LocalDate date) {
         double breakoutAbove() { return high * (1.0 + BREAKOUT_BUFFER_PCT / 100.0); }

@@ -1723,7 +1723,7 @@ public class ProfileManager implements Runnable {
         // ========== AI COMPONENT 1: SENTIMENT ANALYSIS ==========
         if (sentimentAnalyzer != null) {
             try {
-                boolean isBullish = profile.strategyType().equals("BULLISH");
+                boolean isBullish = true; // handleBuy is always a long (bullish) entry
                 double sentimentScore = sentimentAnalyzer.getSentimentScore(symbol);
                 
                 // Record sentiment for dashboard

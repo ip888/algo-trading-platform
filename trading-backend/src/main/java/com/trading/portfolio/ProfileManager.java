@@ -1865,7 +1865,7 @@ public class ProfileManager implements Runnable {
             try {
                 var now = LocalDateTime.now();
                 var tradeStats = database.getTradeStatistics();
-                double recentWinRate = tradeStats.total() > 5 ? tradeStats.winRate() : 0.55; // min 6 trades before trusting stats
+                double recentWinRate = tradeStats.totalTrades() > 5 ? tradeStats.winRate() : 0.55; // min 6 trades before trusting stats
                 var setup = new com.trading.ai.SignalPredictor.TradingSetup(
                     currentVix,
                     now.getHour(),

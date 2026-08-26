@@ -32,10 +32,11 @@ public class TimeDecayExitManager {
             return false;
         }
         
-        // Calculate how long position has been held
+        // Calculate how long position has been held (fractional hours — thresholds like
+        // 1.5h need finer granularity than whole-hour truncation gives)
         Duration held = Duration.between(position.entryTime(), Instant.now());
-        long hoursHeld = held.toHours();
-        
+        double hoursHeld = held.toMinutes() / 60.0;
+
         // Check if held long enough
         if (hoursHeld < config.getFlatPositionHours()) {
             return false;
@@ -49,7 +50,7 @@ public class TimeDecayExitManager {
         // Exit if flat (within threshold)
         if (pnlPercent < config.getFlatPositionThreshold()) {
             logger.info("⏰ {} Time-Decay Exit: Held {}h, P&L only ±{}% (threshold: {}%)",
-                position.symbol(), hoursHeld, String.format("%.2f", pnlPercent), String.format("%.2f", config.getFlatPositionThreshold()));
+                position.symbol(), String.format("%.1f", hoursHeld), String.format("%.2f", pnlPercent), String.format("%.2f", config.getFlatPositionThreshold()));
             return true;
         }
         
@@ -61,9 +62,10 @@ public class TimeDecayExitManager {
      */
     public String getExitReason(TradePosition position, double currentPrice) {
         Duration held = Duration.between(position.entryTime(), Instant.now());
+        double hoursHeld = held.toMinutes() / 60.0;
         double pnlPercent = ((currentPrice - position.entryPrice()) / position.entryPrice()) * 100.0;
-        
-        return String.format("Time-decay: Held %dh with only %.2f%% P&L",
-            held.toHours(), pnlPercent);
+
+        return String.format("Time-decay: Held %.1fh with only %.2f%% P&L",
+            hoursHeld, pnlPercent);
     }
 }

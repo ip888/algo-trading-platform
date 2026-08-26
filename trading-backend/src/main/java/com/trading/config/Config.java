@@ -1461,8 +1461,8 @@ public class Config {
         return getBooleanProperty("TIME_DECAY_EXITS", true);
     }
     
-    public int getFlatPositionHours() {
-        return getIntProperty("FLAT_POSITION_HOURS", 2);
+    public double getFlatPositionHours() {
+        return getDoubleProperty("FLAT_POSITION_HOURS", 2);
     }
     
     public double getFlatPositionThreshold() {

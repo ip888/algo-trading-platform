@@ -4175,9 +4175,33 @@ public class ProfileManager implements Runnable {
      * TODO: Implement proper correlation calculation when API available
      */
     private double getMaxCorrelation(String newSymbol) {
-        // Simplified for now - return low correlation
-        // Full implementation requires historical price data API
-        return 0.1;
+        // Real correlation via CorrelationCalculator (same instance the Tier 2.4 entry-cap
+        // gate above uses) — reuses its 20-day Pearson-correlation matrix rather than the
+        // old hardcoded 0.1 stub, which silently defeated adjustForCorrelation() whenever
+        // Phase 3 adaptive sizing was enabled.
+        try {
+            java.util.List<String> openSymbols = new java.util.ArrayList<>(portfolio.getActiveStoredSymbols());
+            if (openSymbols.isEmpty()) {
+                return 0.0;
+            }
+            if (!openSymbols.contains(newSymbol)) {
+                openSymbols.add(newSymbol);
+            }
+            var analysis = correlationCalculator.analyzePortfolio(openSymbols);
+            var row = analysis.correlationMatrix().get(newSymbol);
+            if (row == null) {
+                return 0.0;
+            }
+            double max = 0.0;
+            for (var entry : row.entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(newSymbol)) continue; // skip self-correlation (1.0)
+                max = Math.max(max, Math.abs(entry.getValue()));
+            }
+            return max;
+        } catch (Exception e) {
+            logger.debug("getMaxCorrelation failed for {}: {}", newSymbol, e.getMessage());
+            return 0.0;
+        }
     }
 
     /**

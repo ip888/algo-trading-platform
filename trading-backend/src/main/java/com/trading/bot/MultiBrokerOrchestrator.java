@@ -80,7 +80,7 @@ public final class MultiBrokerOrchestrator {
         var marketHoursFilter  = new MarketHoursFilter(config);
         var database           = new TradeDatabase();
         var errorDetector      = new ErrorDetector();
-        var configSelfHealer   = new ConfigSelfHealer(config, errorDetector);
+        var configSelfHealer   = new ConfigSelfHealer(config, errorDetector, database);
         var alphaVantageClient = new com.trading.ai.AlphaVantageClient(
             config.getAlphaVantageApiKey(), config.isAlphaVantageEnabled(),
             config.getAlphaVantageCacheTTL(), config.getAlphaVantageNewsLimit(),

@@ -161,7 +161,7 @@ public final class TradingBot {
         
         // Initialize self-healing components
         var errorDetector = new com.trading.autonomous.ErrorDetector();
-        var configSelfHealer = new com.trading.autonomous.ConfigSelfHealer(config, errorDetector);
+        var configSelfHealer = new com.trading.autonomous.ConfigSelfHealer(config, errorDetector, database);
         
         String sentimentProvider = alphaVantageClient.isEnabled() ? "Alpha Vantage" :
                                   finGPTClient.isEnabled() ? "FinGPT" : "Keywords Only";

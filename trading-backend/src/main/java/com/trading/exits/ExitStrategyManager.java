@@ -11,13 +11,16 @@ import java.util.Map;
 
 /**
  * Enhanced Exit Strategy Manager - Implements sophisticated exit logic.
- * 
+ *
  * Exit Strategies:
  * 1. Partial Exits - Take profits incrementally (25%, 50%, 75% levels)
  * 2. Volatility Breakout Exits - Exit on abnormal volatility spikes
- * 3. Time Decay Exits - Exit stale losing positions
- * 4. Correlation Exits - Reduce exposure when portfolio is correlated
- * 
+ * 3. Time Decay Exits - profit-lock after a long hold + an absolute hard-cap safety net
+ *    (NOT flat-position exits — see {@link #evaluateTimeDecayExit} for why that's
+ *    {@code TimeDecayExitManager}'s job, run earlier in the cycle)
+ * 4. Time Stop - abandon a dead/sideways trend after N days with minimal R-move
+ * 5. Correlation Exits - Reduce exposure when portfolio is correlated
+ *
  * Goal: Maximize profit capture while minimizing drawdowns.
  */
 public class ExitStrategyManager {
@@ -266,15 +269,25 @@ public class ExitStrategyManager {
     }
     
     /**
-     * Evaluate time decay exit.
-     * Exit positions that have been open too long without profit.
+     * Time-based exit, scoped to what the faster {@code TimeDecayExitManager} check
+     * (run earlier in ProfileManager's cycle, before evaluateExit() is even reached)
+     * does NOT cover: TimeDecayExitManager only exits FLAT positions (within
+     * ±FLAT_POSITION_THRESHOLD%, default 0.4%) after FLAT_POSITION_HOURS (default 1.5h).
+     * This method covers two cases outside that band:
+     *   1. Absolute hard cap — force-close ANY position (winning, losing, or flat) that
+     *      somehow survives past MAX_ABSOLUTE_HOLD_HOURS. Last-resort safety net.
+     *   2. Profit-lock — a position sitting meaningfully profitable (>0.1%, i.e. outside
+     *      the flat band TimeDecayExitManager would have already caught) that hasn't hit
+     *      its take-profit after MAX_HOLD_TIME_HOURS. Bank the gain rather than risk a
+     *      reversal while waiting on a target that may never come.
+     * The former "break-even after 2× max hold" branch was removed — TimeDecayExitManager
+     * already catches anything within its flat band hours earlier, making that branch
+     * dead in practice by the time 2× max hold is ever reached.
      */
     private ExitDecision evaluateTimeDecayExit(TradePosition position, double currentPrice) {
         Duration holdTime = Duration.between(position.entryTime(), Instant.now());
         double profitPercent = position.getProfitPercent(currentPrice);
 
-        // Hard cap: force-close any position held beyond MAX_ABSOLUTE_HOLD_HOURS regardless of P&L.
-        // Prevents indefinite hold of stalled losers that never hit their stop-loss.
         long maxAbsoluteHoldHours = config.getMaxAbsoluteHoldHours();
         if (holdTime.toHours() >= maxAbsoluteHoldHours) {
             return ExitDecision.fullExit(ExitType.TIME_DECAY,
@@ -283,7 +296,6 @@ public class ExitStrategyManager {
                 currentPrice);
         }
 
-        // Exit PROFITABLE positions after configured max hold time (lock in gains)
         // Do NOT sell losing positions on time alone — let them recover.
         // Losers are still protected by stop-loss (emergency at -2.5%) and strategy SELL signals.
         long maxHoldHours = config.getMaxHoldTimeHours();
@@ -294,15 +306,7 @@ public class ExitStrategyManager {
                     holdTime.toHours(), profitPercent * 100),
                 currentPrice);
         }
-        
-        // Also exit break-even positions after 2x max hold time
-        if (holdTime.toHours() >= maxHoldHours * 2 && Math.abs(profitPercent) < 0.005) {
-            return ExitDecision.fullExit(ExitType.TIME_DECAY,
-                String.format("Time decay exit after %d hours (break-even)", 
-                    holdTime.toHours()),
-                currentPrice);
-        }
-        
+
         return ExitDecision.noExit();
     }
     
@@ -396,11 +400,12 @@ public class ExitStrategyManager {
      */
     public String getSummary() {
         return String.format(
-            "Exit Strategies: Partial(%.0f%%/%.0f%%/%.0f%%), TimeDecay(%dh), VolSpike(%.0f%%)",
+            "Exit Strategies: Partial(%.0f%%/%.0f%%/%.0f%%), ProfitLock(%dh)/AbsCap(%dh), VolSpike(%.0f%%)",
             PARTIAL_EXIT_LEVEL_1 * 100,
             PARTIAL_EXIT_LEVEL_2 * 100,
             PARTIAL_EXIT_LEVEL_3 * 100,
             config.getMaxHoldTimeHours(),
+            config.getMaxAbsoluteHoldHours(),
             5.0 // Volatility threshold
         );
     }

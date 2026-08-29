@@ -1,11 +1,16 @@
 package com.trading.autonomous;
 
 import com.trading.config.Config;
+import com.trading.persistence.TradeDatabase;
 import com.trading.websocket.TradingWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
@@ -17,33 +22,35 @@ import java.util.concurrent.*;
  */
 public class ConfigSelfHealer {
     private static final Logger logger = LoggerFactory.getLogger(ConfigSelfHealer.class);
-    
+
     private final Config config;
     private final ErrorDetector errorDetector;
     private final SandboxTester sandboxTester;
+    private final TradeDatabase database;
     private final Path configPath;
     private final Path backupPath;
-    
+
     // Safety limits
     private static final int MAX_HEALS_PER_HOUR = 3;
     private static final int MAX_TOTAL_HEALS = 10;
     private final Map<String, Instant> healHistory = new ConcurrentHashMap<>();
     private int totalHeals = 0;
-    
+
     // Sandbox testing
     private final ExecutorService sandboxExecutor = Executors.newSingleThreadExecutor();
-    
-    public ConfigSelfHealer(Config config, ErrorDetector errorDetector) {
+
+    public ConfigSelfHealer(Config config, ErrorDetector errorDetector, TradeDatabase database) {
         this.config = config;
         this.errorDetector = errorDetector;
+        this.database = database;
         this.configPath = Paths.get("config.properties");
         this.backupPath = Paths.get("config.properties.backup.selfheal");
-        
+
         // Initialize full sandbox tester
         Path botJar = Paths.get("target/alpaca-trading-bot-1.0.0.jar");
         this.sandboxTester = new SandboxTester(botJar);
-        
-        logger.info("🔧 ConfigSelfHealer initialized (Max heals: {}/hour, {}/total)", 
+
+        logger.info("🔧 ConfigSelfHealer initialized (Max heals: {}/hour, {}/total)",
             MAX_HEALS_PER_HOUR, MAX_TOTAL_HEALS);
         logger.info("🧪 Full sandbox testing enabled");
     }
@@ -92,30 +99,34 @@ public class ConfigSelfHealer {
                     // Step 4: Promote to production
                     logger.info("✅ Sandbox test passed, promoting fix to production");
                     recordHeal(analysis.pattern().name());
-                    
+
                     // Reset error counts since we fixed it
                     errorDetector.resetCounts(analysis.pattern().name());
-                    
+
                     // Broadcast success
                     TradingWebSocketHandler.broadcastActivity(
-                        String.format("✅ AUTO-HEAL SUCCESS: Fixed %s - Config updated", 
+                        String.format("✅ AUTO-HEAL SUCCESS: Fixed %s - Config updated",
                             analysis.pattern().name()),
                         "SUCCESS"
                     );
-                    
+                    recordHealAudit(analysis.pattern().name(), adjustments, true,
+                        "Fix applied and tested successfully");
+
                     return new HealResult(true, "Fix applied and tested successfully", adjustments);
                 } else {
                     // Step 5: Rollback if test failed
                     logger.error("❌ Sandbox test failed, rolling back changes");
                     rollbackConfig();
-                    
+
                     // Broadcast failure
                     TradingWebSocketHandler.broadcastActivity(
-                        String.format("❌ AUTO-HEAL FAILED: %s - Sandbox test failed, rolled back", 
+                        String.format("❌ AUTO-HEAL FAILED: %s - Sandbox test failed, rolled back",
                             analysis.pattern().name()),
                         "ERROR"
                     );
-                    
+                    recordHealAudit(analysis.pattern().name(), adjustments, false,
+                        "Sandbox test failed, rolled back");
+
                     return new HealResult(false, "Sandbox test failed, rolled back", null);
                 }
             } catch (Exception e) {
@@ -125,9 +136,11 @@ public class ConfigSelfHealer {
                 } catch (IOException rollbackError) {
                     logger.error("❌ Rollback failed!", rollbackError);
                 }
-                
+                recordHealAudit(analysis.pattern().name(), analysis.pattern().configAdjustments(), false,
+                    "Healing failed: " + e.getMessage());
+
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("❌ AUTO-HEAL ERROR: %s - %s", 
+                    String.format("❌ AUTO-HEAL ERROR: %s - %s",
                         analysis.pattern().name(), e.getMessage()),
                     "ERROR"
                 );
@@ -268,7 +281,53 @@ public class ConfigSelfHealer {
         totalHeals++;
         logger.info("📊 Heal recorded: {} (Total: {}/{})", errorPattern, totalHeals, MAX_TOTAL_HEALS);
     }
-    
+
+    /**
+     * Persist every heal attempt (success or failure) to bot_state and push a
+     * notification — previously the only record of an autonomous config edit was an
+     * app log line and a WebSocket broadcast, neither of which the operator sees
+     * outside the dashboard. Reuses the same ntfy.sh pattern as the EOD summary push
+     * in ProfileManager (set NTFY_TOPIC to enable).
+     */
+    private void recordHealAudit(String errorPattern, Map<String, String> adjustments,
+                                  boolean success, String message) {
+        try {
+            String key = "config_heal:" + Instant.now().toEpochMilli();
+            String adjustmentsJson = adjustments == null ? "{}" : adjustments.entrySet().stream()
+                .map(e -> String.format("\"%s\":\"%s\"", e.getKey(), e.getValue()))
+                .reduce((a, b) -> a + "," + b)
+                .map(s -> "{" + s + "}")
+                .orElse("{}");
+            String record = String.format(
+                "{\"pattern\":\"%s\",\"success\":%b,\"message\":\"%s\",\"adjustments\":%s,\"timestamp\":\"%s\"}",
+                errorPattern, success, message.replace("\"", "'"), adjustmentsJson, Instant.now());
+            if (database != null) {
+                database.saveBotState(key, record);
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to write self-heal audit record: {}", e.getMessage());
+        }
+
+        String ntfyTopic = System.getenv("NTFY_TOPIC");
+        if (ntfyTopic == null || ntfyTopic.isBlank()) {
+            return;
+        }
+        try {
+            String msg = String.format("%s %s: %s",
+                success ? "✅" : "❌", errorPattern, message);
+            var req = HttpRequest.newBuilder()
+                .uri(URI.create("https://ntfy.sh/" + ntfyTopic))
+                .POST(HttpRequest.BodyPublishers.ofString(msg))
+                .header("Title", "Trading Bot Self-Heal")
+                .header("Priority", success ? "default" : "high")
+                .build();
+            HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.discarding());
+        } catch (Exception e) {
+            logger.warn("Self-heal ntfy push failed: {}", e.getMessage());
+        }
+    }
+
+
     /**
      * Get healing statistics for dashboard.
      */

@@ -30,6 +30,18 @@ public class MultiTimeframeAnalyzer {
     private final Map<String, TimeframeCache> cache = new HashMap<>();
     private static final Duration CACHE_EXPIRY = Duration.ofMinutes(1);
 
+    // Overridable clock — replaced by the backtest harness so the 1-minute cache is judged
+    // against simulated time. Without this, a replay loop advancing through a full trading
+    // day in a few real-world seconds would compute the analysis once and silently reuse it
+    // for the entire simulated day (real wall-clock time barely moves during a fast replay).
+    // Default behavior (real wall clock) is unchanged for live trading.
+    private java.util.function.Supplier<Instant> nowSupplier = Instant::now;
+
+    /** Visible for the backtest harness — injects a fixed/moving clock instead of the real one. */
+    public void setNowSupplier(java.util.function.Supplier<Instant> supplier) {
+        this.nowSupplier = supplier;
+    }
+
     public MultiTimeframeAnalyzer(BrokerClient client, Config config) {
         this.client = client;
         this.config = config;
@@ -189,7 +201,7 @@ public class MultiTimeframeAnalyzer {
         // Check cache first
         String cacheKey = symbol + "_" + timeframe;
         TimeframeCache cached = cache.get(cacheKey);
-        if (cached != null && Duration.between(cached.timestamp, Instant.now()).compareTo(CACHE_EXPIRY) < 0) {
+        if (cached != null && Duration.between(cached.timestamp, nowSupplier.get()).compareTo(CACHE_EXPIRY) < 0) {
             return cached.signal;
         }
         
@@ -221,7 +233,7 @@ public class MultiTimeframeAnalyzer {
         );
         
         // Cache result
-        cache.put(cacheKey, new TimeframeCache(result, Instant.now()));
+        cache.put(cacheKey, new TimeframeCache(result, nowSupplier.get()));
         
         return result;
     }

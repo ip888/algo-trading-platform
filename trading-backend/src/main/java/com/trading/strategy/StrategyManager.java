@@ -73,6 +73,18 @@ public final class StrategyManager {
     }
 
     /**
+     * Injects a replay clock into the sub-strategies that read wall-clock time directly
+     * (ORB's trading-window checks, Scalp's window/cooldown checks) — used only by the
+     * backtest harness. Live trading never calls this, so both keep their real-clock default.
+     */
+    public void setNowSupplier(java.util.function.Supplier<java.time.ZonedDateTime> supplier) {
+        orbStrategy.setNowSupplier(supplier);
+        if (scalpStrategy != null) {
+            scalpStrategy.setNowSupplier(supplier);
+        }
+    }
+
+    /**
      * Evaluate trading signal using regime-based strategy selection.
      */
     public TradingSignal evaluate(String symbol, double currentPrice, double positionQty,

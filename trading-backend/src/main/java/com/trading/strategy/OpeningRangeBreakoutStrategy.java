@@ -49,6 +49,15 @@ public class OpeningRangeBreakoutStrategy {
 
     private final ConcurrentHashMap<String, OrbLevel> levels = new ConcurrentHashMap<>();
 
+    // Overridable clock — replaced by the backtest harness to replay historical days.
+    // Default behavior (real wall clock) is unchanged for live trading.
+    private java.util.function.Supplier<ZonedDateTime> nowSupplier = () -> ZonedDateTime.now(ET);
+
+    /** Visible for the backtest harness — injects a fixed/moving clock instead of the real one. */
+    public void setNowSupplier(java.util.function.Supplier<ZonedDateTime> supplier) {
+        this.nowSupplier = supplier;
+    }
+
     /**
      * Evaluate ORB signal for a symbol.
      *
@@ -58,7 +67,7 @@ public class OpeningRangeBreakoutStrategy {
      */
     public TradingSignal evaluate(String symbol, double currentPrice, double positionQty,
                                   BrokerClient client) {
-        var etNow = ZonedDateTime.now(ET);
+        var etNow = nowSupplier.get();
         var today = etNow.toLocalDate();
         var currentTime = etNow.toLocalTime();
 
@@ -116,14 +125,19 @@ public class OpeningRangeBreakoutStrategy {
 
     /** True if ORB BUY signals are currently active (10:00–11:30am ET). */
     public boolean isActiveWindow() {
-        var t = ZonedDateTime.now(ET).toLocalTime();
+        var t = nowSupplier.get().toLocalTime();
         return !t.isBefore(LocalTime.of(10, 0)) && t.isBefore(LocalTime.of(11, 30));
     }
 
     /** True if an ORB level has been computed for this symbol today. */
     public boolean hasLevel(String symbol) {
         var level = levels.get(symbol);
-        return level != null && level.date().equals(LocalDate.now(ET));
+        return level != null && level.date().equals(nowSupplier.get().toLocalDate());
+    }
+
+    /** Visible for the backtest harness — clears cached ORB levels between simulated trading days. */
+    public void clearLevels() {
+        levels.clear();
     }
 
     private OrbLevel computeOrb(String symbol, LocalDate date, BrokerClient client) {

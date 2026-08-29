@@ -25,9 +25,19 @@ import java.util.Map;
  */
 public class ExitStrategyManager {
     private static final Logger logger = LoggerFactory.getLogger(ExitStrategyManager.class);
-    
+
     private final Config config;
-    
+
+    // Overridable clock — replaced by the backtest harness to replay historical hold times.
+    // Default behavior (real wall clock) is unchanged for live trading.
+    private java.util.function.Supplier<Instant> nowSupplier = Instant::now;
+
+    /** Visible for the backtest harness — injects a fixed/moving clock instead of the real one. */
+    public void setNowSupplier(java.util.function.Supplier<Instant> supplier) {
+        this.nowSupplier = supplier;
+    }
+
+
     // Partial exit levels (percentage of profit target)
     private static final double PARTIAL_EXIT_LEVEL_1 = 0.25; // 25% of profit target
     private static final double PARTIAL_EXIT_LEVEL_2 = 0.50; // 50% of profit target
@@ -285,7 +295,7 @@ public class ExitStrategyManager {
      * dead in practice by the time 2× max hold is ever reached.
      */
     private ExitDecision evaluateTimeDecayExit(TradePosition position, double currentPrice) {
-        Duration holdTime = Duration.between(position.entryTime(), Instant.now());
+        Duration holdTime = Duration.between(position.entryTime(), nowSupplier.get());
         double profitPercent = position.getProfitPercent(currentPrice);
 
         long maxAbsoluteHoldHours = config.getMaxAbsoluteHoldHours();
@@ -377,7 +387,7 @@ public class ExitStrategyManager {
         if (!config.isTimeStopEnabled()) return ExitDecision.noExit();
 
         // Approximate "bars" as trading days held. 24h hold = ~1 daily bar.
-        long hoursHeld = Duration.between(position.entryTime(), Instant.now()).toHours();
+        long hoursHeld = Duration.between(position.entryTime(), nowSupplier.get()).toHours();
         long requiredHours = config.getTimeStopBars() * 24L;
         if (hoursHeld < requiredHours) return ExitDecision.noExit();
 

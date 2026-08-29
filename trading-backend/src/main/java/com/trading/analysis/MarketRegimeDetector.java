@@ -31,6 +31,17 @@ public class MarketRegimeDetector {
     private Instant lastUpdate;
     private final Duration cacheExpiry;
 
+    // Overridable clock — replaced by the backtest harness so cache staleness is judged
+    // against simulated time, not real wall-clock time (which barely moves during a fast
+    // replay loop and would either never expire the cache or thrash it every call).
+    // Default behavior (real wall clock) is unchanged for live trading.
+    private java.util.function.Supplier<Instant> nowSupplier = Instant::now;
+
+    /** Visible for the backtest harness — injects a fixed/moving clock instead of the real one. */
+    public void setNowSupplier(java.util.function.Supplier<Instant> supplier) {
+        this.nowSupplier = supplier;
+    }
+
     public MarketRegimeDetector(BrokerClient client, Config config, MarketAnalyzer marketAnalyzer) {
         this.client = client;
         this.config = config;
@@ -118,17 +129,17 @@ public class MarketRegimeDetector {
      */
     public MarketRegimeAnalysis getCurrentRegime() {
         if (cachedRegime != null && lastUpdate != null) {
-            Duration age = Duration.between(lastUpdate, Instant.now());
+            Duration age = Duration.between(lastUpdate, nowSupplier.get());
             if (age.compareTo(cacheExpiry) < 0) {
-                logger.debug("Using cached regime: {} (age: {}s)", 
+                logger.debug("Using cached regime: {} (age: {}s)",
                     cachedRegime.regime, age.getSeconds());
                 return cachedRegime;
             }
         }
-        
+
         // Cache expired or not set, recalculate
         cachedRegime = detectRegime();
-        lastUpdate = Instant.now();
+        lastUpdate = nowSupplier.get();
         
         logger.info("🎯 Market Regime: {}", cachedRegime.getSummary());
         return cachedRegime;

@@ -16,11 +16,20 @@ public class TimeDecayExitManager {
     private static final Logger logger = LoggerFactory.getLogger(TimeDecayExitManager.class);
     
     private final Config config;
-    
+
+    // Overridable clock — replaced by the backtest harness to replay historical hold times.
+    // Default behavior (real wall clock) is unchanged for live trading.
+    private java.util.function.Supplier<Instant> nowSupplier = Instant::now;
+
     public TimeDecayExitManager(Config config) {
         this.config = config;
     }
-    
+
+    /** Visible for the backtest harness — injects a fixed/moving clock instead of the real one. */
+    public void setNowSupplier(java.util.function.Supplier<Instant> supplier) {
+        this.nowSupplier = supplier;
+    }
+
     /**
      * Check if position should be exited due to time decay
      * @param position Position to check
@@ -31,10 +40,10 @@ public class TimeDecayExitManager {
         if (!config.isTimeDecayExits()) {
             return false;
         }
-        
+
         // Calculate how long position has been held (fractional hours — thresholds like
         // 1.5h need finer granularity than whole-hour truncation gives)
-        Duration held = Duration.between(position.entryTime(), Instant.now());
+        Duration held = Duration.between(position.entryTime(), nowSupplier.get());
         double hoursHeld = held.toMinutes() / 60.0;
 
         // Check if held long enough
@@ -61,7 +70,7 @@ public class TimeDecayExitManager {
      * Get reason for exit (for logging)
      */
     public String getExitReason(TradePosition position, double currentPrice) {
-        Duration held = Duration.between(position.entryTime(), Instant.now());
+        Duration held = Duration.between(position.entryTime(), nowSupplier.get());
         double hoursHeld = held.toMinutes() / 60.0;
         double pnlPercent = ((currentPrice - position.entryPrice()) / position.entryPrice()) * 100.0;
 

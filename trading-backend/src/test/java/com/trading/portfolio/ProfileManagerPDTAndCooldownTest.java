@@ -264,6 +264,19 @@ class ProfileManagerPDTAndCooldownTest {
         setField("exitEvaluator", exitEvaluator);
         setField("todayPnL", 0.0);
         setField("brokerName", "alpaca");
+
+        // entryEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as exitEvaluator above. Built manually from the same collaborators just seeded.
+        java.util.function.DoubleSupplier todayPnLSupplier = () -> {
+            try { return (double) (Double) getField("todayPnL"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<java.time.Instant> bearishRegimeMarketStartSupplier = () -> {
+            try { return (java.time.Instant) getField("bearishRegimeMarketStart"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var entryEvaluator = new EntryEvaluator(profile, mockConfig, mockDatabase, mockClient, portfolio,
+            riskGate, realPDTProtection, null, null, null, null, null, null, null,
+            todayPnLSupplier, bearishRegimeMarketStartSupplier);
+        setField("entryEvaluator", entryEvaluator);
     }
 
     // ── PDT Threshold Tests ──────────────────────────────────────────────────

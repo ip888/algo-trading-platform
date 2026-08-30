@@ -209,5 +209,23 @@ abstract class ProfileManagerTestBase {
             trailingTargetManager, orderTypeSelector, null, null, 10_000.0,
             vixSupplier, regimeSupplier, equitySupplier, updateDailyPnLFn);
         setField("exitEvaluator", exitEvaluator);
+
+        // entryEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as exitEvaluator above. marketHoursFilter/correlationCalculator/sentimentAnalyzer/
+        // signalPredictor/mlEntryScorer/volumeProfileAnalyzer aren't seeded on profileManager by
+        // this base setup, so they stay null here too — every gate that would touch them is
+        // guarded by a config flag that defaults false via mockConfig()'s defaultAnswer, or (for
+        // volume profile) by the default RANGE_BOUND test regime, so the gates are never reached.
+        java.util.function.DoubleSupplier todayPnLSupplier = () -> {
+            try { return (double) getField("todayPnL"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<java.time.Instant> bearishRegimeMarketStartSupplier = () -> {
+            try { return (java.time.Instant) getField("bearishRegimeMarketStart"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var entryEvaluator = new EntryEvaluator(profile, mockConfig, mockDatabase, mockClient, portfolio,
+            riskGate, (com.trading.protection.PDTProtection) getField("pdtProtection"), null, null, null, null,
+            (com.trading.analysis.MarketBreadthAnalyzer) getField("marketBreadthAnalyzer"), null, null,
+            todayPnLSupplier, bearishRegimeMarketStartSupplier);
+        setField("entryEvaluator", entryEvaluator);
     }
 }

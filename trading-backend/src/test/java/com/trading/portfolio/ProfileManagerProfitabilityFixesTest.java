@@ -201,10 +201,14 @@ class ProfileManagerProfitabilityFixesTest extends ProfileManagerTestBase {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private boolean invokeHasLosingPosition(String profilePrefix, String candidateSymbol) throws Exception {
-        Method m = ProfileManager.class.getDeclaredMethod(
+        // hasSignificantlyLosingPosition lives on EntryEvaluator since 2026-08-30 (see its class
+        // Javadoc) — invoke on the entryEvaluator instance held by profileManager instead.
+        Method m = EntryEvaluator.class.getDeclaredMethod(
             "hasSignificantlyLosingPosition", String.class, String.class);
         m.setAccessible(true);
-        return (boolean) m.invoke(profileManager, profilePrefix, candidateSymbol);
+        Field entryEvaluatorField = ProfileManager.class.getDeclaredField("entryEvaluator");
+        entryEvaluatorField.setAccessible(true);
+        return (boolean) m.invoke(entryEvaluatorField.get(profileManager), profilePrefix, candidateSymbol);
     }
 
     private void holdPosition(String symbol, String profilePrefix, double entryPrice, double currentPrice) throws Exception {

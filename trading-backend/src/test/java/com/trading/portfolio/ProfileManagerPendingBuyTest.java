@@ -48,12 +48,16 @@ class ProfileManagerPendingBuyTest extends ProfileManagerTestBase {
 
     @SuppressWarnings("unchecked")
     private ConcurrentHashMap<String, Long> getPendingBuys() throws Exception {
-        Field f = ProfileManager.class.getDeclaredField("pendingBuySymbols");
+        // pendingBuySymbols lives on RiskGate now (extracted 2026-08-30 — see its class
+        // Javadoc), so reflect into profileManager.riskGate.pendingBuySymbols rather than
+        // ProfileManager directly.
+        Field riskGateField = ProfileManager.class.getDeclaredField("riskGate");
+        riskGateField.setAccessible(true);
+        Object riskGate = riskGateField.get(profileManager);
+
+        Field f = riskGate.getClass().getDeclaredField("pendingBuySymbols");
         f.setAccessible(true);
-        // pendingBuySymbols was converted from static to instance state 2026-08-30 — see
-        // ProfileManager's "INSTANCE STATE" comment block — so this now reads off the test's
-        // own profileManager instance, not the class.
-        return (ConcurrentHashMap<String, Long>) f.get(profileManager);
+        return (ConcurrentHashMap<String, Long>) f.get(riskGate);
     }
 
     @Test

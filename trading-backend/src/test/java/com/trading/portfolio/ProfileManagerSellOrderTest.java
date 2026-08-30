@@ -69,22 +69,40 @@ class ProfileManagerSellOrderTest {
     }
 
     /**
-     * Set a private field on ProfileManager via reflection.
+     * Resolves a field either directly on ProfileManager, or — for the ~20 risk/coordination
+     * fields extracted onto RiskGate 2026-08-30 (stopLossCooldowns, pendingExitOrders, etc.) —
+     * on profileManager's own riskGate instance.
      */
-    private void setField(String fieldName, Object value) throws Exception {
-        Field field = ProfileManager.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        field.set(profileManager, value);
+    private Object[] resolveFieldTarget(String fieldName) throws Exception {
+        try {
+            Field f = ProfileManager.class.getDeclaredField(fieldName);
+            f.setAccessible(true);
+            return new Object[]{f, profileManager};
+        } catch (NoSuchFieldException e) {
+            Field riskGateField = ProfileManager.class.getDeclaredField("riskGate");
+            riskGateField.setAccessible(true);
+            Object riskGate = riskGateField.get(profileManager);
+            Field f = riskGate.getClass().getDeclaredField(fieldName);
+            f.setAccessible(true);
+            return new Object[]{f, riskGate};
+        }
     }
 
     /**
-     * Get a private field from ProfileManager via reflection.
+     * Set a private field on ProfileManager (or its RiskGate) via reflection.
+     */
+    private void setField(String fieldName, Object value) throws Exception {
+        Object[] target = resolveFieldTarget(fieldName);
+        ((Field) target[0]).set(target[1], value);
+    }
+
+    /**
+     * Get a private field from ProfileManager (or its RiskGate) via reflection.
      */
     @SuppressWarnings("unchecked")
     private <T> T getField(String fieldName) throws Exception {
-        Field field = ProfileManager.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        return (T) field.get(profileManager);
+        Object[] target = resolveFieldTarget(fieldName);
+        return (T) ((Field) target[0]).get(target[1]);
     }
 
     /**
@@ -258,15 +276,6 @@ class ProfileManagerSellOrderTest {
         var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
         setField("orderTypeSelector", orderTypeSelector);
 
-        // Initialize the stopLossCooldowns map
-        setField("stopLossCooldowns", new ConcurrentHashMap<String, Long>());
-
-        // Initialize the pendingExitOrders map (prevents duplicate sell/closeTrade calls)
-        setField("pendingExitOrders", new ConcurrentHashMap<String, Long>());
-
-        // Initialize the consecutiveStopLosses map (prevents stop-loss churn)
-        setField("consecutiveStopLosses", new ConcurrentHashMap<String, Integer>());
-
         // Initialize latestRegime
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
 
@@ -282,20 +291,11 @@ class ProfileManagerSellOrderTest {
         // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() on tracked positions.
         setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
 
-        // Converted from static to instance state 2026-08-30 (ProfileManager's "INSTANCE STATE"
-        // comment block) — same allocateInstance-bypasses-initializers issue as breakevenStopsActive
-        // and timeDecayExitManager above.
-        setField("pendingBuySymbols", new ConcurrentHashMap<String, Long>());
-        setField("globalHeldSymbols", new ConcurrentHashMap<String, String>());
-        setField("scalpHeldSymbols", java.util.concurrent.ConcurrentHashMap.newKeySet());
-        setField("lastExitPrices", new ConcurrentHashMap<String, Double>());
-        setField("urgentExitQueue", new ConcurrentHashMap<String, Object>());
-        setField("blockedBuys", new ConcurrentHashMap<String, String>());
-        setField("circuitBreakers", new ConcurrentHashMap<String, com.trading.risk.CircuitBreakerState>());
-        setField("staticScalpDailyCount", new java.util.concurrent.atomic.AtomicInteger(0));
-        setField("scalpCountDate", java.time.LocalDate.now());
-        setField("latestRegimeSnapshot", "UNKNOWN");
-        setField("latestTargetSymbolsSnapshot", "");
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance() same as breakevenStopsActive/timeDecayExitManager above. RiskGate's
+        // own no-arg constructor runs normally once we build one here, so its internal
+        // maps/defaults come out correctly initialized.
+        setField("riskGate", new RiskGate());
 
         // Stub database calls used in checkAllPositionsForRiskExits and checkAllPositionsForProfitTargets
         when(mockDatabase.getOpenTradeRecords(anyString())).thenReturn(List.of());

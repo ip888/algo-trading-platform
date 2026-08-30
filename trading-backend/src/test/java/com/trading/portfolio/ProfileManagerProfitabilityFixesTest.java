@@ -37,20 +37,27 @@ import static org.mockito.Mockito.*;
 class ProfileManagerProfitabilityFixesTest extends ProfileManagerTestBase {
 
     // ── instance-field helpers ─────────────────────────────────────────────────
-    // Named "static" historically — these fields WERE static until the 2026-08-30 refactor
-    // (see ProfileManager's "INSTANCE STATE" comment block) converted them to instance state.
-    // Kept the method names to minimize diff noise below; they now target `profileManager`.
+    // Named "static" historically — these fields WERE static on ProfileManager until the
+    // 2026-08-30 refactor converted them to instance state, then extracted them onto a
+    // separate RiskGate object the same day (see RiskGate's class Javadoc). Kept the method
+    // names to minimize diff noise below; they now reflect into profileManager.riskGate.
+
+    private Object riskGateInstance() throws Exception {
+        Field f = ProfileManager.class.getDeclaredField("riskGate");
+        f.setAccessible(true);
+        return f.get(profileManager);
+    }
 
     private void setStaticField(String name, Object value) throws Exception {
-        Field f = ProfileManager.class.getDeclaredField(name);
+        Field f = RiskGate.class.getDeclaredField(name);
         f.setAccessible(true);
-        f.set(profileManager, value);
+        f.set(riskGateInstance(), value);
     }
 
     private Object getStaticField(String name) throws Exception {
-        Field f = ProfileManager.class.getDeclaredField(name);
+        Field f = RiskGate.class.getDeclaredField(name);
         f.setAccessible(true);
-        return f.get(profileManager);
+        return f.get(riskGateInstance());
     }
 
     @SuppressWarnings("unchecked")

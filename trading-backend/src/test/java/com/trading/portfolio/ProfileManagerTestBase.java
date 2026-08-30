@@ -150,9 +150,6 @@ abstract class ProfileManagerTestBase {
         setField("latestEquity", 10_000.0);
         setField("running", true);
         setField("brokerName", "alpaca");
-        setField("stopLossCooldowns", new ConcurrentHashMap<String, Long>());
-        setField("pendingExitOrders", new ConcurrentHashMap<String, Long>());
-        setField("consecutiveStopLosses", new ConcurrentHashMap<String, Integer>());
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
         setField("todayPnL", 0.0);
         // PDTProtection is used in handleBuy; allocate a real (disabled) instance so it doesn't NPE.
@@ -170,22 +167,12 @@ abstract class ProfileManagerTestBase {
         // without this, it NPEs silently (caught by the outer try/catch) and regime exits never run.
         setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
 
-        // The fields below were converted from `static` to instance fields on 2026-08-30 (see
-        // ProfileManager's "INSTANCE STATE" comment block) — they used to be reliably initialized
-        // by the class's static initializer, which always runs at class-load time regardless of
-        // allocateInstance() bypassing the constructor. Now, like breakevenStopsActive/
-        // timeDecayExitManager above, they need the same manual treatment or they're null/wrong-default
-        // in every test built via allocate().
-        setField("pendingBuySymbols", new ConcurrentHashMap<String, Long>());
-        setField("globalHeldSymbols", new ConcurrentHashMap<String, String>());
-        setField("scalpHeldSymbols", java.util.concurrent.ConcurrentHashMap.newKeySet());
-        setField("lastExitPrices", new ConcurrentHashMap<String, Double>());
-        setField("urgentExitQueue", new ConcurrentHashMap<String, Object>());
-        setField("blockedBuys", new ConcurrentHashMap<String, String>());
-        setField("circuitBreakers", new ConcurrentHashMap<String, com.trading.risk.CircuitBreakerState>());
-        setField("staticScalpDailyCount", new java.util.concurrent.atomic.AtomicInteger(0));
-        setField("scalpCountDate", java.time.LocalDate.now());
-        setField("latestRegimeSnapshot", "UNKNOWN");
-        setField("latestTargetSymbolsSnapshot", "");
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance() same as breakevenStopsActive/timeDecayExitManager above. Unlike
+        // those, RiskGate's own no-arg constructor runs normally once we build one here (it's
+        // ProfileManager's constructor that's bypassed, not RiskGate's), so all of RiskGate's
+        // internal maps/defaults come out correctly initialized — no per-field seeding needed,
+        // just this one line.
+        setField("riskGate", new RiskGate());
     }
 }

@@ -106,76 +106,17 @@ public class ProfileManager implements Runnable {
     private java.time.LocalDate eodExitExecutedDate = null;
     
     // ════════════════════════════════════════════════════════════════════════════════════
-    // INSTANCE STATE — formerly `static`, converted 2026-08-30.
-    //
-    // Why this changed: every field below used to be `static`, explicitly to share state
-    // across the two ProfileManager instances the bot used to run concurrently (a "MAIN" and
-    // an "EXPERIMENTAL" profile — see git history before this date for that design). That
-    // sharing was load-bearing safety logic, not an implementation detail: it's what stopped
-    // MAIN and EXPERIMENTAL from independently buying the same symbol and doubling a loss
-    // (the XLP×2 and IWM/SMH×2 incidents referenced in the comments below actually happened).
-    //
-    // This deployment now runs exactly one broker (BROKERS=alpaca:100 — see
-    // MultiBrokerOrchestrator, which is the only supported entry point as of the same date)
-    // and therefore exactly one ProfileManager instance. There is no second instance for this
-    // state to protect against, so keeping it `static` was pure vestigial risk: a future
-    // config change (adding a second BROKERS entry) would have silently re-enabled
-    // cross-instance sharing semantics that hadn't been exercised or tested in a long time,
-    // reintroducing exactly the bug class this state was originally built to prevent, just
-    // inverted (now the state would EXIST but nobody would remember it needs multi-instance
-    // testing before trusting it again).
-    //
-    // These are now plain instance fields. They keep their thread-safe collection types
-    // (ConcurrentHashMap, volatile) NOT for cross-instance sharing (there's only one instance)
-    // but because DashboardController reads several of them from HTTP request threads,
-    // concurrently with this instance's own trading-loop thread — see the getters near the
-    // end of this class, now instance methods, and DashboardController's constructor, which
-    // now holds a direct reference to this instance instead of calling static methods.
-    //
-    // If multi-broker is ever reintroduced: don't just flip these back to `static`. Design an
-    // explicit shared coordinator object instead (e.g. passed into each ProfileManager's
-    // constructor) so the sharing is visible at the call site, not implicit in a field
-    // modifier — see the guard in the constructor below, which will now tell you loudly if
-    // you do add a second instance without addressing this.
+    // RISK/COORDINATION STATE — formerly ~20 `static` fields directly on this class,
+    // converted to instance state 2026-08-30, then extracted into RiskGate the same day as
+    // the first step of splitting this file up. See RiskGate's class Javadoc for the full
+    // "why static, why not anymore, why a separate class" history — repeating it at every
+    // call site isn't useful, but the short version: that state used to coordinate two
+    // concurrent ProfileManager instances (MAIN + EXPERIMENTAL), this deployment runs
+    // exactly one, and keeping the coordination state directly on this god-object made it
+    // easy to lose track of (see the correlation-cap stub found during the same session's
+    // audit — this class had already grown too large to read in one pass).
     // ════════════════════════════════════════════════════════════════════════════════════
-
-    // Re-entry cooldown after ANY sell (stop loss, take profit, risk exit, etc.)
-    // Key = symbol, Value = timestamp when cooldown expires
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
-
-    // Track symbols with pending exit orders to prevent duplicate sells.
-    // When a sell order is placed, the symbol is added here.
-    // Entries are removed when the position disappears from Alpaca (order filled).
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingExitOrders = new java.util.concurrent.ConcurrentHashMap<>();
-
-    // Prevent duplicate buy orders placed within the same or back-to-back evaluation cycles.
-    // The DB gate (hasOpenTrade) only fires AFTER recordTrade() completes, which is after order placement.
-    // During the ~90s window between order placement and DB write, a second cycle can fire another BUY.
-    // Key = "broker:symbol", value = timestamp of the in-flight buy.
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingBuySymbols
-        = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final long PENDING_BUY_TTL_MS = 5 * 60 * 1000L; // 5 minutes — config constant, stays static
-
-    // Entry stagger: enforce 90-second minimum spacing between any two new entries.
-    // Prevents entering two correlated symbols within seconds of each other on the same bar
-    // (e.g. SPY and QQQ both signaling BUY simultaneously), which would double concentration
-    // risk on the same market move. One entry per 90s lets the first trade breathe.
-    private volatile long lastEntryEpochMs = 0L;
-    private static final long MIN_ENTRY_SPACING_MS = 90_000L; // 90 seconds — config constant, stays static
-
-    // Active position tracker (this instance's own positions — no longer needs to be
-    // cross-instance since there's only one instance, but keeping the map lets the same
-    // clearPositionTracking()/setPosition() call pattern below stay unchanged).
-    // Key = symbol, Value = "profileName:brokerName" of the owning profile.
-    private final java.util.concurrent.ConcurrentHashMap<String, String> globalHeldSymbols
-        = new java.util.concurrent.ConcurrentHashMap<>();
-
-    // Symbols currently held as scalp positions (entered via ScalpBuy signal).
-    // Scalp exits are binary — SL or full TP only, no partial exits, no scale-out at 1R.
-    // ExitStrategyManager short-circuits to the simple TP/SL check when a symbol is in this set.
-    // Cleared alongside globalHeldSymbols via clearPositionTracking() on every exit path.
-    private final java.util.Set<String> scalpHeldSymbols
-        = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final RiskGate riskGate = new RiskGate();
 
     // Scalp override: non-null while handleBuy is executing for a ScalpBuy signal.
     // Carries [stopLossPercent, takeProfitPercent] to bypass the profile's swing-trade targets.
@@ -187,57 +128,14 @@ public class ProfileManager implements Runnable {
     // Cleared on reconciliation when the position is detected as closed at the broker.
     private final java.util.Set<String> breakevenStopsActive = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    // Track consecutive stop-loss hits per symbol.
-    // Key = symbol, Value = count of consecutive SL hits (reset on successful trade or manual clear)
-    private final java.util.concurrent.ConcurrentHashMap<String, Integer> consecutiveStopLosses = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final int MAX_CONSECUTIVE_SL_BEFORE_EXTENDED_COOLDOWN = 2;
-
-    // Track last exit price per symbol.
-    // After a loss exit, only allow re-entry if current price is at least 1% lower (better entry).
-    // Prevents buying back at the same price you just sold at a loss.
-    // Key = symbol, Value = exit price
-    private final java.util.concurrent.ConcurrentHashMap<String, Double> lastExitPrices = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final double MIN_PRICE_IMPROVEMENT_PERCENT = 1.0;
-
-    // Urgent exit queue — symbols whose protective sell failed due to API error.
-    // Retried every cycle (every 10s) until the sell succeeds or the position disappears.
-    // Key = "broker:symbol".
-    private final java.util.concurrent.ConcurrentHashMap<String, UrgentExit> urgentExitQueue
-        = new java.util.concurrent.ConcurrentHashMap<>();
-
-    private record UrgentExit(String broker, String symbol, double quantity, String reason, long firstFailedAt) {}
-
-    private static String urgentKey(String broker, String symbol) { return broker + ":" + symbol; }
-
-    // Track why buys were most recently blocked per symbol (gap-down, price gate, etc.)
-    // Key = symbol, Value = reason string. Cleared when the buy is eventually allowed.
-    private final java.util.concurrent.ConcurrentHashMap<String, String> blockedBuys
-        = new java.util.concurrent.ConcurrentHashMap<>();
-
-    // Per-symbol post-loss cooldown — Tier 1.1.
-    private volatile PostLossCooldownTracker postLossCooldown;
-
-    // Earnings calendar — Tier 2.5.
-    private volatile EarningsCalendarService earningsCalendar;
-
-    // Per-broker session circuit breakers — Tier 3.10. Map keyed by broker name so
-    // Alpaca and Tradier (if ever both configured on one instance again) maintain
-    // independent loss streaks / drawdowns.
-    private final java.util.concurrent.ConcurrentHashMap<String, CircuitBreakerState> circuitBreakers
-        = new java.util.concurrent.ConcurrentHashMap<>();
-
     public java.util.Map<String, String> getUrgentExitQueue() {
-        var result = new java.util.LinkedHashMap<String, String>();
-        long now = System.currentTimeMillis();
-        urgentExitQueue.forEach((key, exit) ->
-            result.put(key, String.format("%s (queued %dm ago)", exit.reason(), (now - exit.firstFailedAt()) / 60000)));
-        return java.util.Collections.unmodifiableMap(result);
+        return riskGate.urgentExitQueueForDashboard();
     }
 
-    // Guard against silently reintroducing multi-instance state sharing (see the block
-    // comment above this section). Not a hard limit — the bot can still technically run
-    // several instances — but a loud, impossible-to-miss log line beats a silent behavior
-    // change if BROKERS ever grows a second entry again.
+    // Guard against silently reintroducing multi-instance state sharing (see RiskGate's class
+    // Javadoc). Not a hard limit — the bot can still technically run several instances — but a
+    // loud, impossible-to-miss log line beats a silent behavior change if BROKERS ever grows a
+    // second entry again.
     private static final java.util.concurrent.atomic.AtomicInteger activeInstanceCount =
         new java.util.concurrent.atomic.AtomicInteger(0);
 
@@ -258,22 +156,6 @@ public class ProfileManager implements Runnable {
 
     // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
     private volatile long pdtBlockedUntil = 0;
-
-    // PDT state — kept for backward-compat (always 0/false since PDT abolished June 4 2026)
-    private volatile long staticPdtBlockedUntil = 0;
-    private volatile int staticDayTradeCount = 0;
-
-    // Scalp trade count for today, tracked per-instance now (was summed across MAIN+EXPERIMENTAL).
-    private final java.util.concurrent.atomic.AtomicInteger staticScalpDailyCount
-        = new java.util.concurrent.atomic.AtomicInteger(0);
-    private volatile java.time.LocalDate scalpCountDate = java.time.LocalDate.now();
-
-    // Halt state snapshots — updated each cycle, exposed to dashboard
-    private volatile boolean portfolioStopLossHaltActive = false;
-    private volatile boolean maxDrawdownHaltActive = false;
-    private volatile double latestVixSnapshot = 0.0;
-    private volatile String latestRegimeSnapshot = "UNKNOWN";
-    private volatile String latestTargetSymbolsSnapshot = "";
 
     private volatile boolean running = true;
     private final String brokerName;
@@ -431,30 +313,34 @@ public class ProfileManager implements Runnable {
         this.lendingTracker = new com.trading.lending.StockLendingTracker(config);
         this.optionsManager = new com.trading.options.OptionsStrategyManager(config);
 
-        // Initialize cross-profile singletons lazily (first profile to start wins; others reuse).
-        if (postLossCooldown == null) {
+        // Lazy-init, guarded by a null-check + synchronized block — a leftover of the old
+        // cross-profile-singleton pattern from when multiple ProfileManager instances could
+        // race to create these. Harmless and still correct with a single instance (the
+        // double-checked-locking degrades to "just initialize it once"), so left as-is rather
+        // than risk changing behavior for a cosmetic simplification.
+        if (riskGate.postLossCooldown() == null) {
             synchronized (ProfileManager.class) {
-                if (postLossCooldown == null) {
-                    postLossCooldown = new PostLossCooldownTracker(
+                if (riskGate.postLossCooldown() == null) {
+                    riskGate.setPostLossCooldown(new PostLossCooldownTracker(
                         config.getPostLossCooldownMs(),
                         config.getPostLossCooldownExtendedMs(),
-                        2);
+                        2));
                     // Restore cooldown state from DB so restarts don't silently clear active cooldowns
-                    restorePostLossCooldownsFromDb(postLossCooldown);
+                    restorePostLossCooldownsFromDb(riskGate.postLossCooldown());
                 }
             }
         }
-        if (earningsCalendar == null) {
+        if (riskGate.earningsCalendar() == null) {
             synchronized (ProfileManager.class) {
-                if (earningsCalendar == null) {
+                if (riskGate.earningsCalendar() == null) {
                     String key = System.getenv("ALPHA_VANTAGE_API_KEY");
-                    earningsCalendar = new EarningsCalendarService(
+                    riskGate.setEarningsCalendar(new EarningsCalendarService(
                         key == null ? "" : key,
-                        config.getEarningsCacheTtlMs());
+                        config.getEarningsCacheTtlMs()));
                 }
             }
         }
-        circuitBreakers.computeIfAbsent(brokerName, b -> new CircuitBreakerState(
+        riskGate.circuitBreakers().computeIfAbsent(brokerName, b -> new CircuitBreakerState(
             config.getCircuitBreakerConsecutiveLosses(),
             config.getCircuitBreakerSessionDrawdownPercent() / 100.0));
 
@@ -550,12 +436,12 @@ public class ProfileManager implements Runnable {
         // Only drain during market hours — pre-market market orders get rejected by Alpaca
         // (extended_hours=false), which throws an exception and keeps the symbol in the queue,
         // causing a cancel-and-replace loop every 20s from market close until open.
-        if (!urgentExitQueue.isEmpty()) {
+        if (!riskGate.urgentExitQueue().isEmpty()) {
             if (marketHoursFilter.isMarketOpen()) {
                 drainUrgentExitQueue(profilePrefix);
             } else {
                 logger.debug("{} Urgent exit queue has {} symbol(s) — holding until market open",
-                    profilePrefix, urgentExitQueue.size());
+                    profilePrefix, riskGate.urgentExitQueue().size());
             }
         }
 
@@ -671,9 +557,9 @@ public class ProfileManager implements Runnable {
         }
 
         // Update static snapshots for dashboard visibility
-        latestVixSnapshot = currentVix;
-        latestRegimeSnapshot = regime != null ? regime.name() : "UNKNOWN";
-        latestTargetSymbolsSnapshot = String.join(",", targetSymbols);
+        riskGate.setLatestVixSnapshot(currentVix);
+        riskGate.setLatestRegimeSnapshot(regime != null ? regime.name() : "UNKNOWN");
+        riskGate.setLatestTargetSymbolsSnapshot(String.join(",", targetSymbols));
         
         logger.debug("{} Account equity: ${}, Buying power: ${}, Using: ${}", 
             profilePrefix, 
@@ -712,7 +598,7 @@ public class ProfileManager implements Runnable {
         // Per-broker session breaker: trips on N consecutive losses or session drawdown.
         // Auto-resets at NY day rollover. Skips new entries until the next session.
         if (config.isCircuitBreakerEnabled()) {
-            CircuitBreakerState cb = circuitBreakers.get(brokerName);
+            CircuitBreakerState cb = riskGate.circuitBreakers().get(brokerName);
             if (cb != null) {
                 cb.rolloverIfNewDay(accountEquity);
                 cb.updateEquity(accountEquity);
@@ -732,7 +618,7 @@ public class ProfileManager implements Runnable {
         // ========== PORTFOLIO-LEVEL STOP LOSS CHECK ==========
         // Halts NEW entries only — protective exits above have already run
         if (portfolioRiskManager.shouldHaltTrading(accountEquity)) {
-            portfolioStopLossHaltActive = true;
+            riskGate.setPortfolioStopLossHaltActive(true);
             logger.error("{} 🛑 PORTFOLIO STOP LOSS - Halting new entries (protective exits already checked)", profilePrefix);
 
             // Assess and log portfolio risk
@@ -746,7 +632,7 @@ public class ProfileManager implements Runnable {
 
             return; // Skip new entries only
         } else {
-            portfolioStopLossHaltActive = false;
+            riskGate.setPortfolioStopLossHaltActive(false);
         }
 
         // ========== CLEANUP EXCESS POSITIONS ==========
@@ -780,11 +666,11 @@ public class ProfileManager implements Runnable {
 
         // Check for max drawdown
         if (riskManager.shouldHaltTrading(equity)) {
-            maxDrawdownHaltActive = true;
+            riskGate.setMaxDrawdownHaltActive(true);
             logger.error("{} HALTING TRADING: Max drawdown exceeded!", profilePrefix);
             return;
         } else {
-            maxDrawdownHaltActive = false;
+            riskGate.setMaxDrawdownHaltActive(false);
         }
 
         // Determine symbols to process (target + active positions not in target)
@@ -806,7 +692,7 @@ public class ProfileManager implements Runnable {
                 tradeSymbol(symbol, targetSymbols, equity, buyingPower, regime, currentVix, profilePrefix);
             } catch (PDTRejectedException e) {
                 pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                staticPdtBlockedUntil = pdtBlockedUntil;
+                riskGate.setStaticPdtBlockedUntil(pdtBlockedUntil);
                 logger.warn("{} PDT rejected for {} — blocking sell attempts until market close", profilePrefix, symbol);
             } catch (Exception e) {
                 logger.error("{} Error processing {}", profilePrefix, symbol, e);
@@ -964,7 +850,7 @@ public class ProfileManager implements Runnable {
         var blacklist = config.getSymbolBlacklist();
         if (!blacklist.isEmpty() && blacklist.contains(symbol.toUpperCase())) {
             logger.info("{} {} BLACKLISTED — skipping (reason: SYMBOL_BLACKOUT config)", profilePrefix, symbol);
-            blockedBuys.put(symbol, "blacklisted (SYMBOL_BLACKOUT)");
+            riskGate.blockedBuys().put(symbol, "blacklisted (SYMBOL_BLACKOUT)");
             return;
         }
 
@@ -1088,11 +974,11 @@ public class ProfileManager implements Runnable {
             } else {
                 // Reset static counter if day has rolled over
                 java.time.LocalDate today = java.time.LocalDate.now();
-                if (!today.equals(scalpCountDate)) {
-                    staticScalpDailyCount.set(0);
-                    scalpCountDate = today;
+                if (!today.equals(riskGate.scalpCountDate())) {
+                    riskGate.staticScalpDailyCount().set(0);
+                    riskGate.setScalpCountDate(today);
                 }
-                staticScalpDailyCount.incrementAndGet();
+                riskGate.staticScalpDailyCount().incrementAndGet();
                 scalpOverrides = new Double[]{scalpBuy.stopLossPercent(), scalpBuy.takeProfitPercent()};
                 try {
                     handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
@@ -1256,9 +1142,9 @@ public class ProfileManager implements Runnable {
                 if (database.hasOpenTrade(symbol, brokerName)) continue;
 
                 java.time.LocalDate today = java.time.LocalDate.now();
-                if (!today.equals(scalpCountDate)) {
-                    staticScalpDailyCount.set(0);
-                    scalpCountDate = today;
+                if (!today.equals(riskGate.scalpCountDate())) {
+                    riskGate.staticScalpDailyCount().set(0);
+                    riskGate.setScalpCountDate(today);
                 }
                 scalpOverrides = new Double[]{scalpBuy.stopLossPercent(), scalpBuy.takeProfitPercent()};
                 try {
@@ -1281,7 +1167,7 @@ public class ProfileManager implements Runnable {
         // same millisecond before either reaches the later put() — causing duplicate entries on
         // the same symbol and doubling loss exposure on bad trades.
         String pendingBuyKey = brokerName + ":" + symbol;
-        Long existingClaim = pendingBuySymbols.putIfAbsent(pendingBuyKey, System.currentTimeMillis());
+        Long existingClaim = riskGate.pendingBuySymbols().putIfAbsent(pendingBuyKey, System.currentTimeMillis());
         if (existingClaim != null) {
             logger.debug("{} {} BUY skipped — buy already in flight or claimed by sibling profile ({}s ago)",
                 profilePrefix, symbol,
@@ -1291,14 +1177,14 @@ public class ProfileManager implements Runnable {
 
         // All code after this point owns the pendingBuyKey claim — ensure it is always released.
         // Without try/finally, early returns (buying power) and throws (Alpaca errors) leave the
-        // key stuck for PENDING_BUY_TTL_MS (5 min), silently blocking all buys on this symbol.
+        // key stuck for RiskGate.PENDING_BUY_TTL_MS (5 min), silently blocking all buys on this symbol.
         try {
 
         // ========== CROSS-PROFILE POSITION EXCLUSION ==========
         // If another profile (MAIN vs EXPERIMENTAL) already holds this symbol, skip.
         // Allowing both profiles to hold the same declining symbol doubles concentration risk.
         // Root cause of XLP×2 and XLV×2 losses on July 7, 2026.
-        String currentOwner = globalHeldSymbols.get(symbol);
+        String currentOwner = riskGate.globalHeldSymbols().get(symbol);
         if (currentOwner != null && !currentOwner.equals(profilePrefix)) {
             logger.info("{} {} BUY skipped — already held by {} (cross-profile exclusion)",
                 profilePrefix, symbol, currentOwner);
@@ -1311,8 +1197,8 @@ public class ProfileManager implements Runnable {
         // within seconds of each other — doubling exposure to the same directional move.
         // The 90-second gate lets the first position breathe before the second can open.
         long nowMs = System.currentTimeMillis();
-        if (nowMs - lastEntryEpochMs < MIN_ENTRY_SPACING_MS) {
-            long secsLeft = (MIN_ENTRY_SPACING_MS - (nowMs - lastEntryEpochMs)) / 1000;
+        if (nowMs - riskGate.lastEntryEpochMs() < RiskGate.MIN_ENTRY_SPACING_MS) {
+            long secsLeft = (RiskGate.MIN_ENTRY_SPACING_MS - (nowMs - riskGate.lastEntryEpochMs())) / 1000;
             logger.info("{} {} BUY SKIPPED — entry stagger: {}s until next entry allowed",
                 profilePrefix, symbol, secsLeft);
             return;
@@ -1364,7 +1250,7 @@ public class ProfileManager implements Runnable {
         // buy could use the last slot, then a stop-loss exit gets PDT-blocked.
         // Solution: block all new buys when daytrade_count >= 2.
         int currentDayTrades = pdtProtection.getDayTradeCount();
-        staticDayTradeCount = currentDayTrades; // sync for dashboard
+        riskGate.setStaticDayTradeCount(currentDayTrades); // sync for dashboard
         // Reserve 1 PDT slot for exits (worst case: 1 position needs same-day stop-loss exit).
         // Block new buys only when 2 of 3 day trades are already used.
         // pdtReserveThreshold=2: allows buys at 0/3 and 1/3, blocks at 2/3 to keep 1 exit slot.
@@ -1383,7 +1269,7 @@ public class ProfileManager implements Runnable {
 
         // ========== STOP LOSS COOLDOWN CHECK ==========
         // Prevent immediate re-entry after stop loss (this was causing repeated losses)
-        Long cooldownExpiry = stopLossCooldowns.get(symbol);
+        Long cooldownExpiry = riskGate.stopLossCooldowns().get(symbol);
         if (cooldownExpiry != null && System.currentTimeMillis() < cooldownExpiry) {
             long remainingMin = (cooldownExpiry - System.currentTimeMillis()) / 60000;
             logger.info("{} {} on STOP LOSS COOLDOWN - {} more minutes before re-entry allowed",
@@ -1400,11 +1286,11 @@ public class ProfileManager implements Runnable {
         // Distinct from the legacy minute-scale cooldown above: this is a 24h–72h block
         // applied after losses on the *same* symbol, escalating after consecutive losses.
         // Aimed at the TLT-loses-4x pattern. Other symbols keep trading.
-        if (config.isPerSymbolCooldownEnabled() && postLossCooldown != null) {
+        if (config.isPerSymbolCooldownEnabled() && riskGate.postLossCooldown() != null) {
             long now = System.currentTimeMillis();
-            if (postLossCooldown.isInCooldown(symbol, now)) {
-                long remHours = postLossCooldown.remainingMs(symbol, now) / (60L * 60 * 1000);
-                int losses = postLossCooldown.getConsecutiveLosses(symbol);
+            if (riskGate.postLossCooldown().isInCooldown(symbol, now)) {
+                long remHours = riskGate.postLossCooldown().remainingMs(symbol, now) / (60L * 60 * 1000);
+                int losses = riskGate.postLossCooldown().getConsecutiveLosses(symbol);
                 String reason = String.format("post-loss cooldown: %dh remaining (%d consec losses)", remHours, losses);
                 blockBuy(symbol, reason, currentPrice);
                 TradingWebSocketHandler.broadcastActivity(
@@ -1541,9 +1427,9 @@ public class ProfileManager implements Runnable {
         // ========== EARNINGS BLACKOUT (Tier 2.5) ==========
         // Avoid entering positions within ±N hours of an earnings announcement.
         // Earnings days are gap-risk events and our backtests show negative EV around them.
-        if (config.isEarningsBlackoutEnabled() && earningsCalendar != null) {
+        if (config.isEarningsBlackoutEnabled() && riskGate.earningsCalendar() != null) {
             try {
-                boolean inBlackout = earningsCalendar.isInBlackout(
+                boolean inBlackout = riskGate.earningsCalendar().isInBlackout(
                     symbol,
                     java.time.Instant.now(),
                     config.getEarningsBlackoutHoursBefore(),
@@ -1569,7 +1455,7 @@ public class ProfileManager implements Runnable {
         // NOT applied when current price is ABOVE exit price: the stock recovered after the stop —
         // that is a valid re-entry (AMD stopped at $486, recovered to $492 with 90% MTF BUY =
         // post-earnings bounce continuing upward, not re-entering into the same weakness).
-        Double lastExit = lastExitPrices.get(symbol);
+        Double lastExit = riskGate.lastExitPrices().get(symbol);
         if (lastExit != null) {
             double improvementPercent = ((lastExit - currentPrice) / lastExit) * 100.0;
             boolean priceAboveExit = currentPrice > lastExit;
@@ -1577,15 +1463,15 @@ public class ProfileManager implements Runnable {
                 // Stock recovered above exit — clear the gate and allow re-entry
                 logger.info("{} {} price ${} above last exit ${} — stop was at a low, allowing re-entry",
                     profilePrefix, symbol, String.format("%.2f", currentPrice), String.format("%.2f", lastExit));
-                lastExitPrices.remove(symbol);
-            } else if (improvementPercent < MIN_PRICE_IMPROVEMENT_PERCENT) {
-                blockedBuys.put(symbol, String.format("waiting for price: need %.1f%% below $%.2f exit", MIN_PRICE_IMPROVEMENT_PERCENT, lastExit));
+                riskGate.lastExitPrices().remove(symbol);
+            } else if (improvementPercent < RiskGate.MIN_PRICE_IMPROVEMENT_PERCENT) {
+                riskGate.blockedBuys().put(symbol, String.format("waiting for price: need %.1f%% below $%.2f exit", RiskGate.MIN_PRICE_IMPROVEMENT_PERCENT, lastExit));
                 logger.info("{} {} PRICE IMPROVEMENT CHECK FAILED - last exit=${}, now=${}, need {}% drop but only {}%",
                     profilePrefix, symbol, String.format("%.2f", lastExit), String.format("%.2f", currentPrice),
-                    String.format("%.1f", MIN_PRICE_IMPROVEMENT_PERCENT), String.format("%.2f", improvementPercent));
+                    String.format("%.1f", RiskGate.MIN_PRICE_IMPROVEMENT_PERCENT), String.format("%.2f", improvementPercent));
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] ⏳ %s waiting for better price: need %.1f%% below $%.2f exit",
-                        profile.name(), symbol, MIN_PRICE_IMPROVEMENT_PERCENT, lastExit),
+                        profile.name(), symbol, RiskGate.MIN_PRICE_IMPROVEMENT_PERCENT, lastExit),
                     "INFO"
                 );
                 return;
@@ -1593,8 +1479,8 @@ public class ProfileManager implements Runnable {
                 // Price has dropped enough below exit — clear gate and allow entry
                 logger.info("{} {} PRICE IMPROVED {}% below last exit ${} — allowing re-entry",
                     profilePrefix, symbol, String.format("%.2f", improvementPercent), String.format("%.2f", lastExit));
-                blockedBuys.remove(symbol);
-                lastExitPrices.remove(symbol);
+                riskGate.blockedBuys().remove(symbol);
+                riskGate.lastExitPrices().remove(symbol);
             }
         }
         
@@ -1631,7 +1517,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} {} gap-down {}% — earnings/news gap, allowing MTF to decide",
                             profilePrefix, symbol, String.format("%.1f", gapDownPct));
                     }
-                    blockedBuys.remove(symbol); // gap resolved — clear block
+                    riskGate.blockedBuys().remove(symbol); // gap resolved — clear block
                 }
             }
         } catch (Exception e) {
@@ -2084,7 +1970,7 @@ public class ProfileManager implements Runnable {
                     now.getDayOfWeek(),
                     portfolio.getActivePositionCount(),
                     config.getCorrelationCapMaxConcurrent(),
-                    consecutiveStopLosses.values().stream().mapToInt(Integer::intValue).sum(),
+                    riskGate.consecutiveStopLosses().values().stream().mapToInt(Integer::intValue).sum(),
                     sentimentAnalyzer != null ? sentimentAnalyzer.getSentimentScore(symbol) : 0.0,
                     true // handleBuy is always a long (bullish) entry
                 );
@@ -2395,11 +2281,11 @@ public class ProfileManager implements Runnable {
         
         // Update portfolio and cross-profile tracker atomically
         portfolio.setPosition(symbol, Optional.of(newPosition));
-        globalHeldSymbols.put(symbol, profilePrefix);
+        riskGate.globalHeldSymbols().put(symbol, profilePrefix);
         if (scalpOverrides != null) {
-            scalpHeldSymbols.add(symbol);
+            riskGate.scalpHeldSymbols().add(symbol);
         }
-        lastEntryEpochMs = System.currentTimeMillis(); // arm entry stagger for next 90s
+        riskGate.setLastEntryEpochMs(System.currentTimeMillis()); // arm entry stagger for next 90s
 
         // Record trade with full market context for adaptive learning (regime, VIX, breadth)
         String entryStrategyTag = scalpOverrides != null ? "SCALP" : profile.strategyType();
@@ -2433,7 +2319,7 @@ public class ProfileManager implements Runnable {
 
         } finally {
             // Always release the in-flight lock — covers success, early returns, and thrown exceptions.
-            pendingBuySymbols.remove(pendingBuyKey);
+            riskGate.pendingBuySymbols().remove(pendingBuyKey);
         }
     }
 
@@ -2443,7 +2329,7 @@ public class ProfileManager implements Runnable {
      * by adding fresh capital when the account is already under stress.
      */
     private boolean hasSignificantlyLosingPosition(String profilePrefix, String candidateSymbol) {
-        for (var entry : globalHeldSymbols.entrySet()) {
+        for (var entry : riskGate.globalHeldSymbols().entrySet()) {
             if (!entry.getValue().equals(profilePrefix)) continue;
             String heldSymbol = entry.getKey();
             try {
@@ -2468,13 +2354,13 @@ public class ProfileManager implements Runnable {
     }
 
     /**
-     * Central cleanup for every exit path. Keeps globalHeldSymbols, scalpHeldSymbols,
+     * Central cleanup for every exit path. Keeps riskGate.globalHeldSymbols(), riskGate.scalpHeldSymbols(),
      * trailingTargetManager, and breakevenStopsActive in sync regardless of how a position exits
      * (TP, SL, time-based, EOD, reconciliation, regime flip, cleanup).
      */
     private void clearPositionTracking(String symbol) {
-        globalHeldSymbols.remove(symbol);
-        scalpHeldSymbols.remove(symbol);
+        riskGate.globalHeldSymbols().remove(symbol);
+        riskGate.scalpHeldSymbols().remove(symbol);
         trailingTargetManager.removePosition(symbol);
         breakevenStopsActive.remove(symbol);
         database.deleteBotState("trailing:" + symbol + ":" + brokerName);
@@ -2510,19 +2396,19 @@ public class ProfileManager implements Runnable {
 
         // Set re-entry cooldown to prevent immediate re-buy
         long cooldownMs = config.getStopLossCooldownMs();
-        stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
+        riskGate.stopLossCooldowns().put(symbol, System.currentTimeMillis() + cooldownMs);
         logger.info("{} {} placed on {}-minute re-entry cooldown after sell", profilePrefix, symbol, cooldownMs / 60000);
 
         // Record exit price for loss exits — require price improvement before re-entry
         if (pnl < 0) {
-            lastExitPrices.put(symbol, currentPrice);
+            riskGate.lastExitPrices().put(symbol, currentPrice);
             logger.info("{} {} recorded loss exit at ${} — re-entry requires {}% price improvement",
-                profilePrefix, symbol, String.format("%.2f", currentPrice), MIN_PRICE_IMPROVEMENT_PERCENT);
+                profilePrefix, symbol, String.format("%.2f", currentPrice), RiskGate.MIN_PRICE_IMPROVEMENT_PERCENT);
             // Tier 1.1: feed per-symbol post-loss cooldown (escalates after consecutive losses).
-            if (postLossCooldown != null) {
-                long applied = postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
-                int consecLosses = postLossCooldown.getConsecutiveLosses(symbol);
-                consecutiveStopLosses.put(symbol, consecLosses);
+            if (riskGate.postLossCooldown() != null) {
+                long applied = riskGate.postLossCooldown().recordLoss(symbol, System.currentTimeMillis());
+                int consecLosses = riskGate.postLossCooldown().getConsecutiveLosses(symbol);
+                riskGate.consecutiveStopLosses().put(symbol, consecLosses);
                 logger.info("{} {} post-loss cooldown applied: {}h ({} consec losses)",
                     profilePrefix, symbol, applied / (60L * 60 * 1000), consecLosses);
                 // Persist so the cooldown survives a restart
@@ -2533,14 +2419,14 @@ public class ProfileManager implements Runnable {
                 logger.info("[COOLDOWN_START] {} {} post-loss cooldown={}h consec={}",
                     profile.name(), symbol, applied / (60L * 60 * 1000), consecLosses);
             } else {
-                consecutiveStopLosses.merge(symbol, 1, Integer::sum);
+                riskGate.consecutiveStopLosses().merge(symbol, 1, Integer::sum);
             }
         } else {
             // Profitable exit — allow free re-entry at any price, reset consecutive SL counter.
-            lastExitPrices.remove(symbol);
-            consecutiveStopLosses.remove(symbol);
-            if (postLossCooldown != null) {
-                postLossCooldown.recordWin(symbol);
+            riskGate.lastExitPrices().remove(symbol);
+            riskGate.consecutiveStopLosses().remove(symbol);
+            if (riskGate.postLossCooldown() != null) {
+                riskGate.postLossCooldown().recordWin(symbol);
                 // Clear persisted state for this symbol — no active cooldown
                 database.deleteBotState("cooldown:" + symbol);
                 database.deleteBotState("consec_sl:" + symbol);
@@ -2549,7 +2435,7 @@ public class ProfileManager implements Runnable {
         }
 
         // Tier 3.10: feed circuit breaker (per-broker session breaker on consecutive $-losses).
-        CircuitBreakerState cb = circuitBreakers.get(brokerName);
+        CircuitBreakerState cb = riskGate.circuitBreakers().get(brokerName);
         if (cb != null) cb.recordTrade(pnl);
 
         // Track day trades locally for non-Alpaca brokers (Alpaca syncs from broker API each cycle).
@@ -2676,7 +2562,7 @@ public class ProfileManager implements Runnable {
                 double qty = alpacaPos.quantity();
 
                 // Skip if a sell order was already placed this cycle (prevents duplicate sells)
-                if (pendingExitOrders.containsKey(brokerName + ":" + symbol)) {
+                if (riskGate.pendingExitOrders().containsKey(brokerName + ":" + symbol)) {
                     logger.debug("{} {} has pending exit order, skipping risk exit check", profilePrefix, symbol);
                     continue;
                 }
@@ -2708,10 +2594,10 @@ public class ProfileManager implements Runnable {
                     // Pre-earnings force-exit. Tier 2.5 only blocks new ENTRIES; an open position
                     // would otherwise ride straight into the announcement (the META scenario:
                     // bought 2026-04-27, held through 2026-04-30 earnings, gapped down ~10%).
-                    if (config.isPreEarningsExitEnabled() && earningsCalendar != null
+                    if (config.isPreEarningsExitEnabled() && riskGate.earningsCalendar() != null
                             && config.getPreEarningsExitHoursBefore() > 0) {
                         try {
-                            boolean approachingEarnings = earningsCalendar.isInBlackout(
+                            boolean approachingEarnings = riskGate.earningsCalendar().isInBlackout(
                                 symbol, java.time.Instant.now(),
                                 config.getPreEarningsExitHoursBefore(), 0);
                             if (approachingEarnings) {
@@ -2735,19 +2621,19 @@ public class ProfileManager implements Runnable {
                                         String.format("[%s] 🗓️ PRE-EARNINGS EXIT: %s — %s",
                                             profile.name(), symbol, exitDecision.reason()),
                                         "WARN");
-                                    pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                                    riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
                                     continue;
                                 } catch (PDTRejectedException e) {
                                     pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                                    staticPdtBlockedUntil = pdtBlockedUntil;
+                                    riskGate.setStaticPdtBlockedUntil(pdtBlockedUntil);
                                     logger.warn("{} PDT rejected pre-earnings exit for {}",
                                         profilePrefix, symbol);
                                     continue;
                                 } catch (Exception e) {
                                     logger.error("{} Failed pre-earnings exit for {}",
                                         profilePrefix, symbol, e);
-                                    urgentExitQueue.put(urgentKey(brokerName, symbol),
-                                        new UrgentExit(brokerName, symbol, qty,
+                                    riskGate.urgentExitQueue().put(RiskGate.urgentKey(brokerName, symbol),
+                                        new RiskGate.UrgentExit(brokerName, symbol, qty,
                                             "pre-earnings", System.currentTimeMillis()));
                                 }
                             }
@@ -2760,7 +2646,7 @@ public class ProfileManager implements Runnable {
                     // Winner runner: when TP is first hit, sell 50% at TP and lock a profitable
                     // stop on the remaining 50%, then let it trail higher rather than full-exit.
                     // Level 4 in the partial-exit bitmask = "runner already launched."
-                    if (!scalpHeldSymbols.contains(symbol)
+                    if (!riskGate.scalpHeldSymbols().contains(symbol)
                             && config.isWinnerRunnerEnabled()
                             && !position.hasPartialExit(4)
                             && position.isTakeProfitHit(currentPrice)) {
@@ -2799,7 +2685,7 @@ public class ProfileManager implements Runnable {
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] 🏃 RUNNER TP: %s — half sold at $%.2f, runner stop locked at $%.2f (+%.2f%%)",
                                     profile.name(), symbol, currentPrice, lockedStop, lockedPnlPct), "INFO");
-                            pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
                             continue;
                         } catch (Exception e) {
                             logger.error("{} Runner TP failed for {}: {}", profilePrefix, symbol, e.getMessage());
@@ -2808,7 +2694,7 @@ public class ProfileManager implements Runnable {
 
                     // Flat-position time decay: exit stalled positions held N hours with < threshold% P&L.
                     // Frees capital for better opportunities instead of waiting for EOD exit.
-                    if (!scalpHeldSymbols.contains(symbol) && timeDecayExitManager.shouldExit(position, currentPrice)) {
+                    if (!riskGate.scalpHeldSymbols().contains(symbol) && timeDecayExitManager.shouldExit(position, currentPrice)) {
                         String tdReason = timeDecayExitManager.getExitReason(position, currentPrice);
                         logger.info("{} ⏰ TIME-DECAY EXIT: {} — {}", profilePrefix, symbol, tdReason);
                         try {
@@ -2822,7 +2708,7 @@ public class ProfileManager implements Runnable {
                             applyPostExitCooldown(symbol, currentPrice, tdPnl, profilePrefix, "TIME_DECAY");
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] ⏰ TIME-DECAY EXIT: %s — %s", profile.name(), symbol, tdReason), "WARN");
-                            pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
                             continue;
                         } catch (Exception e) {
                             logger.error("{} Time-decay exit failed for {}: {}", profilePrefix, symbol, e.getMessage());
@@ -2832,7 +2718,7 @@ public class ProfileManager implements Runnable {
                     // Evaluate exit decision using enhanced strategy.
                     // Scalp positions bypass partial exits and scale-out at 1R — they exit
                     // cleanly at the stored 0.40% TP or 0.25% SL as a single full-size order.
-                    boolean isScalpPosition = scalpHeldSymbols.contains(symbol);
+                    boolean isScalpPosition = riskGate.scalpHeldSymbols().contains(symbol);
                     var exitDecision = exitStrategyManager.evaluateExit(
                         position, currentPrice, volatility, portfolioPositions, isScalpPosition
                     );
@@ -2869,21 +2755,21 @@ public class ProfileManager implements Runnable {
                                 database.closeTrade(symbol, java.time.Instant.now(), currentPrice, tradePnl, brokerName, "strategy_exit");
                                 updateDailyPnL(profilePrefix, tradePnl);
                                 // Set re-entry cooldown after full exit
-                                stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
+                                riskGate.stopLossCooldowns().put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                                 // Record exit price if loss — require price improvement before re-entry
                                 if (currentPrice < entryPrice) {
-                                    lastExitPrices.put(symbol, currentPrice);
-                                    if (postLossCooldown != null) {
-                                        postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
-                                        consecutiveStopLosses.put(symbol, postLossCooldown.getConsecutiveLosses(symbol));
+                                    riskGate.lastExitPrices().put(symbol, currentPrice);
+                                    if (riskGate.postLossCooldown() != null) {
+                                        riskGate.postLossCooldown().recordLoss(symbol, System.currentTimeMillis());
+                                        riskGate.consecutiveStopLosses().put(symbol, riskGate.postLossCooldown().getConsecutiveLosses(symbol));
                                     } else {
-                                        consecutiveStopLosses.merge(symbol, 1, Integer::sum);
+                                        riskGate.consecutiveStopLosses().merge(symbol, 1, Integer::sum);
                                     }
                                 } else {
-                                    consecutiveStopLosses.remove(symbol);
-                                    if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
+                                    riskGate.consecutiveStopLosses().remove(symbol);
+                                    if (riskGate.postLossCooldown() != null) riskGate.postLossCooldown().recordWin(symbol);
                                 }
-                                CircuitBreakerState cbExit = circuitBreakers.get(brokerName);
+                                CircuitBreakerState cbExit = riskGate.circuitBreakers().get(brokerName);
                                 if (cbExit != null) cbExit.recordTrade(tradePnl);
                             }
                             
@@ -2897,11 +2783,11 @@ public class ProfileManager implements Runnable {
                             );
 
                             // Mark as pending to prevent duplicate sells in this and future cycles
-                            pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
                             continue;
                         } catch (PDTRejectedException e) {
                             pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                staticPdtBlockedUntil = pdtBlockedUntil;
+                riskGate.setStaticPdtBlockedUntil(pdtBlockedUntil);
                             logger.warn("{} PDT rejected protective exit for {} — blocking until market close ({})",
                                 profilePrefix, symbol, java.time.Instant.ofEpochMilli(pdtBlockedUntil));
                             TradingWebSocketHandler.broadcastActivity(
@@ -2911,7 +2797,7 @@ public class ProfileManager implements Runnable {
                         } catch (Exception e) {
                             logger.error("{} Failed to place enhanced exit order for {}",
                                 profilePrefix, symbol, e);
-                            urgentExitQueue.put(urgentKey(brokerName, symbol), new UrgentExit(brokerName, symbol, qtyToExit, exitDecision.reason(), System.currentTimeMillis()));
+                            riskGate.urgentExitQueue().put(RiskGate.urgentKey(brokerName, symbol), new RiskGate.UrgentExit(brokerName, symbol, qtyToExit, exitDecision.reason(), System.currentTimeMillis()));
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] ⚠️ EXIT FAILED, QUEUED FOR RETRY: %s (%s)",
                                     profile.name(), symbol, exitDecision.reason()),
@@ -2959,11 +2845,11 @@ public class ProfileManager implements Runnable {
                                 database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnl, brokerName, "regime_flip");
                                 updateDailyPnL(profilePrefix, pnl);
                                 applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
-                                pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                                riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
                             } catch (Exception e) {
                                 logger.error("{} Failed regime exit for {}: {}", profilePrefix, symbol, e.getMessage());
-                                urgentExitQueue.put(urgentKey(brokerName, symbol),
-                                    new UrgentExit(brokerName, symbol, qty, "regime-bearish", System.currentTimeMillis()));
+                                riskGate.urgentExitQueue().put(RiskGate.urgentKey(brokerName, symbol),
+                                    new RiskGate.UrgentExit(brokerName, symbol, qty, "regime-bearish", System.currentTimeMillis()));
                             }
                             continue;
                         }
@@ -3093,14 +2979,14 @@ public class ProfileManager implements Runnable {
                         );
                     } catch (PDTRejectedException e) {
                         pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                staticPdtBlockedUntil = pdtBlockedUntil;
+                riskGate.setStaticPdtBlockedUntil(pdtBlockedUntil);
                         logger.warn("{} PDT rejected max-loss exit for {} — blocking until market close",
                             profilePrefix, symbol);
                         return;
                     } catch (Exception e) {
                         logger.error("{} Failed to place max loss exit order for {}",
                             profilePrefix, symbol, e);
-                        urgentExitQueue.put(urgentKey(brokerName, symbol), new UrgentExit(brokerName, symbol, qty,
+                        riskGate.urgentExitQueue().put(RiskGate.urgentKey(brokerName, symbol), new RiskGate.UrgentExit(brokerName, symbol, qty,
                             String.format("max loss (%.1f%%)", Math.abs(lossPercent)), System.currentTimeMillis()));
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] ⚠️ MAX LOSS EXIT FAILED, QUEUED FOR RETRY: %s",
@@ -3148,13 +3034,13 @@ public class ProfileManager implements Runnable {
     }
 
     /**
-     * Remove expired entries from stopLossCooldowns map to prevent memory leak.
+     * Remove expired entries from riskGate.stopLossCooldowns() map to prevent memory leak.
      * Called at the start of each trading cycle.
      */
     private void cleanupExpiredCooldowns() {
         long now = System.currentTimeMillis();
-        stopLossCooldowns.entrySet().removeIf(entry -> entry.getValue() < now);
-        pendingBuySymbols.entrySet().removeIf(entry -> now - entry.getValue() > PENDING_BUY_TTL_MS);
+        riskGate.stopLossCooldowns().entrySet().removeIf(entry -> entry.getValue() < now);
+        riskGate.pendingBuySymbols().entrySet().removeIf(entry -> now - entry.getValue() > RiskGate.PENDING_BUY_TTL_MS);
     }
 
     /**
@@ -3166,20 +3052,20 @@ public class ProfileManager implements Runnable {
     private void applyPostExitCooldown(String symbol, double exitPrice, double pnl,
                                        String profilePrefix, String exitKind) {
         long cooldownMs = config.getStopLossCooldownMs();
-        stopLossCooldowns.put(symbol, System.currentTimeMillis() + cooldownMs);
+        riskGate.stopLossCooldowns().put(symbol, System.currentTimeMillis() + cooldownMs);
         if (pnl < 0) {
-            lastExitPrices.put(symbol, exitPrice);
-            if (postLossCooldown != null) {
-                postLossCooldown.recordLoss(symbol, System.currentTimeMillis());
-                consecutiveStopLosses.put(symbol, postLossCooldown.getConsecutiveLosses(symbol));
+            riskGate.lastExitPrices().put(symbol, exitPrice);
+            if (riskGate.postLossCooldown() != null) {
+                riskGate.postLossCooldown().recordLoss(symbol, System.currentTimeMillis());
+                riskGate.consecutiveStopLosses().put(symbol, riskGate.postLossCooldown().getConsecutiveLosses(symbol));
             } else {
-                consecutiveStopLosses.merge(symbol, 1, Integer::sum);
+                riskGate.consecutiveStopLosses().merge(symbol, 1, Integer::sum);
             }
         } else if (pnl > 0) {
-            consecutiveStopLosses.remove(symbol);
-            if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
+            riskGate.consecutiveStopLosses().remove(symbol);
+            if (riskGate.postLossCooldown() != null) riskGate.postLossCooldown().recordWin(symbol);
         }
-        CircuitBreakerState cb = circuitBreakers.get(brokerName);
+        CircuitBreakerState cb = riskGate.circuitBreakers().get(brokerName);
         if (cb != null) cb.recordTrade(pnl);
         logger.info("{} {} placed on {}-minute re-entry cooldown after {} exit (pnl=${})",
             profilePrefix, symbol, cooldownMs / 60000, exitKind, String.format("%.2f", pnl));
@@ -3202,8 +3088,8 @@ public class ProfileManager implements Runnable {
         if (!profile.isMainProfile()) return;
         if (System.currentTimeMillis() < pdtBlockedUntil) return;
 
-        for (String key : new java.util.HashSet<>(urgentExitQueue.keySet())) {
-            UrgentExit exit = urgentExitQueue.get(key);
+        for (String key : new java.util.HashSet<>(riskGate.urgentExitQueue().keySet())) {
+            RiskGate.UrgentExit exit = riskGate.urgentExitQueue().get(key);
             if (exit == null) continue;
             // Only drain entries owned by THIS broker so multi-broker setups don't cross-fire.
             if (!brokerName.equals(exit.broker())) continue;
@@ -3220,7 +3106,7 @@ public class ProfileManager implements Runnable {
                 var positions = client.getPositions();
                 var livePos = positions.stream().filter(p -> p.symbol().equals(symbol)).findFirst();
                 if (livePos.isEmpty()) {
-                    urgentExitQueue.remove(key);
+                    riskGate.urgentExitQueue().remove(key);
                     logger.info("{} Urgent exit cleared: {} position no longer on broker", profilePrefix, symbol);
                     continue;
                 }
@@ -3233,8 +3119,8 @@ public class ProfileManager implements Runnable {
                 cancelExistingOrders(profilePrefix, symbol);
                 client.placeOrderDirect(symbol, liveQty, "sell", "market", "day", null);
 
-                urgentExitQueue.remove(key);
-                pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                riskGate.urgentExitQueue().remove(key);
+                riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
 
                 TradingWebSocketHandler.broadcastActivity(
                     String.format("[%s] ✅ URGENT EXIT SUCCEEDED: %s after %dm delay (%s)",
@@ -3245,7 +3131,7 @@ public class ProfileManager implements Runnable {
 
             } catch (PDTRejectedException e) {
                 pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                staticPdtBlockedUntil = pdtBlockedUntil;
+                riskGate.setStaticPdtBlockedUntil(pdtBlockedUntil);
                 logger.warn("{} PDT rejected urgent exit for {} — blocking until market close. Positions protected by native GTC stops.",
                     profilePrefix, symbol);
                 TradingWebSocketHandler.broadcastActivity(
@@ -3280,7 +3166,7 @@ public class ProfileManager implements Runnable {
                     // so the cooldown would never be set — allowing immediate re-entry on the next
                     // cycle. This is the root cause of rapid same-symbol re-entries (e.g. NVDA
                     // entered twice within 9 minutes on July 6, 2026).
-                    stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
+                    riskGate.stopLossCooldowns().put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
                     // Cancel any native stop/trailing-stop orders that survived the broker-side fill.
                     // Without this, a native stop placed by updateTrailingStop() can trigger on a flat
                     // account and create an accidental short position.
@@ -3304,21 +3190,21 @@ public class ProfileManager implements Runnable {
             long staleThresholdMs = 20 * 60 * 1000L; // 20 minutes
             long now = System.currentTimeMillis();
             int clearedExits = 0;
-            for (String pendingKey : new java.util.HashSet<>(pendingExitOrders.keySet())) {
+            for (String pendingKey : new java.util.HashSet<>(riskGate.pendingExitOrders().keySet())) {
                 // Key format is "brokerName:symbol" — extract symbol for broker-position lookup
                 String[] parts = pendingKey.split(":", 2);
                 if (parts.length < 2 || !brokerName.equals(parts[0])) continue;
                 String symbol = parts[1];
                 if (!brokerSymbols.contains(symbol)) {
-                    pendingExitOrders.remove(pendingKey);
+                    riskGate.pendingExitOrders().remove(pendingKey);
                     clearedExits++;
                     logger.info("{} Pending exit cleared: {} (position filled/gone from broker)",
                         profilePrefix, symbol);
                 } else {
                     // Position still exists — check if our "pending" order is stale
-                    long placedAt = pendingExitOrders.getOrDefault(pendingKey, now);
+                    long placedAt = riskGate.pendingExitOrders().getOrDefault(pendingKey, now);
                     if (now - placedAt > staleThresholdMs) {
-                        pendingExitOrders.remove(pendingKey);
+                        riskGate.pendingExitOrders().remove(pendingKey);
                         clearedExits++;
                         logger.warn("{} Stale pending exit cleared for {} — order is {}min old but position still exists (likely expired/rejected by broker); will re-evaluate next cycle",
                             profilePrefix, symbol, (now - placedAt) / 60000);
@@ -3328,11 +3214,11 @@ public class ProfileManager implements Runnable {
 
             // Also clear urgent exit queue for THIS broker's entries that are no longer at broker.
             // Filter by exit.broker so multi-broker mode doesn't clear another broker's queue.
-            for (String key : new java.util.HashSet<>(urgentExitQueue.keySet())) {
-                UrgentExit exit = urgentExitQueue.get(key);
+            for (String key : new java.util.HashSet<>(riskGate.urgentExitQueue().keySet())) {
+                RiskGate.UrgentExit exit = riskGate.urgentExitQueue().get(key);
                 if (exit == null || !brokerName.equals(exit.broker())) continue;
                 if (!brokerSymbols.contains(exit.symbol())) {
-                    urgentExitQueue.remove(key);
+                    riskGate.urgentExitQueue().remove(key);
                     logger.info("{} Urgent exit cleared: {} (position filled/gone from broker)",
                         profilePrefix, exit.symbol());
                 }
@@ -3432,19 +3318,19 @@ public class ProfileManager implements Runnable {
                 logger.info("{} Restored {} position(s) from DB into in-memory portfolio", profilePrefix, restored);
             }
 
-            // Sync globalHeldSymbols with every position now tracked in the portfolio.
+            // Sync riskGate.globalHeldSymbols() with every position now tracked in the portfolio.
             // After a restart the static map is empty — without this, the cross-profile
             // ownership guard at handleBuy allows both profiles to buy the same symbol
-            // because globalHeldSymbols.get(symbol) returns null for all held symbols.
+            // because riskGate.globalHeldSymbols().get(symbol) returns null for all held symbols.
             int synced = 0;
             for (var trade : openDbTrades) {
                 if (portfolio.getPosition(trade.symbol()).isPresent()) {
-                    globalHeldSymbols.putIfAbsent(trade.symbol(), profilePrefix);
+                    riskGate.globalHeldSymbols().putIfAbsent(trade.symbol(), profilePrefix);
                     synced++;
                 }
             }
             if (synced > 0) {
-                logger.info("{} globalHeldSymbols synced: {} symbol(s) registered as held", profilePrefix, synced);
+                logger.info("{} riskGate.globalHeldSymbols() synced: {} symbol(s) registered as held", profilePrefix, synced);
             }
         } catch (Exception e) {
             logger.debug("{} Reconciliation check failed: {}", profilePrefix, e.getMessage());
@@ -3721,7 +3607,7 @@ public class ProfileManager implements Runnable {
                 double currentPrice = Math.abs(pos.marketValue() / qty);
                 database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_positions_cleanup");
                 updateDailyPnL(profilePrefix, pnl);
-                CircuitBreakerState cb = circuitBreakers.get(brokerName);
+                CircuitBreakerState cb = riskGate.circuitBreakers().get(brokerName);
                 if (cb != null) cb.recordTrade(pnl);
                 
             } catch (Exception e) {
@@ -3786,10 +3672,10 @@ public class ProfileManager implements Runnable {
 
                 // Skip symbols with pending exit orders to prevent duplicate sell/closeTrade calls
                 // This fixes the bug where 49+ duplicate trade records were created for one position
-                if (pendingExitOrders.containsKey(brokerName + ":" + symbol)) {
+                if (riskGate.pendingExitOrders().containsKey(brokerName + ":" + symbol)) {
                     logger.info("{} {} has pending exit order (placed at {}), skipping duplicate check",
                         profilePrefix, symbol,
-                        java.time.Instant.ofEpochMilli(pendingExitOrders.get(brokerName + ":" + symbol)));
+                        java.time.Instant.ofEpochMilli(riskGate.pendingExitOrders().get(brokerName + ":" + symbol)));
                     continue;
                 }
                 
@@ -3829,7 +3715,7 @@ public class ProfileManager implements Runnable {
                     if (!eodDecision.isPartial()) {
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
-                        pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                        riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
                     }
                     
                     TradingWebSocketHandler.broadcastActivity(
@@ -3910,11 +3796,11 @@ public class ProfileManager implements Runnable {
                         // Record trade close
                         // Set cooldown BEFORE clearing position to close race window between
                         // MAIN and EXPERIMENTAL profiles (position cleared → cooldown set gap = re-buy risk)
-                        stopLossCooldowns.put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
-                        consecutiveStopLosses.remove(symbol);
-                        lastExitPrices.remove(symbol);
-                        if (postLossCooldown != null) postLossCooldown.recordWin(symbol);
-                        CircuitBreakerState cbTp = circuitBreakers.get(brokerName);
+                        riskGate.stopLossCooldowns().put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
+                        riskGate.consecutiveStopLosses().remove(symbol);
+                        riskGate.lastExitPrices().remove(symbol);
+                        if (riskGate.postLossCooldown() != null) riskGate.postLossCooldown().recordWin(symbol);
+                        CircuitBreakerState cbTp = riskGate.circuitBreakers().get(brokerName);
                         if (cbTp != null) cbTp.recordTrade(pnlDollars);
 
                         database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName, "take_profit");
@@ -3922,7 +3808,7 @@ public class ProfileManager implements Runnable {
                         clearPositionTracking(symbol);
 
                         // Mark as pending exit to prevent duplicate sell on next cycle
-                        pendingExitOrders.put(brokerName + ":" + symbol, System.currentTimeMillis());
+                        riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
 
                         TradingWebSocketHandler.broadcastActivity(
                             String.format("[%s] ✅ TAKE PROFIT: %s sold @ $%.2f (+%.2f%%, $%.2f profit)",
@@ -3933,7 +3819,7 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Take profit exit order placed for {}", profilePrefix, symbol);
                     } catch (PDTRejectedException e) {
                         pdtBlockedUntil = System.currentTimeMillis() + millisUntilMarketClose();
-                staticPdtBlockedUntil = pdtBlockedUntil;
+                riskGate.setStaticPdtBlockedUntil(pdtBlockedUntil);
                         logger.warn("{} PDT rejected by Alpaca for {} — blocking sell attempts until market close",
                             profilePrefix, symbol);
                         continue; // try remaining positions — non-day-trade sells may still succeed
@@ -4267,7 +4153,7 @@ public class ProfileManager implements Runnable {
     public java.util.Map<String, Long> getActiveCooldowns() {
         long now = System.currentTimeMillis();
         var result = new java.util.LinkedHashMap<String, Long>();
-        stopLossCooldowns.forEach((symbol, expiresAt) -> {
+        riskGate.stopLossCooldowns().forEach((symbol, expiresAt) -> {
             if (expiresAt > now) result.put(symbol, expiresAt);
         });
         return result;
@@ -4277,17 +4163,17 @@ public class ProfileManager implements Runnable {
      * Returns consecutive stop-loss counts per symbol for the dashboard.
      */
     public java.util.Map<String, Integer> getConsecutiveStopLosses() {
-        return java.util.Collections.unmodifiableMap(consecutiveStopLosses);
+        return java.util.Collections.unmodifiableMap(riskGate.consecutiveStopLosses());
     }
 
     /** PDT state — kept for backward-compat; always 0 since PDT abolished June 4 2026. */
-    public long getPdtBlockedUntil() { return staticPdtBlockedUntil; }
-    public int getPdtDayTradeCount() { return staticDayTradeCount; }
+    public long getPdtBlockedUntil() { return riskGate.staticPdtBlockedUntil(); }
+    public int getPdtDayTradeCount() { return riskGate.staticDayTradeCount(); }
 
     /**
      * Restore PostLossCooldownTracker state from bot_state table after a restart.
      * Loads all "cooldown:{symbol}" entries, skips expired ones, seeds the tracker.
-     * Also restores consecutiveStopLosses from "consec_sl:{symbol}" entries.
+     * Also restores riskGate.consecutiveStopLosses() from "consec_sl:{symbol}" entries.
      */
     private void restorePostLossCooldownsFromDb(PostLossCooldownTracker tracker) {
         try {
@@ -4307,7 +4193,7 @@ public class ProfileManager implements Runnable {
                     // Bug: previously deleted consec_sl here, so NVDA re-entered every morning
                     // with count=0, always getting the base 6h cooldown instead of 12h extended.
                     if (consecLosses > 0) {
-                        consecutiveStopLosses.put(symbol, consecLosses);
+                        riskGate.consecutiveStopLosses().put(symbol, consecLosses);
                         tracker.restoreLossCount(symbol, consecLosses);
                         logger.info("[{}] Cooldown expired for {} — {} consec losses carried forward (resets on win only)",
                             profile.name(), symbol, consecLosses);
@@ -4319,7 +4205,7 @@ public class ProfileManager implements Runnable {
                 }
                 // Restore exact persisted state — no recalculation
                 tracker.restoreState(symbol, expiryMs, consecLosses);
-                consecutiveStopLosses.put(symbol, consecLosses);
+                riskGate.consecutiveStopLosses().put(symbol, consecLosses);
                 logger.info("[{}] Restored post-loss cooldown for {} — expires in {}h ({} consec losses)",
                     profile.name(), symbol,
                     (expiryMs - now) / (60L * 60 * 1000), consecLosses);
@@ -4337,30 +4223,30 @@ public class ProfileManager implements Runnable {
     /** Scalp trades executed today across all profiles — resets at midnight. */
     public int getScalpDailyCount() {
         java.time.LocalDate today = java.time.LocalDate.now();
-        if (!today.equals(scalpCountDate)) {
-            staticScalpDailyCount.set(0);
-            scalpCountDate = today;
+        if (!today.equals(riskGate.scalpCountDate())) {
+            riskGate.staticScalpDailyCount().set(0);
+            riskGate.setScalpCountDate(today);
         }
-        return staticScalpDailyCount.get();
+        return riskGate.staticScalpDailyCount().get();
     }
 
     /** Blocked buy reasons — symbols that failed entry gates (gap-down, price improvement). */
     public java.util.Map<String, String> getBlockedBuys() {
-        return java.util.Collections.unmodifiableMap(blockedBuys);
+        return java.util.Collections.unmodifiableMap(riskGate.blockedBuys());
     }
 
     /** Trading halt/gate state snapshots — updated each cycle, for dashboard diagnostics. */
-    public boolean isPortfolioStopLossHaltActive() { return portfolioStopLossHaltActive; }
-    public boolean isMaxDrawdownHaltActive() { return maxDrawdownHaltActive; }
-    public double getLatestVixSnapshot() { return latestVixSnapshot; }
-    public String getLatestRegimeSnapshot() { return latestRegimeSnapshot; }
-    public String getLatestTargetSymbolsSnapshot() { return latestTargetSymbolsSnapshot; }
+    public boolean isPortfolioStopLossHaltActive() { return riskGate.portfolioStopLossHaltActive(); }
+    public boolean isMaxDrawdownHaltActive() { return riskGate.maxDrawdownHaltActive(); }
+    public double getLatestVixSnapshot() { return riskGate.latestVixSnapshot(); }
+    public String getLatestRegimeSnapshot() { return riskGate.latestRegimeSnapshot(); }
+    public String getLatestTargetSymbolsSnapshot() { return riskGate.latestTargetSymbolsSnapshot(); }
 
     /** Per-symbol post-loss cooldown registry (Tier 1.1). Empty map if disabled / no cooldowns. */
     public java.util.Map<String, Long> getPostLossCooldowns() {
-        if (postLossCooldown == null) return java.util.Map.of();
+        if (riskGate.postLossCooldown() == null) return java.util.Map.of();
         long now = System.currentTimeMillis();
-        var snap = postLossCooldown.snapshot();
+        var snap = riskGate.postLossCooldown().snapshot();
         var live = new java.util.LinkedHashMap<String, Long>();
         snap.forEach((sym, exp) -> { if (exp > now) live.put(sym, exp); });
         return live;
@@ -4369,7 +4255,7 @@ public class ProfileManager implements Runnable {
     /** Per-broker circuit breaker snapshot for dashboard (Tier 3.10). */
     public java.util.Map<String, java.util.Map<String, Object>> getCircuitBreakerSnapshot() {
         var out = new java.util.LinkedHashMap<String, java.util.Map<String, Object>>();
-        circuitBreakers.forEach((broker, cb) -> {
+        riskGate.circuitBreakers().forEach((broker, cb) -> {
             var info = new java.util.HashMap<String, Object>();
             info.put("tripped", cb.shouldHaltEntries());
             var reason = cb.tripReason();
@@ -4383,7 +4269,7 @@ public class ProfileManager implements Runnable {
 
     /** True iff any broker's circuit breaker is currently tripped. */
     public boolean isAnyCircuitBreakerTripped() {
-        return circuitBreakers.values().stream().anyMatch(CircuitBreakerState::shouldHaltEntries);
+        return riskGate.circuitBreakers().values().stream().anyMatch(CircuitBreakerState::shouldHaltEntries);
     }
 
     /**
@@ -4409,12 +4295,12 @@ public class ProfileManager implements Runnable {
     }
 
     /**
-     * Central blocked-buy handler: stamps blockedBuys map, persists to DB, and emits
+     * Central blocked-buy handler: stamps riskGate.blockedBuys() map, persists to DB, and emits
      * a structured [BUY_BLOCKED] log line. All entry gates call this instead of
-     * writing to blockedBuys + logger separately, so every rejection is captured.
+     * writing to riskGate.blockedBuys() + logger separately, so every rejection is captured.
      */
     private void blockBuy(String symbol, String reason, double price) {
-        blockedBuys.put(symbol, reason);
+        riskGate.blockedBuys().put(symbol, reason);
         logger.info("[BUY_BLOCKED] {} {} price=${} reason={}",
             profile.name(), symbol, String.format("%.2f", price), reason);
         database.saveBlockedEntry(symbol, profile.name(), reason, price,

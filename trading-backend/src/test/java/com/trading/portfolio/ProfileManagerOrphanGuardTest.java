@@ -60,9 +60,21 @@ class ProfileManagerOrphanGuardTest {
     }
 
     private void setField(String name, Object value) throws Exception {
-        Field f = ProfileManager.class.getDeclaredField(name);
-        f.setAccessible(true);
-        f.set(profileManager, value);
+        // Resolves either directly on ProfileManager, or — for the ~20 risk/coordination
+        // fields extracted onto RiskGate 2026-08-30 (stopLossCooldowns, etc.) — on
+        // profileManager's own riskGate instance.
+        try {
+            Field f = ProfileManager.class.getDeclaredField(name);
+            f.setAccessible(true);
+            f.set(profileManager, value);
+        } catch (NoSuchFieldException e) {
+            Field riskGateField = ProfileManager.class.getDeclaredField("riskGate");
+            riskGateField.setAccessible(true);
+            Object riskGate = riskGateField.get(profileManager);
+            Field f = riskGate.getClass().getDeclaredField(name);
+            f.setAccessible(true);
+            f.set(riskGate, value);
+        }
     }
 
     private void invokeRiskExits() throws Exception {
@@ -156,9 +168,12 @@ class ProfileManagerOrphanGuardTest {
         setField("latestEquity", 10_000.0);
         setField("running", true);
         setField("brokerName", "alpaca");
-        setField("stopLossCooldowns", new ConcurrentHashMap<String, Long>());
-        setField("pendingExitOrders", new ConcurrentHashMap<String, Long>());
-        setField("consecutiveStopLosses", new ConcurrentHashMap<String, Integer>());
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance(). RiskGate's own no-arg constructor runs normally once we build
+        // one here, so its internal maps/defaults (stopLossCooldowns, pendingExitOrders,
+        // consecutiveStopLosses, etc.) come out correctly initialized. Must be set before any
+        // setField() call below that resolves onto RiskGate.
+        setField("riskGate", new RiskGate());
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
     }
 

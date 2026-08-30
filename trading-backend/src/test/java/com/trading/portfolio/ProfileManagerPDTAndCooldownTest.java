@@ -75,17 +75,37 @@ class ProfileManagerPDTAndCooldownTest {
             .invoke(unsafe, ProfileManager.class);
     }
 
+    /**
+     * Resolves a field either directly on ProfileManager, or — for the ~20 risk/coordination
+     * fields extracted onto RiskGate 2026-08-30 (stopLossCooldowns, lastExitPrices, etc.) —
+     * on profileManager's own riskGate instance. Lets every existing setField/getField call
+     * site below keep using the old field names without knowing which object actually owns
+     * the field now.
+     */
+    private Object[] resolveFieldTarget(String name) throws Exception {
+        try {
+            Field f = ProfileManager.class.getDeclaredField(name);
+            f.setAccessible(true);
+            return new Object[]{f, profileManager};
+        } catch (NoSuchFieldException e) {
+            Field riskGateField = ProfileManager.class.getDeclaredField("riskGate");
+            riskGateField.setAccessible(true);
+            Object riskGate = riskGateField.get(profileManager);
+            Field f = riskGate.getClass().getDeclaredField(name);
+            f.setAccessible(true);
+            return new Object[]{f, riskGate};
+        }
+    }
+
     private void setField(String name, Object value) throws Exception {
-        Field f = ProfileManager.class.getDeclaredField(name);
-        f.setAccessible(true);
-        f.set(profileManager, value);
+        Object[] target = resolveFieldTarget(name);
+        ((Field) target[0]).set(target[1], value);
     }
 
     @SuppressWarnings("unchecked")
     private <T> T getField(String name) throws Exception {
-        Field f = ProfileManager.class.getDeclaredField(name);
-        f.setAccessible(true);
-        return (T) f.get(profileManager);
+        Object[] target = resolveFieldTarget(name);
+        return (T) ((Field) target[0]).get(target[1]);
     }
 
     private Object invokePrivate(String name, Class<?>[] types, Object... args) throws Exception {
@@ -193,25 +213,12 @@ class ProfileManagerPDTAndCooldownTest {
         setField("phase2ExitStrategies",  new com.trading.exits.Phase2ExitStrategies(mockConfig));
         setField("trailingTargetManager", new com.trading.exits.TrailingTargetManager(mockConfig));
         setField("orderTypeSelector",     new com.trading.execution.SmartOrderTypeSelector());
-        setField("stopLossCooldowns",     new ConcurrentHashMap<String, Long>());
-        setField("pendingExitOrders",     new ConcurrentHashMap<String, Long>());
-        setField("consecutiveStopLosses", new ConcurrentHashMap<String, Integer>());
-        setField("lastExitPrices",        new ConcurrentHashMap<String, Double>());
         setField("latestRegime",          com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
 
-        // Converted from static to instance state 2026-08-30 (ProfileManager's "INSTANCE STATE"
-        // comment block) — allocateInstance() bypasses field initializers, so these need manual
-        // setup same as the fields above.
-        setField("pendingBuySymbols", new ConcurrentHashMap<String, Long>());
-        setField("globalHeldSymbols", new ConcurrentHashMap<String, String>());
-        setField("scalpHeldSymbols", java.util.concurrent.ConcurrentHashMap.newKeySet());
-        setField("urgentExitQueue", new ConcurrentHashMap<String, Object>());
-        setField("blockedBuys", new ConcurrentHashMap<String, String>());
-        setField("circuitBreakers", new ConcurrentHashMap<String, com.trading.risk.CircuitBreakerState>());
-        setField("staticScalpDailyCount", new java.util.concurrent.atomic.AtomicInteger(0));
-        setField("scalpCountDate", java.time.LocalDate.now());
-        setField("latestRegimeSnapshot", "UNKNOWN");
-        setField("latestTargetSymbolsSnapshot", "");
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance(). RiskGate's own no-arg constructor runs normally once we build one
+        // here, so its internal maps/defaults come out correctly initialized.
+        setField("riskGate", new RiskGate());
     }
 
     // ── PDT Threshold Tests ──────────────────────────────────────────────────

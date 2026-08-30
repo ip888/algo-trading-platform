@@ -105,45 +105,76 @@ public class ProfileManager implements Runnable {
     // EOD exit tracking — prevent re-firing and self-cancelling sell orders within same day
     private java.time.LocalDate eodExitExecutedDate = null;
     
-    // STATIC: Shared across ALL ProfileManager instances to prevent cross-profile buy-back.
-    // When MAIN sells SLV, EXPERIMENTAL must also see the cooldown and not re-buy.
+    // ════════════════════════════════════════════════════════════════════════════════════
+    // INSTANCE STATE — formerly `static`, converted 2026-08-30.
+    //
+    // Why this changed: every field below used to be `static`, explicitly to share state
+    // across the two ProfileManager instances the bot used to run concurrently (a "MAIN" and
+    // an "EXPERIMENTAL" profile — see git history before this date for that design). That
+    // sharing was load-bearing safety logic, not an implementation detail: it's what stopped
+    // MAIN and EXPERIMENTAL from independently buying the same symbol and doubling a loss
+    // (the XLP×2 and IWM/SMH×2 incidents referenced in the comments below actually happened).
+    //
+    // This deployment now runs exactly one broker (BROKERS=alpaca:100 — see
+    // MultiBrokerOrchestrator, which is the only supported entry point as of the same date)
+    // and therefore exactly one ProfileManager instance. There is no second instance for this
+    // state to protect against, so keeping it `static` was pure vestigial risk: a future
+    // config change (adding a second BROKERS entry) would have silently re-enabled
+    // cross-instance sharing semantics that hadn't been exercised or tested in a long time,
+    // reintroducing exactly the bug class this state was originally built to prevent, just
+    // inverted (now the state would EXIST but nobody would remember it needs multi-instance
+    // testing before trusting it again).
+    //
+    // These are now plain instance fields. They keep their thread-safe collection types
+    // (ConcurrentHashMap, volatile) NOT for cross-instance sharing (there's only one instance)
+    // but because DashboardController reads several of them from HTTP request threads,
+    // concurrently with this instance's own trading-loop thread — see the getters near the
+    // end of this class, now instance methods, and DashboardController's constructor, which
+    // now holds a direct reference to this instance instead of calling static methods.
+    //
+    // If multi-broker is ever reintroduced: don't just flip these back to `static`. Design an
+    // explicit shared coordinator object instead (e.g. passed into each ProfileManager's
+    // constructor) so the sharing is visible at the call site, not implicit in a field
+    // modifier — see the guard in the constructor below, which will now tell you loudly if
+    // you do add a second instance without addressing this.
+    // ════════════════════════════════════════════════════════════════════════════════════
+
     // Re-entry cooldown after ANY sell (stop loss, take profit, risk exit, etc.)
     // Key = symbol, Value = timestamp when cooldown expires
-    private static java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> stopLossCooldowns = new java.util.concurrent.ConcurrentHashMap<>();
 
-    // STATIC: Shared across profiles. Track symbols with pending exit orders to prevent duplicate sells.
+    // Track symbols with pending exit orders to prevent duplicate sells.
     // When a sell order is placed, the symbol is added here.
     // Entries are removed when the position disappears from Alpaca (order filled).
-    private static java.util.concurrent.ConcurrentHashMap<String, Long> pendingExitOrders = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingExitOrders = new java.util.concurrent.ConcurrentHashMap<>();
 
-    // STATIC: Prevent duplicate buy orders placed within the same or back-to-back evaluation cycles.
+    // Prevent duplicate buy orders placed within the same or back-to-back evaluation cycles.
     // The DB gate (hasOpenTrade) only fires AFTER recordTrade() completes, which is after order placement.
     // During the ~90s window between order placement and DB write, a second cycle can fire another BUY.
     // Key = "broker:symbol", value = timestamp of the in-flight buy.
-    private static final java.util.concurrent.ConcurrentHashMap<String, Long> pendingBuySymbols
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingBuySymbols
         = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final long PENDING_BUY_TTL_MS = 5 * 60 * 1000L; // 5 minutes
+    private static final long PENDING_BUY_TTL_MS = 5 * 60 * 1000L; // 5 minutes — config constant, stays static
 
-    // Entry stagger: enforce 90-second minimum spacing between any two new entries (cross-profile).
-    // Prevents simultaneous entries on correlated symbols during the same evaluation cycle —
-    // if SPY and QQQ both signal BUY on the same bar, entering both within seconds doubles
-    // concentration risk on the same market move. One entry per 90s lets the first trade breathe.
-    private static volatile long lastEntryEpochMs = 0L;
-    private static final long MIN_ENTRY_SPACING_MS = 90_000L; // 90 seconds
+    // Entry stagger: enforce 90-second minimum spacing between any two new entries.
+    // Prevents entering two correlated symbols within seconds of each other on the same bar
+    // (e.g. SPY and QQQ both signaling BUY simultaneously), which would double concentration
+    // risk on the same market move. One entry per 90s lets the first trade breathe.
+    private volatile long lastEntryEpochMs = 0L;
+    private static final long MIN_ENTRY_SPACING_MS = 90_000L; // 90 seconds — config constant, stays static
 
-    // STATIC: Cross-profile active position tracker.
-    // When MAIN holds XLP, EXPERIMENTAL must not open XLP — doubling exposure on a
-    // losing position (XLP × 2 on Jul 7 2026) doubles the loss and inflates concentration risk.
+    // Active position tracker (this instance's own positions — no longer needs to be
+    // cross-instance since there's only one instance, but keeping the map lets the same
+    // clearPositionTracking()/setPosition() call pattern below stay unchanged).
     // Key = symbol, Value = "profileName:brokerName" of the owning profile.
-    // Updated atomically alongside portfolio.setPosition() to stay in sync.
-    private static final java.util.concurrent.ConcurrentHashMap<String, String> globalHeldSymbols
+    private final java.util.concurrent.ConcurrentHashMap<String, String> globalHeldSymbols
         = new java.util.concurrent.ConcurrentHashMap<>();
 
-    // STATIC: Symbols currently held as scalp positions (entered via ScalpBuy signal).
+    // Symbols currently held as scalp positions (entered via ScalpBuy signal).
     // Scalp exits are binary — SL or full TP only, no partial exits, no scale-out at 1R.
     // ExitStrategyManager short-circuits to the simple TP/SL check when a symbol is in this set.
     // Cleared alongside globalHeldSymbols via clearPositionTracking() on every exit path.
-    private static final java.util.Set<String> scalpHeldSymbols
+    private final java.util.Set<String> scalpHeldSymbols
         = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     // Scalp override: non-null while handleBuy is executing for a ScalpBuy signal.
@@ -151,53 +182,51 @@ public class ProfileManager implements Runnable {
     // Cleared in a finally block — never bleeds into subsequent normal entries.
     private Double[] scalpOverrides = null;
 
-    // Per-instance: symbols that already have an active breakeven stop placed on Alpaca.
+    // Symbols that already have an active breakeven stop placed on Alpaca.
     // Prevents cancel+replace on every evaluation cycle after the trigger fires once.
     // Cleared on reconciliation when the position is detected as closed at the broker.
     private final java.util.Set<String> breakevenStopsActive = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    // STATIC: Shared across profiles. Track consecutive stop-loss hits per symbol.
+    // Track consecutive stop-loss hits per symbol.
     // Key = symbol, Value = count of consecutive SL hits (reset on successful trade or manual clear)
-    private static java.util.concurrent.ConcurrentHashMap<String, Integer> consecutiveStopLosses = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> consecutiveStopLosses = new java.util.concurrent.ConcurrentHashMap<>();
     private static final int MAX_CONSECUTIVE_SL_BEFORE_EXTENDED_COOLDOWN = 2;
 
-    // STATIC: Shared across profiles. Track last exit price per symbol.
+    // Track last exit price per symbol.
     // After a loss exit, only allow re-entry if current price is at least 1% lower (better entry).
     // Prevents buying back at the same price you just sold at a loss.
     // Key = symbol, Value = exit price
-    private static java.util.concurrent.ConcurrentHashMap<String, Double> lastExitPrices = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Double> lastExitPrices = new java.util.concurrent.ConcurrentHashMap<>();
     private static final double MIN_PRICE_IMPROVEMENT_PERCENT = 1.0;
 
-    // STATIC: Urgent exit queue — symbols whose protective sell failed due to API error.
+    // Urgent exit queue — symbols whose protective sell failed due to API error.
     // Retried every cycle (every 10s) until the sell succeeds or the position disappears.
-    // Key = "broker:symbol" so multi-broker mode doesn't cross-clear entries
-    // (e.g. Alpaca's failed SPY exit shouldn't be wiped by Tradier's reconcile).
-    private static final java.util.concurrent.ConcurrentHashMap<String, UrgentExit> urgentExitQueue
+    // Key = "broker:symbol".
+    private final java.util.concurrent.ConcurrentHashMap<String, UrgentExit> urgentExitQueue
         = new java.util.concurrent.ConcurrentHashMap<>();
 
     private record UrgentExit(String broker, String symbol, double quantity, String reason, long firstFailedAt) {}
 
     private static String urgentKey(String broker, String symbol) { return broker + ":" + symbol; }
 
-    // STATIC: Track why buys were most recently blocked per symbol (gap-down, price gate, etc.)
+    // Track why buys were most recently blocked per symbol (gap-down, price gate, etc.)
     // Key = symbol, Value = reason string. Cleared when the buy is eventually allowed.
-    private static final java.util.concurrent.ConcurrentHashMap<String, String> blockedBuys
+    private final java.util.concurrent.ConcurrentHashMap<String, String> blockedBuys
         = new java.util.concurrent.ConcurrentHashMap<>();
 
-    // STATIC: Per-symbol post-loss cooldown shared across profiles & brokers — Tier 1.1.
-    // When MAIN closes TLT at a loss, EXPERIMENTAL must also see the cooldown so the bot
-    // can't churn the same losing name on the second profile.
-    private static volatile PostLossCooldownTracker postLossCooldown;
+    // Per-symbol post-loss cooldown — Tier 1.1.
+    private volatile PostLossCooldownTracker postLossCooldown;
 
-    // STATIC: Earnings calendar — Tier 2.5. Single instance for cache reuse across profiles.
-    private static volatile EarningsCalendarService earningsCalendar;
+    // Earnings calendar — Tier 2.5.
+    private volatile EarningsCalendarService earningsCalendar;
 
-    // STATIC: Per-broker session circuit breakers — Tier 3.10. Map keyed by broker name so
-    // Alpaca and Tradier maintain independent loss streaks / drawdowns.
-    private static final java.util.concurrent.ConcurrentHashMap<String, CircuitBreakerState> circuitBreakers
+    // Per-broker session circuit breakers — Tier 3.10. Map keyed by broker name so
+    // Alpaca and Tradier (if ever both configured on one instance again) maintain
+    // independent loss streaks / drawdowns.
+    private final java.util.concurrent.ConcurrentHashMap<String, CircuitBreakerState> circuitBreakers
         = new java.util.concurrent.ConcurrentHashMap<>();
 
-    public static java.util.Map<String, String> getUrgentExitQueue() {
+    public java.util.Map<String, String> getUrgentExitQueue() {
         var result = new java.util.LinkedHashMap<String, String>();
         long now = System.currentTimeMillis();
         urgentExitQueue.forEach((key, exit) ->
@@ -205,6 +234,12 @@ public class ProfileManager implements Runnable {
         return java.util.Collections.unmodifiableMap(result);
     }
 
+    // Guard against silently reintroducing multi-instance state sharing (see the block
+    // comment above this section). Not a hard limit — the bot can still technically run
+    // several instances — but a loud, impossible-to-miss log line beats a silent behavior
+    // change if BROKERS ever grows a second entry again.
+    private static final java.util.concurrent.atomic.AtomicInteger activeInstanceCount =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
     // Current market state (updated each cycle, used by profit target checks)
     private volatile double latestVix = 15.0;
@@ -224,21 +259,21 @@ public class ProfileManager implements Runnable {
     // PDT circuit breaker: skip sell attempts for the rest of the cycle after a 403 rejection
     private volatile long pdtBlockedUntil = 0;
 
-    // Static PDT state — kept for backward-compat (always 0/false since PDT abolished June 4 2026)
-    private static volatile long staticPdtBlockedUntil = 0;
-    private static volatile int staticDayTradeCount = 0;
+    // PDT state — kept for backward-compat (always 0/false since PDT abolished June 4 2026)
+    private volatile long staticPdtBlockedUntil = 0;
+    private volatile int staticDayTradeCount = 0;
 
-    // Static scalp count — sum across all active ProfileManager instances (MAIN + EXPERIMENTAL)
-    private static final java.util.concurrent.atomic.AtomicInteger staticScalpDailyCount
+    // Scalp trade count for today, tracked per-instance now (was summed across MAIN+EXPERIMENTAL).
+    private final java.util.concurrent.atomic.AtomicInteger staticScalpDailyCount
         = new java.util.concurrent.atomic.AtomicInteger(0);
-    private static volatile java.time.LocalDate scalpCountDate = java.time.LocalDate.now();
+    private volatile java.time.LocalDate scalpCountDate = java.time.LocalDate.now();
 
-    // STATIC: Halt state snapshots — updated each cycle, exposed to dashboard
-    private static volatile boolean portfolioStopLossHaltActive = false;
-    private static volatile boolean maxDrawdownHaltActive = false;
-    private static volatile double latestVixSnapshot = 0.0;
-    private static volatile String latestRegimeSnapshot = "UNKNOWN";
-    private static volatile String latestTargetSymbolsSnapshot = "";
+    // Halt state snapshots — updated each cycle, exposed to dashboard
+    private volatile boolean portfolioStopLossHaltActive = false;
+    private volatile boolean maxDrawdownHaltActive = false;
+    private volatile double latestVixSnapshot = 0.0;
+    private volatile String latestRegimeSnapshot = "UNKNOWN";
+    private volatile String latestTargetSymbolsSnapshot = "";
 
     private volatile boolean running = true;
     private final String brokerName;
@@ -287,6 +322,22 @@ public class ProfileManager implements Runnable {
         this.errorDetector = errorDetector;
         this.configSelfHealer = configSelfHealer;
         this.brokerName = brokerName;
+
+        // See the "INSTANCE STATE" comment block above the field declarations: the cooldown/
+        // held-symbol/circuit-breaker state above used to be static specifically to coordinate
+        // multiple concurrent ProfileManager instances, and was converted to instance state on
+        // 2026-08-30 because this deployment only ever runs one. If that assumption changes
+        // (e.g. BROKERS gains a second entry), each instance now tracks its own state
+        // independently — no cross-instance double-buy protection. Fail loud, not silent.
+        int nowActive = activeInstanceCount.incrementAndGet();
+        if (nowActive > 1) {
+            logger.error("⚠️⚠️⚠️ {} ProfileManager instances now active — cross-profile state " +
+                "sharing (cooldowns, held symbols, consecutive-loss tracking) was REMOVED in the " +
+                "2026-08-30 refactor. Two instances can now independently buy the same symbol with " +
+                "no coordination. Do not run multi-broker/multi-profile until this is redesigned " +
+                "with an explicit shared coordinator — see ProfileManager.java's INSTANCE STATE " +
+                "comment block.", nowActive);
+        }
 
         // Create isolated resources for this profile
         this.symbolSelector = new SymbolSelector(
@@ -3454,6 +3505,7 @@ public class ProfileManager implements Runnable {
     
     public void stop() {
         running = false;
+        activeInstanceCount.decrementAndGet();
         logger.info("[{}] Stop requested", profile.name());
     }
     
@@ -4212,7 +4264,7 @@ public class ProfileManager implements Runnable {
      * Returns active cooldowns for the dashboard behavior monitor.
      * Key = symbol, Value = expiry timestamp (epoch ms).
      */
-    public static java.util.Map<String, Long> getActiveCooldowns() {
+    public java.util.Map<String, Long> getActiveCooldowns() {
         long now = System.currentTimeMillis();
         var result = new java.util.LinkedHashMap<String, Long>();
         stopLossCooldowns.forEach((symbol, expiresAt) -> {
@@ -4224,13 +4276,13 @@ public class ProfileManager implements Runnable {
     /**
      * Returns consecutive stop-loss counts per symbol for the dashboard.
      */
-    public static java.util.Map<String, Integer> getConsecutiveStopLosses() {
+    public java.util.Map<String, Integer> getConsecutiveStopLosses() {
         return java.util.Collections.unmodifiableMap(consecutiveStopLosses);
     }
 
     /** PDT state — kept for backward-compat; always 0 since PDT abolished June 4 2026. */
-    public static long getPdtBlockedUntil() { return staticPdtBlockedUntil; }
-    public static int getPdtDayTradeCount() { return staticDayTradeCount; }
+    public long getPdtBlockedUntil() { return staticPdtBlockedUntil; }
+    public int getPdtDayTradeCount() { return staticDayTradeCount; }
 
     /**
      * Restore PostLossCooldownTracker state from bot_state table after a restart.
@@ -4283,7 +4335,7 @@ public class ProfileManager implements Runnable {
     }
 
     /** Scalp trades executed today across all profiles — resets at midnight. */
-    public static int getScalpDailyCount() {
+    public int getScalpDailyCount() {
         java.time.LocalDate today = java.time.LocalDate.now();
         if (!today.equals(scalpCountDate)) {
             staticScalpDailyCount.set(0);
@@ -4293,19 +4345,19 @@ public class ProfileManager implements Runnable {
     }
 
     /** Blocked buy reasons — symbols that failed entry gates (gap-down, price improvement). */
-    public static java.util.Map<String, String> getBlockedBuys() {
+    public java.util.Map<String, String> getBlockedBuys() {
         return java.util.Collections.unmodifiableMap(blockedBuys);
     }
 
     /** Trading halt/gate state snapshots — updated each cycle, for dashboard diagnostics. */
-    public static boolean isPortfolioStopLossHaltActive() { return portfolioStopLossHaltActive; }
-    public static boolean isMaxDrawdownHaltActive() { return maxDrawdownHaltActive; }
-    public static double getLatestVixSnapshot() { return latestVixSnapshot; }
-    public static String getLatestRegimeSnapshot() { return latestRegimeSnapshot; }
-    public static String getLatestTargetSymbolsSnapshot() { return latestTargetSymbolsSnapshot; }
+    public boolean isPortfolioStopLossHaltActive() { return portfolioStopLossHaltActive; }
+    public boolean isMaxDrawdownHaltActive() { return maxDrawdownHaltActive; }
+    public double getLatestVixSnapshot() { return latestVixSnapshot; }
+    public String getLatestRegimeSnapshot() { return latestRegimeSnapshot; }
+    public String getLatestTargetSymbolsSnapshot() { return latestTargetSymbolsSnapshot; }
 
     /** Per-symbol post-loss cooldown registry (Tier 1.1). Empty map if disabled / no cooldowns. */
-    public static java.util.Map<String, Long> getPostLossCooldowns() {
+    public java.util.Map<String, Long> getPostLossCooldowns() {
         if (postLossCooldown == null) return java.util.Map.of();
         long now = System.currentTimeMillis();
         var snap = postLossCooldown.snapshot();
@@ -4315,7 +4367,7 @@ public class ProfileManager implements Runnable {
     }
 
     /** Per-broker circuit breaker snapshot for dashboard (Tier 3.10). */
-    public static java.util.Map<String, java.util.Map<String, Object>> getCircuitBreakerSnapshot() {
+    public java.util.Map<String, java.util.Map<String, Object>> getCircuitBreakerSnapshot() {
         var out = new java.util.LinkedHashMap<String, java.util.Map<String, Object>>();
         circuitBreakers.forEach((broker, cb) -> {
             var info = new java.util.HashMap<String, Object>();
@@ -4330,7 +4382,7 @@ public class ProfileManager implements Runnable {
     }
 
     /** True iff any broker's circuit breaker is currently tripped. */
-    public static boolean isAnyCircuitBreakerTripped() {
+    public boolean isAnyCircuitBreakerTripped() {
         return circuitBreakers.values().stream().anyMatch(CircuitBreakerState::shouldHaltEntries);
     }
 

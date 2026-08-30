@@ -50,7 +50,10 @@ class ProfileManagerPendingBuyTest extends ProfileManagerTestBase {
     private ConcurrentHashMap<String, Long> getPendingBuys() throws Exception {
         Field f = ProfileManager.class.getDeclaredField("pendingBuySymbols");
         f.setAccessible(true);
-        return (ConcurrentHashMap<String, Long>) f.get(null); // static field
+        // pendingBuySymbols was converted from static to instance state 2026-08-30 — see
+        // ProfileManager's "INSTANCE STATE" comment block — so this now reads off the test's
+        // own profileManager instance, not the class.
+        return (ConcurrentHashMap<String, Long>) f.get(profileManager);
     }
 
     @Test

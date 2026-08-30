@@ -191,6 +191,21 @@ class ProfileManagerEodExitTest {
 
         // timeDecayExitManager is a final field initialized in constructor — null after allocateInstance.
         setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
+
+        // Converted from static to instance state 2026-08-30 (ProfileManager's "INSTANCE STATE"
+        // comment block) — same allocateInstance-bypasses-initializers issue as breakevenStopsActive
+        // and timeDecayExitManager above.
+        setField("pendingBuySymbols", new ConcurrentHashMap<String, Long>());
+        setField("globalHeldSymbols", new ConcurrentHashMap<String, String>());
+        setField("scalpHeldSymbols", java.util.concurrent.ConcurrentHashMap.newKeySet());
+        setField("lastExitPrices", new ConcurrentHashMap<String, Double>());
+        setField("urgentExitQueue", new ConcurrentHashMap<String, Object>());
+        setField("blockedBuys", new ConcurrentHashMap<String, String>());
+        setField("circuitBreakers", new ConcurrentHashMap<String, com.trading.risk.CircuitBreakerState>());
+        setField("staticScalpDailyCount", new java.util.concurrent.atomic.AtomicInteger(0));
+        setField("scalpCountDate", java.time.LocalDate.now());
+        setField("latestRegimeSnapshot", "UNKNOWN");
+        setField("latestTargetSymbolsSnapshot", "");
     }
 
     // ===================== Tests: isGoodEntryTime EOD block =====================

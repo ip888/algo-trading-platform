@@ -36,22 +36,25 @@ import static org.mockito.Mockito.*;
 @DisplayName("Profitability fixes — unit tests (Fixes 3–6) and Config accessors (all fixes)")
 class ProfileManagerProfitabilityFixesTest extends ProfileManagerTestBase {
 
-    // ── static-field helpers ──────────────────────────────────────────────────
+    // ── instance-field helpers ─────────────────────────────────────────────────
+    // Named "static" historically — these fields WERE static until the 2026-08-30 refactor
+    // (see ProfileManager's "INSTANCE STATE" comment block) converted them to instance state.
+    // Kept the method names to minimize diff noise below; they now target `profileManager`.
 
-    private static void setStaticField(String name, Object value) throws Exception {
+    private void setStaticField(String name, Object value) throws Exception {
         Field f = ProfileManager.class.getDeclaredField(name);
         f.setAccessible(true);
-        f.set(null, value);
+        f.set(profileManager, value);
     }
 
-    private static Object getStaticField(String name) throws Exception {
+    private Object getStaticField(String name) throws Exception {
         Field f = ProfileManager.class.getDeclaredField(name);
         f.setAccessible(true);
-        return f.get(null);
+        return f.get(profileManager);
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> ConcurrentHashMap<String, T> getStaticMap(String name) throws Exception {
+    private <T> ConcurrentHashMap<String, T> getStaticMap(String name) throws Exception {
         return (ConcurrentHashMap<String, T>) getStaticField(name);
     }
 

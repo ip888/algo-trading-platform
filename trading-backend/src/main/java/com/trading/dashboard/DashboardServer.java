@@ -10,6 +10,7 @@ import com.trading.filters.VolatilityFilter;
 import com.trading.health.HealthCheckService;
 import com.trading.persistence.TradeDatabase;
 import com.trading.portfolio.PortfolioManager;
+import com.trading.portfolio.ProfileManager;
 import com.trading.websocket.TradingWebSocketHandler;
 import io.javalin.Javalin;
 import org.slf4j.Logger;
@@ -30,13 +31,13 @@ public final class DashboardServer {
     public DashboardServer(TradeDatabase database, PortfolioManager portfolio,
                           MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                           VolatilityFilter volatilityFilter, Config config,
-                          ResilientBrokerClient alpacaClient) {
-        
+                          ResilientBrokerClient alpacaClient, ProfileManager profileManager) {
+
         // Create TradeAnalytics for performance tracking (Task 3)
         var tradeAnalytics = new TradeAnalytics();
-        
+
         this.controller = new DashboardController(database, portfolio, marketAnalyzer,
-            marketHoursFilter, volatilityFilter, config, tradeAnalytics, alpacaClient);
+            marketHoursFilter, volatilityFilter, config, tradeAnalytics, profileManager, alpacaClient);
         
         this.healthCheckService = new HealthCheckService(alpacaClient, database);
         

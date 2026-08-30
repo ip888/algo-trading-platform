@@ -169,5 +169,23 @@ abstract class ProfileManagerTestBase {
         // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() for all tracked positions;
         // without this, it NPEs silently (caught by the outer try/catch) and regime exits never run.
         setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
+
+        // The fields below were converted from `static` to instance fields on 2026-08-30 (see
+        // ProfileManager's "INSTANCE STATE" comment block) — they used to be reliably initialized
+        // by the class's static initializer, which always runs at class-load time regardless of
+        // allocateInstance() bypassing the constructor. Now, like breakevenStopsActive/
+        // timeDecayExitManager above, they need the same manual treatment or they're null/wrong-default
+        // in every test built via allocate().
+        setField("pendingBuySymbols", new ConcurrentHashMap<String, Long>());
+        setField("globalHeldSymbols", new ConcurrentHashMap<String, String>());
+        setField("scalpHeldSymbols", java.util.concurrent.ConcurrentHashMap.newKeySet());
+        setField("lastExitPrices", new ConcurrentHashMap<String, Double>());
+        setField("urgentExitQueue", new ConcurrentHashMap<String, Object>());
+        setField("blockedBuys", new ConcurrentHashMap<String, String>());
+        setField("circuitBreakers", new ConcurrentHashMap<String, com.trading.risk.CircuitBreakerState>());
+        setField("staticScalpDailyCount", new java.util.concurrent.atomic.AtomicInteger(0));
+        setField("scalpCountDate", java.time.LocalDate.now());
+        setField("latestRegimeSnapshot", "UNKNOWN");
+        setField("latestTargetSymbolsSnapshot", "");
     }
 }

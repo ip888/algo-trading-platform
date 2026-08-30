@@ -40,6 +40,12 @@ public final class DashboardController {
     private final Config config;
     private final TradeAnalytics tradeAnalytics;
     private final ResilientBrokerClient alpacaClient;
+    // The live ProfileManager instance — needed to read cooldowns/halt-state/circuit-breaker
+    // snapshots for the dashboard's diagnostic endpoints. Used to be reachable via static
+    // ProfileManager.getXxx() calls (state was shared across the old MAIN+EXPERIMENTAL
+    // instances); now that state is per-instance (see ProfileManager's "INSTANCE STATE"
+    // comment block), this controller needs a direct reference to read it.
+    private final ProfileManager profileManager;
     // Cached per-request-free broker clients — created once, reused for every dashboard call.
     // Avoids the "TradierClient initialized" log spam every 2 minutes from health-check threads.
     private final com.trading.api.AlpacaClient cachedAlpacaClient;
@@ -48,14 +54,16 @@ public final class DashboardController {
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                               VolatilityFilter volatilityFilter, Config config,
-                              TradeAnalytics tradeAnalytics) {
-        this(database, portfolio, marketAnalyzer, marketHoursFilter, volatilityFilter, config, tradeAnalytics, null);
+                              TradeAnalytics tradeAnalytics, ProfileManager profileManager) {
+        this(database, portfolio, marketAnalyzer, marketHoursFilter, volatilityFilter, config,
+            tradeAnalytics, profileManager, null);
     }
 
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
                               VolatilityFilter volatilityFilter, Config config,
-                              TradeAnalytics tradeAnalytics, ResilientBrokerClient alpacaClient) {
+                              TradeAnalytics tradeAnalytics, ProfileManager profileManager,
+                              ResilientBrokerClient alpacaClient) {
         this.database = database;
         this.portfolio = portfolio;
         this.marketAnalyzer = marketAnalyzer;
@@ -63,6 +71,7 @@ public final class DashboardController {
         this.volatilityFilter = volatilityFilter;
         this.config = config;
         this.tradeAnalytics = tradeAnalytics;
+        this.profileManager = profileManager;
         this.alpacaClient = alpacaClient;
         this.cachedAlpacaClient = new com.trading.api.AlpacaClient(config);
         String brokersAlloc = config.getBrokersAllocation();
@@ -237,7 +246,7 @@ public final class DashboardController {
         try {
             var client = cachedAlpacaClient;
             var positions = client.getPositions();
-            double vix = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            double vix = profileManager.getLatestVixSnapshot();
             double takeProfitPercent = config.getVixScaledTakeProfit(vix > 0 ? vix : 12.0);
 
             for (var pos : positions) {
@@ -686,9 +695,9 @@ public final class DashboardController {
             
             // Basic status
             status.put("marketStatus", marketHoursFilter.isMarketOpen() ? "OPEN" : "CLOSED");
-            String regime = com.trading.portfolio.ProfileManager.getLatestRegimeSnapshot();
+            String regime = profileManager.getLatestRegimeSnapshot();
             status.put("regime", regime.isEmpty() ? "UNKNOWN" : regime);
-            double vix = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            double vix = profileManager.getLatestVixSnapshot();
             if (vix <= 0 && volatilityFilter != null) vix = volatilityFilter.getCurrentVIX();
             status.put("vix", vix);
             status.put("tradingMode", config.getTradingMode());
@@ -697,7 +706,7 @@ public final class DashboardController {
             status.put("pdtProtectionEnabled", config.isPDTProtectionEnabled());
             // Intraday scalp strategy
             status.put("scalpEnabled", config.isScalpStrategyEnabled());
-            status.put("scalpDailyCount", com.trading.portfolio.ProfileManager.getScalpDailyCount());
+            status.put("scalpDailyCount", profileManager.getScalpDailyCount());
             status.put("scalpDailyMax", config.getScalpMaxDailyTrades());
             status.put("capitalReserveEnabled", true);
             status.put("capitalReservePercent", 0.25);
@@ -1000,14 +1009,14 @@ public final class DashboardController {
             watchlistSet.addAll(config.getMainBearishSymbols());
 
             // Current VIX / regime from bot snapshot
-            double vix = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
+            double vix = profileManager.getLatestVixSnapshot();
             if (vix <= 0 && volatilityFilter != null) vix = volatilityFilter.getCurrentVIX();
-            String regime = com.trading.portfolio.ProfileManager.getLatestRegimeSnapshot();
+            String regime = profileManager.getLatestRegimeSnapshot();
 
             // Per-symbol bot state
-            var blockedBuys  = com.trading.portfolio.ProfileManager.getBlockedBuys();
-            var cooldowns    = com.trading.portfolio.ProfileManager.getActiveCooldowns();
-            String targetStr = com.trading.portfolio.ProfileManager.getLatestTargetSymbolsSnapshot();
+            var blockedBuys  = profileManager.getBlockedBuys();
+            var cooldowns    = profileManager.getActiveCooldowns();
+            String targetStr = profileManager.getLatestTargetSymbolsSnapshot();
             var targetSymbols = new java.util.HashSet<>(java.util.Arrays.asList(targetStr.split(",")));
             targetSymbols.remove("");
 
@@ -1143,7 +1152,7 @@ public final class DashboardController {
             response.put("circuitBreakerState", cbState);
 
             // --- Active Cooldowns ---
-            var cooldowns = ProfileManager.getActiveCooldowns();
+            var cooldowns = profileManager.getActiveCooldowns();
             List<Map<String, Object>> cooldownList = new ArrayList<>();
             long now = System.currentTimeMillis();
             for (var entry : cooldowns.entrySet()) {
@@ -1157,7 +1166,7 @@ public final class DashboardController {
             response.put("activeCooldowns", cooldownList);
 
             // --- Consecutive Stop Losses ---
-            var consecSL = ProfileManager.getConsecutiveStopLosses();
+            var consecSL = profileManager.getConsecutiveStopLosses();
             response.put("consecutiveStopLosses", consecSL);
             int maxConsecSL = consecSL.values().stream().mapToInt(Integer::intValue).max().orElse(0);
 
@@ -1237,7 +1246,7 @@ public final class DashboardController {
             // --- Intraday Scalp status (replaces obsolete PDT check — PDT abolished June 4 2026) ---
             boolean scalpEnabled = config.isScalpStrategyEnabled();
             int scalpMax = config.getScalpMaxDailyTrades();
-            int scalpCount = com.trading.portfolio.ProfileManager.getScalpDailyCount();
+            int scalpCount = profileManager.getScalpDailyCount();
             String scalpDetail;
             if (!scalpEnabled) {
                 scalpDetail = "Scalp strategy disabled (set SCALP_STRATEGY_ENABLED=true to enable)";
@@ -1267,7 +1276,7 @@ public final class DashboardController {
             response.put("pdtBlockedUntilMs", 0);
 
             // Urgent exit queue: failed protective sells pending retry
-            var urgentExits = com.trading.portfolio.ProfileManager.getUrgentExitQueue();
+            var urgentExits = profileManager.getUrgentExitQueue();
             checks.add(Map.of(
                 "name", "Urgent Exit Queue",
                 "status", urgentExits.isEmpty() ? "GREEN" : "RED",
@@ -1277,7 +1286,7 @@ public final class DashboardController {
             ));
 
             // Blocked buys: symbols currently blocked from entry (gap-down, price gate)
-            var blockedBuys = com.trading.portfolio.ProfileManager.getBlockedBuys();
+            var blockedBuys = profileManager.getBlockedBuys();
             if (!blockedBuys.isEmpty()) {
                 checks.add(Map.of(
                     "name", "Blocked Entries",
@@ -1290,9 +1299,9 @@ public final class DashboardController {
             }
 
             // --- VIX / Market Regime ---
-            double vixLevel = com.trading.portfolio.ProfileManager.getLatestVixSnapshot();
-            String regime = com.trading.portfolio.ProfileManager.getLatestRegimeSnapshot();
-            String targetSyms = com.trading.portfolio.ProfileManager.getLatestTargetSymbolsSnapshot();
+            double vixLevel = profileManager.getLatestVixSnapshot();
+            String regime = profileManager.getLatestRegimeSnapshot();
+            String targetSyms = profileManager.getLatestTargetSymbolsSnapshot();
             double vixThreshold = config.getVixThreshold();
             boolean vixElevated = vixLevel > 0 && vixLevel >= vixThreshold;
             String vixStatus = vixLevel == 0 ? "YELLOW" : vixElevated ? "YELLOW" : "GREEN";
@@ -1308,7 +1317,7 @@ public final class DashboardController {
             response.put("targetSymbols", targetSyms);
 
             // --- Per-symbol post-loss cooldown registry (Tier 1.1) ---
-            var postLossCooldowns = com.trading.portfolio.ProfileManager.getPostLossCooldowns();
+            var postLossCooldowns = profileManager.getPostLossCooldowns();
             List<Map<String, Object>> postLossList = new ArrayList<>();
             for (var entry : postLossCooldowns.entrySet()) {
                 long remainingHours = Math.max(0, (entry.getValue() - now) / 3_600_000L);
@@ -1331,9 +1340,9 @@ public final class DashboardController {
             ));
 
             // --- Per-broker circuit breaker (Tier 3.10) ---
-            var cbSnap = com.trading.portfolio.ProfileManager.getCircuitBreakerSnapshot();
+            var cbSnap = profileManager.getCircuitBreakerSnapshot();
             response.put("circuitBreakers", cbSnap);
-            boolean anyCbTripped = com.trading.portfolio.ProfileManager.isAnyCircuitBreakerTripped();
+            boolean anyCbTripped = profileManager.isAnyCircuitBreakerTripped();
             String cbDetail;
             if (cbSnap.isEmpty()) {
                 cbDetail = "No broker circuit breakers active yet";
@@ -1355,8 +1364,8 @@ public final class DashboardController {
             ));
 
             // --- Portfolio Stop Loss Gate ---
-            boolean portfolioHalt = com.trading.portfolio.ProfileManager.isPortfolioStopLossHaltActive();
-            boolean drawdownHalt = com.trading.portfolio.ProfileManager.isMaxDrawdownHaltActive();
+            boolean portfolioHalt = profileManager.isPortfolioStopLossHaltActive();
+            boolean drawdownHalt = profileManager.isMaxDrawdownHaltActive();
             String entryGateStatus = (portfolioHalt || drawdownHalt) ? "RED" : "GREEN";
             String entryGateDetail;
             if (portfolioHalt && drawdownHalt) {

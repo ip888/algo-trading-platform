@@ -190,7 +190,8 @@ public final class MultiBrokerOrchestrator {
         var dashboardVolFilter = new VolatilityFilter(alpacaDataClient);
         var dashboard = new DashboardServer(database,
             entries.get(0).manager().getPortfolio(),
-            dashboardAnalyzer, marketHoursFilter, dashboardVolFilter, config, alpacaResilient);
+            dashboardAnalyzer, marketHoursFilter, dashboardVolFilter, config, alpacaResilient,
+            entries.get(0).manager());
         dashboard.start();
         logger.info("Dashboard available at: http://localhost:8080");
 

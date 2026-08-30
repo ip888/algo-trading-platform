@@ -198,6 +198,20 @@ class ProfileManagerPDTAndCooldownTest {
         setField("consecutiveStopLosses", new ConcurrentHashMap<String, Integer>());
         setField("lastExitPrices",        new ConcurrentHashMap<String, Double>());
         setField("latestRegime",          com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
+
+        // Converted from static to instance state 2026-08-30 (ProfileManager's "INSTANCE STATE"
+        // comment block) — allocateInstance() bypasses field initializers, so these need manual
+        // setup same as the fields above.
+        setField("pendingBuySymbols", new ConcurrentHashMap<String, Long>());
+        setField("globalHeldSymbols", new ConcurrentHashMap<String, String>());
+        setField("scalpHeldSymbols", java.util.concurrent.ConcurrentHashMap.newKeySet());
+        setField("urgentExitQueue", new ConcurrentHashMap<String, Object>());
+        setField("blockedBuys", new ConcurrentHashMap<String, String>());
+        setField("circuitBreakers", new ConcurrentHashMap<String, com.trading.risk.CircuitBreakerState>());
+        setField("staticScalpDailyCount", new java.util.concurrent.atomic.AtomicInteger(0));
+        setField("scalpCountDate", java.time.LocalDate.now());
+        setField("latestRegimeSnapshot", "UNKNOWN");
+        setField("latestTargetSymbolsSnapshot", "");
     }
 
     // ── PDT Threshold Tests ──────────────────────────────────────────────────

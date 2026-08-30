@@ -10,8 +10,18 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * AI-powered sentiment analysis using Alpaca News API.
- * Analyzes news articles to determine market sentiment for symbols.
+ * Sentiment analysis using the real Alpaca News API for article data, with a
+ * provider fallback chain for the actual scoring: Alpha Vantage NEWS_SENTIMENT (if
+ * {@code ALPHA_VANTAGE_ENABLED=true}) &rarr; FinGPT via Hugging Face (if
+ * {@code FINGPT_ENABLED=true}) &rarr; {@link #calculateKeywordSentiment}, a static
+ * positive/negative keyword-count heuristic over the real news text.
+ *
+ * <p><b>As currently configured, both real providers are disabled</b> (deferred —
+ * see project memory on FinGPT — until the bot shows stable profitability, since
+ * FinGPT/HF is ~$9/mo and Alpha Vantage's cheapest sufficient tier is ~$50/mo at this
+ * bot's call volume). So today this class is real news data + keyword-count scoring,
+ * not an ML/LLM sentiment score — despite the "AI FILTER" log line at its call site
+ * in ProfileManager, which blocks entries on this score either way.
  */
 public class SentimentAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger(SentimentAnalyzer.class);

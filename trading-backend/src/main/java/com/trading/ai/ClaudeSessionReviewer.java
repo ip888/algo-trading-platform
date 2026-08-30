@@ -1,5 +1,9 @@
 package com.trading.ai;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.trading.autonomous.ConfigSelfHealer;
+import com.trading.autonomous.ErrorDetector;
 import com.trading.persistence.TradeDatabase;
 import okhttp3.*;
 import org.slf4j.Logger;
@@ -7,15 +11,21 @@ import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * End-of-session reviewer that sends a daily trading summary to the Claude API
- * and stores the structured config-diff suggestion in bot_state.
+ * End-of-session reviewer that sends a daily trading summary to the Claude API and routes
+ * the structured config-diff suggestion through {@link ConfigSelfHealer}'s existing
+ * backup -&gt; apply -&gt; sandbox-test -&gt; promote/rollback pipeline — the same validated
+ * path an exception-triggered self-heal already uses live. This makes the daily review
+ * genuinely autonomous rather than a suggestion nobody reads: previously the JSON diff was
+ * only written to {@code bot_state} and logged on next startup, with no path to actually
+ * apply it. Still gated by ConfigSelfHealer's own rate limit (3 heals/hour, 10 lifetime).
  *
- * The suggestion is stored under key "claude_review:latest" as a JSON string.
- * ProfileManager reads this on startup and logs it so the operator can apply
- * the suggested config changes manually (or a future task can auto-apply them).
+ * The raw suggestion is still stored under key "claude_review:latest" for visibility/audit
+ * even when it results in no changes or the healer isn't wired in (e.g. legacy call sites).
  *
  * Call {@link #runEndOfSessionReview(String, double)} after EOD exits complete.
  * Requires CLAUDE_API_KEY env var or CLAUDE_API_KEY in config.properties (via TradeDatabase).
@@ -32,10 +42,18 @@ public class ClaudeSessionReviewer {
     private final TradeDatabase database;
     private final OkHttpClient httpClient;
     private final String apiKey;
+    private final ConfigSelfHealer configSelfHealer;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /** Legacy constructor — no self-heal routing, suggestion is only stored/logged. */
     public ClaudeSessionReviewer(TradeDatabase database, String apiKey) {
+        this(database, apiKey, null);
+    }
+
+    public ClaudeSessionReviewer(TradeDatabase database, String apiKey, ConfigSelfHealer configSelfHealer) {
         this.database = database;
         this.apiKey = apiKey;
+        this.configSelfHealer = configSelfHealer;
         this.httpClient = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
@@ -70,10 +88,62 @@ public class ClaudeSessionReviewer {
                 database.saveBotState(LAST_REVIEW_KEY, today);
                 logger.info("Claude end-of-session review stored. Suggestion preview: {}",
                     suggestion.length() > 200 ? suggestion.substring(0, 200) + "..." : suggestion);
+                applySuggestionIfActionable(suggestion);
             }
         } catch (Exception e) {
             logger.warn("End-of-session Claude review failed (non-fatal): {}", e.getMessage());
         }
+    }
+
+    /**
+     * Parses Claude's {"changes":[{"key","from","to","reason"}]} suggestion and, if it
+     * contains at least one change and a healer is wired in, routes it through
+     * ConfigSelfHealer.heal() as a synthetic ErrorAnalysis — same backup/sandbox-test/
+     * promote-or-rollback path as an exception-triggered heal, so a bad or hallucinated
+     * suggestion gets caught by the sandbox test rather than applied blind.
+     */
+    /** Package-visible for testing. */
+    void applySuggestionIfActionable(String suggestionJson) {
+        if (configSelfHealer == null) {
+            logger.debug("No ConfigSelfHealer wired in — suggestion stored for manual review only");
+            return;
+        }
+        Map<String, String> adjustments;
+        StringBuilder reasons = new StringBuilder();
+        try {
+            JsonNode root = objectMapper.readTree(suggestionJson);
+            JsonNode changes = root.get("changes");
+            if (changes == null || !changes.isArray() || changes.isEmpty()) {
+                logger.info("Claude review: no config changes suggested today");
+                return;
+            }
+            adjustments = new LinkedHashMap<>();
+            for (JsonNode change : changes) {
+                String key = change.path("key").asText(null);
+                String to = change.path("to").asText(null);
+                if (key == null || to == null) continue;
+                adjustments.put(key, to);
+                reasons.append(key).append(": ").append(change.path("reason").asText("")).append("; ");
+            }
+        } catch (Exception e) {
+            logger.warn("Could not parse Claude's suggested config diff, skipping auto-apply: {}", e.getMessage());
+            return;
+        }
+        if (adjustments.isEmpty()) {
+            return;
+        }
+
+        var pattern = new ErrorDetector.ErrorPattern(
+            "CLAUDE_SESSION_REVIEW", "", ErrorDetector.Severity.MEDIUM,
+            reasons.toString(), adjustments);
+        var analysis = new ErrorDetector.ErrorAnalysis(
+            "ClaudeSessionReview", "Daily end-of-session review suggestion",
+            pattern, ErrorDetector.Severity.MEDIUM, 1, true,
+            "Claude end-of-session review " + LocalDate.now(ZoneId.of("America/New_York")));
+
+        logger.info("🔧 Routing Claude's {} suggested change(s) through ConfigSelfHealer: {}",
+            adjustments.size(), adjustments.keySet());
+        configSelfHealer.heal(analysis);
     }
 
     private String buildDailySummary(String date, String regime, double vix) {

@@ -1742,7 +1742,11 @@ public class ProfileManager implements Runnable {
                 com.trading.ai.AIMetricsTracker.getInstance().recordSentiment(symbol, sentimentScore);
                 
                 if (!sentimentAnalyzer.isSentimentPositive(symbol, isBullish)) {
-                    logger.info("{} {}: ❌ AI FILTER - Negative sentiment, skipping trade", 
+                    // Score source depends on config: real ML sentiment (Alpha Vantage/FinGPT) if
+                    // enabled, otherwise a keyword-count fallback over real Alpaca news headlines —
+                    // see SentimentAnalyzer's class Javadoc. Both are currently disabled
+                    // (ALPHA_VANTAGE_ENABLED/FINGPT_ENABLED=false), so this is keyword-based today.
+                    logger.info("{} {}: ❌ AI FILTER - Negative sentiment, skipping trade",
                         profilePrefix, symbol);
                     com.trading.ai.AIMetricsTracker.getInstance().incrementTradesFiltered();
                     return;
@@ -4062,7 +4066,7 @@ public class ProfileManager implements Runnable {
                     double vix = latestVix;
                     Thread.ofVirtual().name("claude-eod-review").start(() -> {
                         try {
-                            var reviewer = new com.trading.ai.ClaudeSessionReviewer(database, claudeApiKey);
+                            var reviewer = new com.trading.ai.ClaudeSessionReviewer(database, claudeApiKey, configSelfHealer);
                             reviewer.runEndOfSessionReview(regimeName, vix);
                         } catch (Exception ex) {
                             logger.warn("EOD Claude review thread failed: {}", ex.getMessage());

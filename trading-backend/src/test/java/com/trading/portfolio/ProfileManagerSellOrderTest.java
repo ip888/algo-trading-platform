@@ -115,6 +115,17 @@ class ProfileManagerSellOrderTest {
     }
 
     /**
+     * checkAllPositionsForRiskExits / checkAllPositionsForProfitTargets / cleanupExcessPositions
+     * live on ExitEvaluator since 2026-08-30 (see its class Javadoc) — invoke on the exitEvaluator
+     * instance held by profileManager instead of on ProfileManager directly.
+     */
+    private Object invokeOnExitEvaluator(String methodName, Class<?>[] paramTypes, Object... args) throws Exception {
+        Method method = ExitEvaluator.class.getDeclaredMethod(methodName, paramTypes);
+        method.setAccessible(true);
+        return method.invoke(getField("exitEvaluator"), args);
+    }
+
+    /**
      * Create a Jackson ArrayNode representing open orders with the given IDs.
      */
     private ArrayNode createOpenOrdersNode(String... orderIds) {
@@ -252,8 +263,24 @@ class ProfileManagerSellOrderTest {
         var symbols = List.of("SPY", "QQQ");
         var portfolio = new PortfolioManager(symbols, 100_000.0);
 
+        var profile = createMainProfile();
+        // Initialize the Phase 2 exit strategies (needed by checkAllPositionsForProfitTargets)
+        var phase2ExitStrategies = new com.trading.exits.Phase2ExitStrategies(mockConfig);
+        // Initialize the trailing target manager (checked in risk exits even when disabled)
+        var trailingTargetManager = new com.trading.exits.TrailingTargetManager(mockConfig);
+        // Initialize the order type selector used by take-profit sell path
+        var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
+        // timeDecayExitManager is a final field initialized in constructor — null after allocateInstance.
+        // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() on tracked positions.
+        var timeDecayExitManager = new com.trading.exits.TimeDecayExitManager(mockConfig);
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance(). RiskGate's own no-arg constructor runs normally once we build one
+        // here, so its internal maps/defaults come out correctly initialized. Built before any
+        // setField() call below so nothing can resolve onto a still-null riskGate.
+        var riskGate = new RiskGate();
+
         // Set required fields on the ProfileManager
-        setField("profile", createMainProfile());
+        setField("profile", profile);
         setField("capital", 100_000.0);
         setField("client", mockClient);
         setField("config", mockConfig);
@@ -263,43 +290,50 @@ class ProfileManagerSellOrderTest {
         setField("latestVix", 15.0);
         setField("latestEquity", 100_000.0);
         setField("running", true);
-
-        // Initialize the Phase 2 exit strategies (needed by checkAllPositionsForProfitTargets)
-        var phase2ExitStrategies = new com.trading.exits.Phase2ExitStrategies(mockConfig);
         setField("phase2ExitStrategies", phase2ExitStrategies);
-
-        // Initialize the trailing target manager (checked in risk exits even when disabled)
-        var trailingTargetManager = new com.trading.exits.TrailingTargetManager(mockConfig);
         setField("trailingTargetManager", trailingTargetManager);
-
-        // Initialize the order type selector used by take-profit sell path
-        var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
         setField("orderTypeSelector", orderTypeSelector);
-
-        // Initialize latestRegime
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
 
         // brokerName is a final non-static field — null after allocateInstance, causing NPE
         // in circuitBreakers.get(null) and database calls that use it as a parameter.
         setField("brokerName", "alpaca");
-
-        // breakevenStopsActive is a final field with inline init — bypassed by allocateInstance.
-        // clearPositionTracking() NPEs on breakevenStopsActive.remove() without this.
-        setField("breakevenStopsActive", java.util.concurrent.ConcurrentHashMap.newKeySet());
-
-        // timeDecayExitManager is a final field initialized in constructor — null after allocateInstance.
-        // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() on tracked positions.
-        setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
-
-        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
-        // allocateInstance() same as breakevenStopsActive/timeDecayExitManager above. RiskGate's
-        // own no-arg constructor runs normally once we build one here, so its internal
-        // maps/defaults come out correctly initialized.
-        setField("riskGate", new RiskGate());
+        setField("timeDecayExitManager", timeDecayExitManager);
+        setField("riskGate", riskGate);
+        setField("todayPnL", 0.0);
 
         // Stub database calls used in checkAllPositionsForRiskExits and checkAllPositionsForProfitTargets
         when(mockDatabase.getOpenTradeRecords(anyString())).thenReturn(List.of());
         when(mockDatabase.wasRecentlyClosed(anyString(), anyString(), anyLong())).thenReturn(false);
+
+        // exitEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as riskGate above. Built manually here from the same collaborators just seeded;
+        // constructing it normally (not via Unsafe) means its own field initializers — including
+        // breakevenStopsActive and eodExitExecutedDate=null — run correctly, so neither needs
+        // manual seeding here the way breakevenStopsActive used to.
+        java.util.function.DoubleSupplier vixSupplier = () -> {
+            try { return (double) (Double) getField("latestVix"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<com.trading.analysis.MarketRegimeDetector.MarketRegime> regimeSupplier = () -> {
+            try {
+                return (com.trading.analysis.MarketRegimeDetector.MarketRegime) getField("latestRegime");
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.DoubleSupplier equitySupplier = () -> {
+            try { return (double) (Double) getField("latestEquity"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.BiConsumer<String, Double> updateDailyPnLFn = (prefix, pnl) -> {
+            try {
+                Method m = ProfileManager.class.getDeclaredMethod("updateDailyPnL", String.class, double.class);
+                m.setAccessible(true);
+                m.invoke(profileManager, prefix, pnl);
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var exitEvaluator = new ExitEvaluator(profile, "alpaca", mockConfig, mockDatabase, mockClient,
+            portfolio, riskGate, mockExitStrategyManager, phase2ExitStrategies, timeDecayExitManager,
+            trailingTargetManager, orderTypeSelector, null, null, 100_000.0,
+            vixSupplier, regimeSupplier, equitySupplier, updateDailyPnLFn);
+        setField("exitEvaluator", exitEvaluator);
     }
 
     // ===================== Test Cases =====================
@@ -324,7 +358,7 @@ class ProfileManagerSellOrderTest {
         ArrayNode orders = createOpenOrdersNode("order-sl-001");
         when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
 
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
         // Verify cancel is called BEFORE placeOrderDirect (max-loss bypass circuit breaker)
         InOrder inOrder = inOrder(mockClient);
@@ -350,7 +384,7 @@ class ProfileManagerSellOrderTest {
         ArrayNode orders = createOpenOrdersNode("order-tp-001");
         when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
 
-        invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
         // Verify cancel then sell ordering
         InOrder inOrder = inOrder(mockClient);
@@ -386,7 +420,7 @@ class ProfileManagerSellOrderTest {
         ArrayNode orders = createOpenOrdersNode("order-risk-001");
         when(mockClient.getOpenOrders("SPY")).thenReturn(orders);
 
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
         // Verify cancel before sell (risk exits bypass circuit breaker via placeOrderDirect)
         InOrder inOrder = inOrder(mockClient);
@@ -402,7 +436,7 @@ class ProfileManagerSellOrderTest {
         Position position = new Position("TSLA", 0, 0, 100.0, 0);
         when(mockClient.getPositions()).thenReturn(List.of(position));
 
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
         verify(mockClient, never()).placeOrder(anyString(), anyDouble(), anyString(), anyString(), anyString(), any());
     }
@@ -415,7 +449,7 @@ class ProfileManagerSellOrderTest {
         Position position = new Position("TSLA", 5.0, 500.0, 0, -10.0);
         when(mockClient.getPositions()).thenReturn(List.of(position));
 
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
         verify(mockClient, never()).placeOrder(anyString(), anyDouble(), anyString(), anyString(), anyString(), any());
     }
@@ -428,7 +462,7 @@ class ProfileManagerSellOrderTest {
         Position position = new Position("GOOG", 0, 0, 150.0, 0);
         when(mockClient.getPositions()).thenReturn(List.of(position));
 
-        invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
         verify(mockClient, never()).placeOrder(anyString(), anyDouble(), anyString(), anyString(), anyString(), any());
     }
@@ -441,7 +475,7 @@ class ProfileManagerSellOrderTest {
         Position position = new Position("GOOG", 5.0, 750.0, 0, 0);
         when(mockClient.getPositions()).thenReturn(List.of(position));
 
-        invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
         verify(mockClient, never()).placeOrder(anyString(), anyDouble(), anyString(), anyString(), anyString(), any());
     }
@@ -470,7 +504,7 @@ class ProfileManagerSellOrderTest {
         ArrayNode orders = createOpenOrdersNode("order-cleanup-001");
         when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
 
-        invokePrivate("cleanupExcessPositions", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("cleanupExcessPositions", new Class<?>[]{String.class}, "[MAIN]");
 
         // Verify cancel then sell
         InOrder inOrder = inOrder(mockClient);
@@ -497,7 +531,7 @@ class ProfileManagerSellOrderTest {
         Position normalPos = new Position("MSFT", 3.0, 610.0, 200.0, 10.0);
         when(mockClient.getPositions()).thenReturn(List.of(zeroQtyPos, normalPos));
 
-        invokePrivate("cleanupExcessPositions", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("cleanupExcessPositions", new Class<?>[]{String.class}, "[MAIN]");
 
         // placeOrder should NOT be called for the zero-qty AAPL position
         verify(mockClient, never()).placeOrder(eq("AAPL"), anyDouble(), anyString(), anyString(), anyString(), any());
@@ -545,7 +579,7 @@ class ProfileManagerSellOrderTest {
         when(mockClient.getPositions()).thenReturn(List.of(position));
         when(mockClient.getOpenOrders("AAPL")).thenReturn(emptyOrdersNode());
 
-        invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
         // Verify a sell order was placed (profit target logic executed)
         verify(mockClient).placeOrder(eq("AAPL"), eq(qty), eq("sell"), anyString(), anyString(), any());
@@ -582,7 +616,7 @@ class ProfileManagerSellOrderTest {
         portfolio.setPosition("AAPL", Optional.of(trackedPos));
 
         // First call: enhanced exit fires, placeOrderDirect called once
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
         verify(mockClient, times(1)).placeOrderDirect(eq("AAPL"), anyDouble(), eq("sell"), eq("market"), eq("day"), isNull());
 
         // Enhanced exit adds key "brokerName:symbol" (not bare symbol)
@@ -591,7 +625,7 @@ class ProfileManagerSellOrderTest {
 
         // Second call: pendingExitOrders guard skips the position — no additional sell
         when(mockClient.getPositions()).thenReturn(List.of(alpacaPos)); // position still visible on broker
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
         verify(mockClient, times(1)).placeOrderDirect(eq("AAPL"), anyDouble(), eq("sell"), eq("market"), eq("day"), isNull());
     }
 
@@ -622,7 +656,7 @@ class ProfileManagerSellOrderTest {
         portfolio.setPosition("GOOGL", Optional.of(trackedPos));
 
         long before = System.currentTimeMillis();
-        invokePrivate("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
         // A re-entry cooldown must be set with a future expiry
         ConcurrentHashMap<String, Long> cooldowns = getField("stopLossCooldowns");

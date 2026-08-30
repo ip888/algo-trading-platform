@@ -61,9 +61,10 @@ abstract class ProfileManagerTestBase {
     }
 
     void invokeRiskExits() throws Exception {
-        Method m = ProfileManager.class.getDeclaredMethod("checkAllPositionsForRiskExits", String.class);
+        // checkAllPositionsForRiskExits lives on ExitEvaluator since 2026-08-30 — see its class Javadoc.
+        Method m = ExitEvaluator.class.getDeclaredMethod("checkAllPositionsForRiskExits", String.class);
         m.setAccessible(true);
-        m.invoke(profileManager, "[MAIN]");
+        m.invoke(getField("exitEvaluator"), "[MAIN]");
     }
 
     // ── Common fixtures ─────────────────────────────────────────────────────
@@ -136,16 +137,32 @@ abstract class ProfileManagerTestBase {
         when(mockClient.getOpenOrders(anyString())).thenReturn(MAPPER.createArrayNode());
         doNothing().when(mockClient).placeNativeStopOrder(anyString(), anyDouble(), anyDouble());
 
-        setField("profile", mainProfile());
+        var profile = mainProfile();
+        var exitStrategyManager = new ExitStrategyManager(mockConfig);
+        var phase2ExitStrategies = new com.trading.exits.Phase2ExitStrategies(mockConfig);
+        var trailingTargetManager = new com.trading.exits.TrailingTargetManager(mockConfig);
+        var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
+        // timeDecayExitManager is a final instance field set in constructor — null after allocateInstance.
+        // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() for all tracked positions;
+        // without this, it NPEs silently (caught by the outer try/catch) and regime exits never run.
+        var timeDecayExitManager = new com.trading.exits.TimeDecayExitManager(mockConfig);
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance(). Its own no-arg constructor runs normally once we build one here
+        // (it's ProfileManager's constructor that's bypassed, not RiskGate's), so all of
+        // RiskGate's internal maps/defaults come out correctly initialized — no per-field
+        // seeding needed, just this one line.
+        var riskGate = new RiskGate();
+
+        setField("profile", profile);
         setField("capital", 10_000.0);
         setField("client", mockClient);
         setField("config", mockConfig);
         setField("database", mockDatabase);
         setField("portfolio", portfolio);
-        setField("exitStrategyManager", new ExitStrategyManager(mockConfig));
-        setField("phase2ExitStrategies", new com.trading.exits.Phase2ExitStrategies(mockConfig));
-        setField("trailingTargetManager", new com.trading.exits.TrailingTargetManager(mockConfig));
-        setField("orderTypeSelector", new com.trading.execution.SmartOrderTypeSelector());
+        setField("exitStrategyManager", exitStrategyManager);
+        setField("phase2ExitStrategies", phase2ExitStrategies);
+        setField("trailingTargetManager", trailingTargetManager);
+        setField("orderTypeSelector", orderTypeSelector);
         setField("latestVix", 15.0);
         setField("latestEquity", 10_000.0);
         setField("running", true);
@@ -159,20 +176,38 @@ abstract class ProfileManagerTestBase {
         // (isMarketBreadthFilter() returns false → isMarketHealthy() always returns true).
         setField("marketBreadthAnalyzer",
             new com.trading.analysis.MarketBreadthAnalyzer(mockConfig));
-        // breakevenStopsActive is a final field with inline init — bypassed by allocateInstance.
-        // Must initialize manually or clearPositionTracking() NPEs on breakevenStopsActive.remove().
-        setField("breakevenStopsActive", java.util.concurrent.ConcurrentHashMap.newKeySet());
-        // timeDecayExitManager is a final instance field set in constructor — null after allocateInstance.
-        // checkAllPositionsForRiskExits calls timeDecayExitManager.shouldExit() for all tracked positions;
-        // without this, it NPEs silently (caught by the outer try/catch) and regime exits never run.
-        setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
+        setField("timeDecayExitManager", timeDecayExitManager);
+        setField("riskGate", riskGate);
 
-        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
-        // allocateInstance() same as breakevenStopsActive/timeDecayExitManager above. Unlike
-        // those, RiskGate's own no-arg constructor runs normally once we build one here (it's
-        // ProfileManager's constructor that's bypassed, not RiskGate's), so all of RiskGate's
-        // internal maps/defaults come out correctly initialized — no per-field seeding needed,
-        // just this one line.
-        setField("riskGate", new RiskGate());
+        // exitEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as riskGate above. Built manually here from the same collaborators just seeded so its
+        // behavior matches what ProfileManager's real constructor would have wired. The
+        // latestVix/latestRegime/latestEquity suppliers reflect into profileManager's own fields
+        // at call time (not a snapshot taken now) so a test that later does
+        // setField("latestRegime", ...) is still seen by ExitEvaluator, exactly like the real
+        // constructor's suppliers reading the live volatile fields.
+        java.util.function.DoubleSupplier vixSupplier = () -> {
+            try { return (double) getField("latestVix"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<com.trading.analysis.MarketRegimeDetector.MarketRegime> regimeSupplier = () -> {
+            try {
+                return (com.trading.analysis.MarketRegimeDetector.MarketRegime) getField("latestRegime");
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.DoubleSupplier equitySupplier = () -> {
+            try { return (double) getField("latestEquity"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.BiConsumer<String, Double> updateDailyPnLFn = (prefix, pnl) -> {
+            try {
+                Method m = ProfileManager.class.getDeclaredMethod("updateDailyPnL", String.class, double.class);
+                m.setAccessible(true);
+                m.invoke(profileManager, prefix, pnl);
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var exitEvaluator = new ExitEvaluator(profile, "alpaca", mockConfig, mockDatabase, mockClient,
+            portfolio, riskGate, exitStrategyManager, phase2ExitStrategies, timeDecayExitManager,
+            trailingTargetManager, orderTypeSelector, null, null, 10_000.0,
+            vixSupplier, regimeSupplier, equitySupplier, updateDailyPnLFn);
+        setField("exitEvaluator", exitEvaluator);
     }
 }

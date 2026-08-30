@@ -77,6 +77,24 @@ class ProfileManagerEodExitTest {
         return m.invoke(profileManager, args);
     }
 
+    /**
+     * checkAndExecuteEodExit lives on ExitEvaluator since 2026-08-30 (see its class Javadoc) —
+     * invoke on the exitEvaluator instance held by profileManager instead of on ProfileManager.
+     */
+    private Object invokeOnExitEvaluator(String name, Class<?>[] types, Object... args) throws Exception {
+        Method m = ExitEvaluator.class.getDeclaredMethod(name, types);
+        m.setAccessible(true);
+        return m.invoke(getField("exitEvaluator"), args);
+    }
+
+    /** eodExitExecutedDate lives on ExitEvaluator since 2026-08-30 — reflect through it. */
+    private <T> T getExitEvaluatorField(String name) throws Exception {
+        Field f = ExitEvaluator.class.getDeclaredField(name);
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked") T v = (T) f.get(getField("exitEvaluator"));
+        return v;
+    }
+
     private ResilientAlpacaClient createMockClient() {
         return mock(ResilientAlpacaClient.class, withSettings()
                 .mockMaker(org.mockito.MockMakers.SUBCLASS)
@@ -162,7 +180,19 @@ class ProfileManagerEodExitTest {
 
         portfolio = new PortfolioManager(List.of("AAPL", "QQQ"), 100_000.0);
 
-        setField("profile", createMainProfile());
+        var profile = createMainProfile();
+        var phase2ExitStrategies = new com.trading.exits.Phase2ExitStrategies(mockConfig);
+        var trailingTargetManager = new com.trading.exits.TrailingTargetManager(mockConfig);
+        var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
+        var exitStrategyManager = new com.trading.exits.ExitStrategyManager(mockConfig);
+        // timeDecayExitManager is a final field initialized in constructor — null after allocateInstance.
+        var timeDecayExitManager = new com.trading.exits.TimeDecayExitManager(mockConfig);
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance(). Its own no-arg constructor runs normally once we build one here, so
+        // its internal maps/defaults come out correctly initialized — no per-field seeding needed.
+        var riskGate = new RiskGate();
+
+        setField("profile", profile);
         setField("capital", 100_000.0);
         setField("client", mockClient);
         setField("config", mockConfig);
@@ -172,28 +202,60 @@ class ProfileManagerEodExitTest {
         setField("latestVix", 15.0);
         setField("latestEquity", 100_000.0);
         setField("running", true);
-        setField("eodExitExecutedDate", null);
 
         // Phase2 + trailing exits needed by other PM methods
-        setField("phase2ExitStrategies", new com.trading.exits.Phase2ExitStrategies(mockConfig));
-        setField("trailingTargetManager", new com.trading.exits.TrailingTargetManager(mockConfig));
-        setField("orderTypeSelector", new com.trading.execution.SmartOrderTypeSelector());
-        setField("exitStrategyManager", new com.trading.exits.ExitStrategyManager(mockConfig));
+        setField("phase2ExitStrategies", phase2ExitStrategies);
+        setField("trailingTargetManager", trailingTargetManager);
+        setField("orderTypeSelector", orderTypeSelector);
+        setField("exitStrategyManager", exitStrategyManager);
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
+        setField("timeDecayExitManager", timeDecayExitManager);
+        setField("riskGate", riskGate);
+        setField("todayPnL", 0.0);
 
-        // breakevenStopsActive is a final field with inline init — bypassed by allocateInstance.
-        // clearPositionTracking() (called from EOD exit) NPEs on breakevenStopsActive.remove()
-        // without this, the exception is swallowed and database.closeTrade() is never reached.
-        setField("breakevenStopsActive", java.util.concurrent.ConcurrentHashMap.newKeySet());
+        buildExitEvaluator(profile);
+    }
 
-        // timeDecayExitManager is a final field initialized in constructor — null after allocateInstance.
-        setField("timeDecayExitManager", new com.trading.exits.TimeDecayExitManager(mockConfig));
-
-        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
-        // allocateInstance() same as breakevenStopsActive/timeDecayExitManager above. RiskGate's
-        // own no-arg constructor runs normally once we build one here, so its internal
-        // maps/defaults come out correctly initialized — no per-field seeding needed.
-        setField("riskGate", new RiskGate());
+    /**
+     * (Re)builds exitEvaluator from whatever is currently on profileManager plus the given
+     * profile, and sets it via reflection. profile is a plain constructor-injected field on
+     * ExitEvaluator (matching production, where it's immutable after construction) — so a test
+     * that swaps profileManager's profile via setField (e.g. eodExitSkipsForExperimentalProfile)
+     * must call this again afterwards, or the already-built exitEvaluator keeps seeing the old one.
+     */
+    private void buildExitEvaluator(TradingProfile profile) throws Exception {
+        // exitEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as riskGate. Built manually from whatever is currently seeded on profileManager.
+        // Constructing it normally (not via Unsafe) means its own field initializers — including
+        // breakevenStopsActive and eodExitExecutedDate=null — run correctly.
+        java.util.function.DoubleSupplier vixSupplier = () -> {
+            try { return (double) getField("latestVix"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<com.trading.analysis.MarketRegimeDetector.MarketRegime> regimeSupplier = () -> {
+            try {
+                return (com.trading.analysis.MarketRegimeDetector.MarketRegime) getField("latestRegime");
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.DoubleSupplier equitySupplier = () -> {
+            try { return (double) getField("latestEquity"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.BiConsumer<String, Double> updateDailyPnLFn = (prefix, pnl) -> {
+            try {
+                Method m = ProfileManager.class.getDeclaredMethod("updateDailyPnL", String.class, double.class);
+                m.setAccessible(true);
+                m.invoke(profileManager, prefix, pnl);
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var exitEvaluator = new ExitEvaluator(profile, "alpaca", mockConfig, mockDatabase, mockClient,
+            (PortfolioManager) getField("portfolio"), (RiskGate) getField("riskGate"),
+            (com.trading.exits.ExitStrategyManager) getField("exitStrategyManager"),
+            (com.trading.exits.Phase2ExitStrategies) getField("phase2ExitStrategies"),
+            (com.trading.exits.TimeDecayExitManager) getField("timeDecayExitManager"),
+            (com.trading.exits.TrailingTargetManager) getField("trailingTargetManager"),
+            (com.trading.execution.SmartOrderTypeSelector) getField("orderTypeSelector"),
+            null, null, 100_000.0,
+            vixSupplier, regimeSupplier, equitySupplier, updateDailyPnLFn);
+        setField("exitEvaluator", exitEvaluator);
     }
 
     // ===================== Tests: isGoodEntryTime EOD block =====================
@@ -246,7 +308,7 @@ class ProfileManagerEodExitTest {
                 .thenReturn(List.of());                // second call: verify closure
         when(mockClient.getOpenOrders("AAPL")).thenReturn(emptyOrders());
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         verify(mockClient).placeOrder("AAPL", 2.0, "sell", "market", "day", null);
     }
@@ -256,7 +318,7 @@ class ProfileManagerEodExitTest {
     void eodExitDoesNotFireBeforeTime() throws Exception {
         when(mockConfig.getEodExitTime()).thenReturn("23:59"); // far future
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         verify(mockClient, never()).placeOrder(any(), anyDouble(), any(), any(), any(), any());
     }
@@ -268,9 +330,9 @@ class ProfileManagerEodExitTest {
         when(mockClient.getPositions()).thenReturn(List.of());
 
         // First invocation — fires, marks date
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
         // Second invocation same day — must be skipped
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         // getPositions should be called only once (first invocation)
         verify(mockClient, times(1)).getPositions();
@@ -283,10 +345,13 @@ class ProfileManagerEodExitTest {
                 List.of("SPY"), List.of("SH"), 20.0, 2.0, "MACD",
                 Duration.ofDays(2), Duration.ofDays(7));
         setField("profile", expProfile);
+        // exitEvaluator captured MAIN's profile at setUp() time (matches production, where
+        // profile is immutable after construction) — rebuild it so it sees the swapped profile.
+        buildExitEvaluator(expProfile);
 
         when(mockConfig.getEodExitTime()).thenReturn("00:00");
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[EXP]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[EXP]");
 
         verify(mockClient, never()).getPositions();
         verify(mockClient, never()).placeOrder(any(), anyDouble(), any(), any(), any(), any());
@@ -316,7 +381,7 @@ class ProfileManagerEodExitTest {
 
         when(mockClient.getOpenOrders("AAPL")).thenReturn(mixedOrders);
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         // Stop order must be cancelled
         verify(mockClient).cancelOrder("stop-001");
@@ -333,7 +398,7 @@ class ProfileManagerEodExitTest {
                 .thenReturn(List.of());
         when(mockClient.getOpenOrders("AAPL")).thenReturn(emptyOrders());
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         // DB must be closed right after the sell, not via later orphan cleanup
         verify(mockDatabase).closeTrade(eq("AAPL"), any(), anyDouble(), anyDouble(), eq("alpaca"), anyString());
@@ -351,10 +416,10 @@ class ProfileManagerEodExitTest {
 
         when(mockClient.getOpenOrders("AAPL")).thenReturn(emptyOrders());
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         // eodExitExecutedDate must NOT be set when positions remain
-        LocalDate executedDate = getField("eodExitExecutedDate");
+        LocalDate executedDate = getExitEvaluatorField("eodExitExecutedDate");
         assertNull(executedDate, "eodExitExecutedDate must stay null when positions remain, to allow retry");
 
         // Second invocation: Alpaca now empty — retry fires and completes
@@ -363,9 +428,9 @@ class ProfileManagerEodExitTest {
                 .thenReturn(List.of()); // verify: now empty
         when(mockClient.getOpenOrders("AAPL")).thenReturn(emptyOrders());
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
-        LocalDate executedDateAfterSuccess = getField("eodExitExecutedDate");
+        LocalDate executedDateAfterSuccess = getExitEvaluatorField("eodExitExecutedDate");
         assertNotNull(executedDateAfterSuccess, "eodExitExecutedDate must be set once all positions are confirmed closed");
     }
 
@@ -375,9 +440,9 @@ class ProfileManagerEodExitTest {
         when(mockConfig.getEodExitTime()).thenReturn("00:00");
         when(mockClient.getPositions()).thenReturn(List.of()); // already flat
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
-        LocalDate executedDate = getField("eodExitExecutedDate");
+        LocalDate executedDate = getExitEvaluatorField("eodExitExecutedDate");
         assertNotNull(executedDate, "eodExitExecutedDate must be set even when already flat (no double-check next cycle)");
         verify(mockClient, never()).placeOrder(any(), anyDouble(), any(), any(), any(), any());
     }
@@ -393,7 +458,7 @@ class ProfileManagerEodExitTest {
                 .thenReturn(List.of());
         when(mockClient.getOpenOrders(anyString())).thenReturn(emptyOrders());
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         verify(mockClient).placeOrder("AAPL", 2.0, "sell", "market", "day", null);
         verify(mockClient).placeOrder("QQQ", 1.5, "sell", "market", "day", null);
@@ -411,7 +476,7 @@ class ProfileManagerEodExitTest {
                 .thenReturn(List.of());
         when(mockClient.getOpenOrders("SQQQ")).thenReturn(emptyOrders());
 
-        invokePrivate("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAndExecuteEodExit", new Class[]{String.class}, "[MAIN]");
 
         verify(mockClient).placeOrder("SQQQ", 3.0, "sell", "market", "day", null);
     }

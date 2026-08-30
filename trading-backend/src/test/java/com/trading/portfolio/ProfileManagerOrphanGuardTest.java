@@ -78,9 +78,17 @@ class ProfileManagerOrphanGuardTest {
     }
 
     private void invokeRiskExits() throws Exception {
-        Method m = ProfileManager.class.getDeclaredMethod("checkAllPositionsForRiskExits", String.class);
+        // checkAllPositionsForRiskExits lives on ExitEvaluator since 2026-08-30 — see its class Javadoc.
+        Method m = ExitEvaluator.class.getDeclaredMethod("checkAllPositionsForRiskExits", String.class);
         m.setAccessible(true);
-        m.invoke(profileManager, "[MAIN]");
+        m.invoke(getField("exitEvaluator"), "[MAIN]");
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> T getField(String name) throws Exception {
+        Field f = ProfileManager.class.getDeclaredField(name);
+        f.setAccessible(true);
+        return (T) f.get(profileManager);
     }
 
     // ── Test fixtures ───────────────────────────────────────────────────────
@@ -154,27 +162,56 @@ class ProfileManagerOrphanGuardTest {
         // placeNativeStopOrder throws so we don't need a real broker
         doNothing().when(mockClient).placeNativeStopOrder(anyString(), anyDouble(), anyDouble());
 
-        setField("profile", createMainProfile());
-        setField("capital", 10_000.0);
-        setField("client", mockClient);
-        setField("config", mockConfig);
-        setField("database", mockDatabase);
-        setField("portfolio", portfolio);
-        setField("exitStrategyManager", new ExitStrategyManager(mockConfig));
-        setField("phase2ExitStrategies", new com.trading.exits.Phase2ExitStrategies(mockConfig));
-        setField("trailingTargetManager", new com.trading.exits.TrailingTargetManager(mockConfig));
-        setField("orderTypeSelector", new com.trading.execution.SmartOrderTypeSelector());
-        setField("latestVix", 15.0);
-        setField("latestEquity", 10_000.0);
-        setField("running", true);
-        setField("brokerName", "alpaca");
+        var profile = createMainProfile();
+        var exitStrategyManager = new ExitStrategyManager(mockConfig);
+        var phase2ExitStrategies = new com.trading.exits.Phase2ExitStrategies(mockConfig);
+        var trailingTargetManager = new com.trading.exits.TrailingTargetManager(mockConfig);
+        var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
+        var timeDecayExitManager = new com.trading.exits.TimeDecayExitManager(mockConfig);
         // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
         // allocateInstance(). RiskGate's own no-arg constructor runs normally once we build
         // one here, so its internal maps/defaults (stopLossCooldowns, pendingExitOrders,
         // consecutiveStopLosses, etc.) come out correctly initialized. Must be set before any
         // setField() call below that resolves onto RiskGate.
-        setField("riskGate", new RiskGate());
+        var riskGate = new RiskGate();
+
+        setField("profile", profile);
+        setField("capital", 10_000.0);
+        setField("client", mockClient);
+        setField("config", mockConfig);
+        setField("database", mockDatabase);
+        setField("portfolio", portfolio);
+        setField("exitStrategyManager", exitStrategyManager);
+        setField("phase2ExitStrategies", phase2ExitStrategies);
+        setField("trailingTargetManager", trailingTargetManager);
+        setField("orderTypeSelector", orderTypeSelector);
+        setField("latestVix", 15.0);
+        setField("latestEquity", 10_000.0);
+        setField("running", true);
+        setField("brokerName", "alpaca");
+        setField("riskGate", riskGate);
         setField("latestRegime", com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
+        setField("timeDecayExitManager", timeDecayExitManager);
+
+        // exitEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as riskGate above. Built manually from the same collaborators just seeded.
+        java.util.function.DoubleSupplier vixSupplier = () -> {
+            try { return (double) (Double) getField("latestVix"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<com.trading.analysis.MarketRegimeDetector.MarketRegime> regimeSupplier = () -> {
+            try {
+                return (com.trading.analysis.MarketRegimeDetector.MarketRegime) getField("latestRegime");
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.DoubleSupplier equitySupplier = () -> {
+            try { return (double) (Double) getField("latestEquity"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.BiConsumer<String, Double> updateDailyPnLFn = (prefix, pnl) -> { };
+        var exitEvaluator = new ExitEvaluator(profile, "alpaca", mockConfig, mockDatabase, mockClient,
+            portfolio, riskGate, exitStrategyManager, phase2ExitStrategies, timeDecayExitManager,
+            trailingTargetManager, orderTypeSelector, null, null, 10_000.0,
+            vixSupplier, regimeSupplier, equitySupplier, updateDailyPnLFn);
+        setField("exitEvaluator", exitEvaluator);
     }
 
     // ── Fix 2: SL guard ─────────────────────────────────────────────────────

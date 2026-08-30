@@ -114,6 +114,16 @@ class ProfileManagerPDTAndCooldownTest {
         return m.invoke(profileManager, args);
     }
 
+    /**
+     * checkAllPositionsForProfitTargets lives on ExitEvaluator since 2026-08-30 (see its class
+     * Javadoc) — invoke on the exitEvaluator instance held by profileManager instead.
+     */
+    private Object invokeOnExitEvaluator(String name, Class<?>[] types, Object... args) throws Exception {
+        Method m = ExitEvaluator.class.getDeclaredMethod(name, types);
+        m.setAccessible(true);
+        return m.invoke(getField("exitEvaluator"), args);
+    }
+
     @SuppressWarnings("deprecation")
     private ResilientAlpacaClient createMockClient() {
         return mock(ResilientAlpacaClient.class, withSettings()
@@ -198,8 +208,18 @@ class ProfileManagerPDTAndCooldownTest {
         realPDTProtection = createPDTProtection(0); // default: 0 day trades
 
         var portfolio = new PortfolioManager(List.of("SPY","QQQ","DIA"), 10_000.0);
+        var profile = createMainProfile();
+        var exitStrategyManager = new ExitStrategyManager(mockConfig);
+        var phase2ExitStrategies = new com.trading.exits.Phase2ExitStrategies(mockConfig);
+        var trailingTargetManager = new com.trading.exits.TrailingTargetManager(mockConfig);
+        var orderTypeSelector = new com.trading.execution.SmartOrderTypeSelector();
+        var timeDecayExitManager = new com.trading.exits.TimeDecayExitManager(mockConfig);
+        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
+        // allocateInstance(). RiskGate's own no-arg constructor runs normally once we build one
+        // here, so its internal maps/defaults come out correctly initialized.
+        var riskGate = new RiskGate();
 
-        setField("profile",               createMainProfile());
+        setField("profile",               profile);
         setField("capital",               10_000.0);
         setField("client",                mockClient);
         setField("config",                mockConfig);
@@ -209,16 +229,41 @@ class ProfileManagerPDTAndCooldownTest {
         setField("latestVix",             15.0);
         setField("latestEquity",          10_000.0);
         setField("running",               true);
-        setField("exitStrategyManager",   new ExitStrategyManager(mockConfig));
-        setField("phase2ExitStrategies",  new com.trading.exits.Phase2ExitStrategies(mockConfig));
-        setField("trailingTargetManager", new com.trading.exits.TrailingTargetManager(mockConfig));
-        setField("orderTypeSelector",     new com.trading.execution.SmartOrderTypeSelector());
+        setField("exitStrategyManager",   exitStrategyManager);
+        setField("phase2ExitStrategies",  phase2ExitStrategies);
+        setField("trailingTargetManager", trailingTargetManager);
+        setField("orderTypeSelector",     orderTypeSelector);
         setField("latestRegime",          com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND);
+        setField("timeDecayExitManager",  timeDecayExitManager);
+        setField("riskGate", riskGate);
 
-        // riskGate is a final field with inline init (`= new RiskGate()`) — bypassed by
-        // allocateInstance(). RiskGate's own no-arg constructor runs normally once we build one
-        // here, so its internal maps/defaults come out correctly initialized.
-        setField("riskGate", new RiskGate());
+        // exitEvaluator is a final field with inline init — bypassed by allocateInstance(), same
+        // as riskGate above. Built manually from the same collaborators just seeded.
+        java.util.function.DoubleSupplier vixSupplier = () -> {
+            try { return (double) (Double) getField("latestVix"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<com.trading.analysis.MarketRegimeDetector.MarketRegime> regimeSupplier = () -> {
+            try {
+                return (com.trading.analysis.MarketRegimeDetector.MarketRegime) getField("latestRegime");
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.DoubleSupplier equitySupplier = () -> {
+            try { return (double) (Double) getField("latestEquity"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.BiConsumer<String, Double> updateDailyPnLFn = (prefix, pnl) -> {
+            try {
+                Method m = ProfileManager.class.getDeclaredMethod("updateDailyPnL", String.class, double.class);
+                m.setAccessible(true);
+                m.invoke(profileManager, prefix, pnl);
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var exitEvaluator = new ExitEvaluator(profile, "alpaca", mockConfig, mockDatabase, mockClient,
+            portfolio, riskGate, exitStrategyManager, phase2ExitStrategies, timeDecayExitManager,
+            trailingTargetManager, orderTypeSelector, null, null, 10_000.0,
+            vixSupplier, regimeSupplier, equitySupplier, updateDailyPnLFn);
+        setField("exitEvaluator", exitEvaluator);
+        setField("todayPnL", 0.0);
+        setField("brokerName", "alpaca");
     }
 
     // ── PDT Threshold Tests ──────────────────────────────────────────────────
@@ -293,7 +338,7 @@ class ProfileManagerPDTAndCooldownTest {
         ConcurrentHashMap<String, Long> cooldowns = getField("stopLossCooldowns");
         PortfolioManager portfolio = getField("portfolio");
 
-        invokePrivate("checkAllPositionsForProfitTargets",
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets",
             new Class<?>[]{String.class}, "[MAIN]");
 
         // After the call: cooldown must be present
@@ -325,7 +370,7 @@ class ProfileManagerPDTAndCooldownTest {
         when(mockClient.getOpenOrders("DIA")).thenReturn(MAPPER.createArrayNode());
 
         long before = System.currentTimeMillis();
-        invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
         long after  = System.currentTimeMillis();
 
         ConcurrentHashMap<String, Long> cooldowns = getField("stopLossCooldowns");
@@ -357,7 +402,7 @@ class ProfileManagerPDTAndCooldownTest {
         when(mockClient.getPositions()).thenReturn(List.of(pos));
         when(mockClient.getOpenOrders("DIA")).thenReturn(MAPPER.createArrayNode());
 
-        invokePrivate("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
 
         assertFalse(lastExitPrices.containsKey("DIA"),
             "lastExitPrices gate should be cleared after take-profit (price improved, no re-entry block needed)");

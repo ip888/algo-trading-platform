@@ -194,6 +194,39 @@ public final class MultiBrokerOrchestrator {
         dashboard.start();
         logger.info("Dashboard available at: http://localhost:8080");
 
+        // ── Safety autopilot (dead-man's-switch + manual panic-stop) ──────────────────
+        // This used to be wired only inside TradingBot.runMultiProfileMode(), a code path
+        // that never executes once BROKERS is set (this class is the actual entry point then)
+        // — so the dashboard's /api/emergency/panic button and the heartbeat watchdog were
+        // both silently inert in production: TradingBot.triggerManualPanic() checked
+        // "emergencyProtocol != null", found null, and returned an error instead of flattening
+        // positions. Wiring it here, in the code path that's actually live, fixes that.
+        // Emergency flatten-all is Alpaca-only by design (EmergencyProtocol's own doc comment),
+        // which matches this bot's Alpaca-only deployment.
+        var emergencyProtocol = new com.trading.protection.EmergencyProtocol(alpacaResilient);
+        var heartbeatMonitor = new com.trading.protection.HeartbeatMonitor(emergencyProtocol);
+        heartbeatMonitor.registerComponent("Main Loop", java.time.Duration.ofSeconds(300));
+        heartbeatMonitor.registerComponent("API Connection", java.time.Duration.ofSeconds(300));
+        for (BrokerEntry entry : entries) {
+            heartbeatMonitor.registerComponent("Profile-" + entry.manager().getProfile().name(),
+                java.time.Duration.ofSeconds(300));
+        }
+        TradingBot.installSafetyAutopilot(heartbeatMonitor, emergencyProtocol);
+        Thread.ofVirtual().name("safety-autopilot").start(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    heartbeatMonitor.checkHealth();
+                    TradingBot.beat("Main Loop");
+                    TradingBot.beat("API Connection");
+                    Thread.sleep(java.time.Duration.ofSeconds(30));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        });
+        logger.info("✅ Safety Autopilot initialized (Dead Man's Switch Active) — panic-stop is live");
+
         // Shutdown hook — stops all broker managers gracefully
         Runtime.getRuntime().addShutdownHook(Thread.ofVirtual().unstarted(() -> {
             logger.info("MultiBrokerOrchestrator: shutdown signal — stopping all brokers");

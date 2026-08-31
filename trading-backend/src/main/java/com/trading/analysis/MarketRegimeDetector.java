@@ -378,8 +378,20 @@ public class MarketRegimeDetector {
             var bar = client.getLatestBar("VIXY");
             if (bar.isPresent()) {
                 double vixyPrice = bar.get().close();
-                // Rough conversion: VIXY ≈ VIX * 1.8
-                return vixyPrice / 1.8;
+                // CRITICAL FIX (2026-08-31): this was the one VIXY→VIX conversion in the
+                // codebase that never received the "VIXY price is NOT the same as VIX level"
+                // correction already applied in VolatilityFilter.getCurrentVIX() and
+                // MarketAnalyzer.getVIX() (both use the formula below). The old vixyPrice/1.8
+                // formula ran ~1 point (~10%) LOW versus the other two at typical levels
+                // (e.g. VIXY=$17.51 → 9.73 here vs. 10.76 there) — and this is the value that
+                // actually feeds regimeAnalysis.vix() → currentVix → the VIX_ENTRY_MINIMUM entry
+                // gate, so the gate was blocking swing entries longer than it should have
+                // whenever VIX was hovering near that threshold (observed live 2026-08-31).
+                // Approximate conversion: VIX ≈ (VIXY_price / 2) + 2
+                double estimatedVIX = (vixyPrice / 2.0) + 2.0;
+                logger.info("Using VIXY ETF as volatility proxy: VIXY={} -> estimated VIX={}",
+                    String.format("%.2f", vixyPrice), String.format("%.2f", estimatedVIX));
+                return estimatedVIX;
             }
         } catch (Exception e) {
             logger.warn("Failed to get VIX proxy: {}", e.getMessage());

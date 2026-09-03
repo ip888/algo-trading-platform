@@ -12,7 +12,11 @@ target/
 *.swo
 
 # Secrets - NEVER COMMIT
-config.properties
+# config.properties itself is now tracked (2026-09-03): it holds no credentials —
+# ALPACA_API_KEY/SECRET moved to Fly.io secrets long ago — only trading-strategy
+# config + tuning-history comments, which is exactly what shouldn't live untracked
+# and unbackable-up on a single local machine. If real credentials are ever added
+# back to this file, re-add it here immediately.
 *.secret
 .env
 .env.local

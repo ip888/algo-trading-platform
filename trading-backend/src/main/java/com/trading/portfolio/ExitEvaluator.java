@@ -520,6 +520,39 @@ final class ExitEvaluator {
                         }
                     }
 
+                    // Scalp-specific timeout: scalp is designed around a minutes-scale thesis (tight
+                    // 0.25-0.35%/0.40-0.70% SL/TP), but until 2026-09-03 had no exit faster than the
+                    // general MAX_HOLD_TIME_HOURS (4h) absolute cap and EOD flatten — the flat-position
+                    // time-decay check above deliberately excludes scalp (its 1h/1.5h scale doesn't fit).
+                    // A scalp entry that hasn't hit its own SL/TP within SCALP_MAX_HOLD_MINUTES has
+                    // failed its fast-momentum thesis; free the slot rather than let it drift toward the
+                    // swing-trade-scale backstops (caught live: an IWM scalp rode 89 minutes unresolved,
+                    // only closed because it happened to be near EOD).
+                    if (riskGate.scalpHeldSymbols().contains(symbol) && position.entryTime() != null) {
+                        long minutesHeld = java.time.Duration.between(position.entryTime(), Instant.now()).toMinutes();
+                        if (minutesHeld >= config.getScalpMaxHoldMinutes()) {
+                            logger.info("{} ⏱️ SCALP TIMEOUT: {} — held {}min (limit {}min), never resolved via SL/TP",
+                                profilePrefix, symbol, minutesHeld, config.getScalpMaxHoldMinutes());
+                            try {
+                                cancelExistingOrders(profilePrefix, symbol);
+                                client.placeOrderDirect(symbol, qty, "sell", "market", "day", null);
+                                double scalpTimeoutPnl = (currentPrice - entryPrice) * qty;
+                                portfolio.setPosition(symbol, Optional.empty());
+                                clearPositionTracking(symbol);
+                                database.closeTrade(symbol, Instant.now(), currentPrice, scalpTimeoutPnl, brokerName, "scalp_timeout");
+                                updateDailyPnLFn.accept(profilePrefix, scalpTimeoutPnl);
+                                applyPostExitCooldown(symbol, currentPrice, scalpTimeoutPnl, profilePrefix, "SCALP_TIMEOUT");
+                                TradingWebSocketHandler.broadcastActivity(
+                                    String.format("[%s] ⏱️ SCALP TIMEOUT: %s — held %dmin, never resolved",
+                                        profile.name(), symbol, minutesHeld), "WARN");
+                                riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
+                                continue;
+                            } catch (Exception e) {
+                                logger.error("{} Scalp timeout exit failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                            }
+                        }
+                    }
+
                     // Evaluate exit decision using enhanced strategy.
                     // Scalp positions bypass partial exits and scale-out at 1R — they exit
                     // cleanly at the stored 0.40% TP or 0.25% SL as a single full-size order.

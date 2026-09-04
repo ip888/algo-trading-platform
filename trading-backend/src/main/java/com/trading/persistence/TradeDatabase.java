@@ -1044,7 +1044,7 @@ public class TradeDatabase {
         
         try {
             String sql = "SELECT symbol, strategy, profile, broker, entry_time, entry_price, quantity, " +
-                        "exit_time, exit_price, pnl, stop_loss, take_profit, status " +
+                        "exit_time, exit_price, pnl, stop_loss, take_profit, status, exit_reason, entry_reason " +
                         "FROM trades ORDER BY entry_time DESC LIMIT ?";
 
             try (PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -1068,10 +1068,12 @@ public class TradeDatabase {
                     if (!rs.wasNull()) trade.put("pnl", pnlVal);
                     trade.put("stopLoss", rs.getDouble("stop_loss"));
                     trade.put("takeProfit", rs.getDouble("take_profit"));
+                    trade.put("exitReason", rs.getString("exit_reason"));
+                    trade.put("entryReason", rs.getString("entry_reason"));
                     trades.add(trade);
                 }
             }
-            
+
             if (!lock.validate(stamp)) {
                 stamp = lock.readLock();
                 try {
@@ -1179,6 +1181,11 @@ public class TradeDatabase {
                 trade.put("stopLoss", rs.getDouble("stop_loss"));
                 trade.put("takeProfit", rs.getDouble("take_profit"));
                 trade.put("createdAt", rs.getString("created_at"));
+                // Stored on every closeTrade()/setEntryReason() call since the exit_reason/
+                // entry_reason migration, but never surfaced via this export until 2026-09-03 —
+                // the data existed, SELECT * already returned it, it just wasn't mapped out.
+                trade.put("exitReason", rs.getString("exit_reason"));
+                trade.put("entryReason", rs.getString("entry_reason"));
                 trades.add(trade);
             }
         } catch (SQLException e) {
@@ -1196,7 +1203,7 @@ public class TradeDatabase {
      */
     public String exportTradesAsCsv(String status) {
         var sb = new StringBuilder();
-        sb.append("id,symbol,strategy,profile,broker,entry_time,exit_time,entry_price,exit_price,quantity,pnl,status,stop_loss,take_profit,created_at\n");
+        sb.append("id,symbol,strategy,profile,broker,entry_time,exit_time,entry_price,exit_price,quantity,pnl,status,stop_loss,take_profit,created_at,exit_reason,entry_reason\n");
 
         var trades = exportTrades(status);
         for (var trade : trades) {
@@ -1214,7 +1221,9 @@ public class TradeDatabase {
             sb.append(csvEscape(trade.get("status"))).append(',');
             sb.append(trade.get("stopLoss")).append(',');
             sb.append(trade.get("takeProfit")).append(',');
-            sb.append(csvEscape(trade.get("createdAt"))).append('\n');
+            sb.append(csvEscape(trade.get("createdAt"))).append(',');
+            sb.append(csvEscape(trade.get("exitReason"))).append(',');
+            sb.append(csvEscape(trade.get("entryReason"))).append('\n');
         }
         return sb.toString();
     }

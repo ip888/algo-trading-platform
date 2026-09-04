@@ -1842,6 +1842,15 @@ public class Config {
     public double getScalpVolumeMultiplier() {
         return getDoubleProperty("SCALP_VOLUME_MULTIPLIER", 1.1);
     }
+    // Scalp is designed around a minutes-scale timeframe (tight 0.25-0.35%/0.40-0.70% SL/TP),
+    // but had no exit of its own beyond the general MAX_HOLD_TIME_HOURS (4h) absolute cap and
+    // EOD flatten — added 2026-09-03 after a live scalp position rode 89 minutes without
+    // resolving and was only caught by EOD, not by any scalp-appropriate timeout. Flat-position
+    // time-decay (TimeDecayExitManager) deliberately excludes scalp positions since its 1h/1.5h
+    // scale doesn't fit scalp's much faster intended cadence — this is the scalp-sized equivalent.
+    public int getScalpMaxHoldMinutes() {
+        return getIntProperty("SCALP_MAX_HOLD_MINUTES", 45);
+    }
 
     /** High-liquidity symbols always scanned for scalp every cycle, regardless of main batch rotation. */
     public java.util.List<String> getScalpSymbols() {

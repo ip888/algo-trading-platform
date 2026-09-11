@@ -102,16 +102,29 @@ public final class SmartOrderTypeSelector {
             return limitOrder(ctx, "Mean-reversion/RSI entry in favorable conditions");
         }
 
-        // Rule 6b: Fractional BUY orders must use MARKET to guarantee a full fill.
-        // Alpaca fractional limit orders can partially fill if price moves through the limit
-        // before the order completes — leaving the position tracker out of sync with actual
-        // shares held (observed Aug 3 2026: MSFT ordered 0.4276, only 0.2865 filled).
-        // Slippage on a $200 fractional position is ~$0.10, far less than the cost of a partial fill.
-        boolean isFractionalBuy = "buy".equals(ctx.side())
-            && ctx.qty() > 0
+        // Rule 6b: Fractional orders (either side) must use MARKET to guarantee a full fill.
+        // Alpaca fractional limit orders can partially fill — or, for exits, simply sit unfilled
+        // for minutes — if price moves through/away from the limit before the order completes.
+        // For buys this leaves the position tracker out of sync with actual shares held
+        // (observed Aug 3 2026: MSFT ordered 0.4276, only 0.2865 filled). Originally scoped to
+        // buy-side only; extended to sells 2026-09-11 after the identical risk hit exits instead:
+        // ExitEvaluator.handleSell() calls database.closeTrade() and clears position tracking
+        // immediately after PLACING the sell, without confirming a fill. A fractional sell limit
+        // (Rule 7/8 below both route non-emergency, non-stop-loss sells to limit orders on this
+        // account, since equity is under SMALL_ACCOUNT_THRESHOLD) that didn't fill left the
+        // position still open at the broker while the bot believed it was flat — reconciliation
+        // then rediscovered the still-open position next cycle, re-triggered handleSell() again,
+        // and repeated 2-3 times before a limit finally filled. Each cycle recorded its own
+        // closeTrade() with an independently-estimated PnL, producing 3-4 duplicate DB records
+        // for what was really a single trade (observed live: OIH 2026-09-09, one real buy/sell
+        // round-trip recorded as four separate "closes" a few minutes apart, ~$2.27 of the
+        // recorded loss on that trade was phantom — never actually charged by the broker).
+        // Slippage on a ~$250 fractional position is a few cents, far less than the cost of a
+        // stuck order desyncing the bot's own bookkeeping from what the broker actually holds.
+        boolean isFractionalOrder = ctx.qty() > 0
             && Math.abs(ctx.qty() - Math.floor(ctx.qty())) > 0.0001;
-        if (isFractionalBuy) {
-            return marketOrder(ctx, "Fractional buy: market order guarantees full fill (partial fill risk on limit)");
+        if (isFractionalOrder) {
+            return marketOrder(ctx, "Fractional " + ctx.side() + ": market order guarantees full fill (partial-fill/stuck-order risk on limit)");
         }
 
         // Rule 7: Small accounts (<$2K) prefer limit orders to minimize slippage cost

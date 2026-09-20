@@ -1,6 +1,7 @@
 package com.trading.api.controller;
 
 import com.trading.api.AlpacaClient;
+import com.trading.backtest.WalkForwardBacktestHarness;
 import com.trading.backtesting.Backtester;
 import com.trading.config.Config;
 import com.trading.strategy.MACDStrategy;
@@ -10,8 +11,11 @@ import io.javalin.http.Context;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -24,6 +28,49 @@ public final class BacktestController {
     public void registerRoutes(Javalin app) {
         app.post("/api/backtest", this::runBacktest);
         app.get("/api/backtest/intraday-macd", this::runIntradayMacdSignal);
+        app.get("/api/backtest/walkforward", this::runWalkForward);
+    }
+
+    /**
+     * Runs the real {@link WalkForwardBacktestHarness} — the same StrategyManager, regime
+     * detector, MTF analyzer, position sizer, and exit logic that trade live — against real
+     * historical Alpaca data for the requested symbols/window. Read-only: writes only to a
+     * throwaway backtest.db under the cache dir, places no live orders, touches no live state.
+     * First run per symbol/timeframe combo hits the real Alpaca API (needs live credentials,
+     * already configured server-side); subsequent runs reuse the on-disk bar cache.
+     */
+    private void runWalkForward(Context ctx) {
+        try {
+            String symbolsParam = ctx.queryParam("symbols");
+            if (symbolsParam == null || symbolsParam.isBlank()) {
+                ctx.status(400).json(Map.of("error", "symbols is required (comma-separated)"));
+                return;
+            }
+            List<String> symbols = Arrays.stream(symbolsParam.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+            int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(10);
+            double capital = ctx.queryParamAsClass("capital", Double.class).getOrDefault(1180.0);
+            int maxPositions = ctx.queryParamAsClass("maxPositions", Integer.class).getOrDefault(4);
+            if (days < 1 || days > 60) {
+                ctx.status(400).json(Map.of("error", "days must be 1-60"));
+                return;
+            }
+
+            var config = new Config();
+            var liveClient = new AlpacaClient(config);
+            Instant end = Instant.now();
+            Instant start = end.minusSeconds(days * 86400L);
+
+            Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache");
+            var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
+            harness.loadHistory(liveClient, symbols);
+            var report = harness.run(symbols, start, end, capital, maxPositions);
+
+            ctx.json(report);
+        } catch (Exception e) {
+            logger.error("Walk-forward backtest failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
     }
 
     /**

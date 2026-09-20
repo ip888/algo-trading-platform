@@ -121,6 +121,33 @@ public final class MomentumStrategy implements TradingStrategy {
         return computeGates(currentPrice, history, WEAK_BULL_MOMENTUM_MIN, false);
     }
 
+    /**
+     * True when Momentum's WEAK_BULL entry is failing on at most one of its structural gates —
+     * i.e. it is plausibly one bar away from firing on its own. Used by StrategyManager to give
+     * Momentum a "right of first refusal" over the WEAK_BULL MACD fallback (see StrategyManager's
+     * WEAK_BULL case, added 2026-09-20): without this, MACD's single-condition threshold almost
+     * always clears before Momentum's five-condition conjunction does, so MACD claims the symbol
+     * (positionQty != 0) before Momentum ever gets a chance — confirmed empirically via a
+     * 45-day/17-symbol walk-forward replay (0 Momentum trades, 100% MACD, despite Momentum being
+     * evaluated first every single cycle). This is the standard "priority-with-deference" fix for
+     * a race between a fast/loose signal and a slower/stricter one: defer to the stricter signal
+     * only when it is genuinely close, not on every cycle it hasn't fired yet.
+     */
+    public boolean isCloseToWeakBullEntry(double currentPrice, List<Double> history) {
+        var g = diagnoseWeakBull(currentPrice, history);
+        if (!g.sufficientHistory()) return false;
+        int failing = 0;
+        if (!g.rsiInSweetSpot()) failing++;
+        if (!g.rsiRising()) failing++;
+        if (!g.hasPositiveMomentum()) failing++;
+        if (!g.momentumConsistent()) failing++;
+        if (!g.priceAboveSMA20()) failing++;
+        if (!g.priceAboveSMA50()) failing++;
+        if (!g.fastAboveSlow()) failing++;
+        if (!g.volatilityOK()) failing++;
+        return failing <= 1;
+    }
+
     private GateReport computeGates(double currentPrice, List<Double> history,
                                     double effectiveMomentumMin, boolean requireConsistency) {
         if (history.size() < Math.max(RSI_PERIOD + 1, SMA_PERIOD_MACRO + 5)) {

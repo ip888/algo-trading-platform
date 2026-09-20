@@ -400,7 +400,19 @@ public final class StrategyManager {
                 activeStrategy = "Momentum (Weak Bull)";
                 var momSignal = momentumStrategy.evaluateWeakBull(symbol, currentPrice, positionQty, history);
                 if (!(momSignal instanceof TradingSignal.Hold)) yield momSignal;
-                // Momentum said HOLD — fall back to MACD in "sustained uptrend" mode.
+                // Momentum said HOLD on this cycle — before falling back to MACD, check whether
+                // Momentum is genuinely close to firing on its own (at most one of its structural
+                // gates failing). MACD's single-condition threshold almost always clears before
+                // Momentum's five-condition conjunction does, so without this deference check
+                // MACD claims the symbol first every time and Momentum never gets a turn — this
+                // was confirmed directly via a 45-day/17-symbol walk-forward replay (0 Momentum
+                // trades, 100% MACD). Only applies to new entries (positionQty==0); MACD's
+                // bearish-crossover SELL path for an existing position is untouched.
+                if (positionQty == 0 && momentumStrategy.isCloseToWeakBullEntry(currentPrice, history)) {
+                    activeStrategy = "Momentum (Weak Bull, deferring MACD)";
+                    yield new TradingSignal.Hold("Momentum close to firing — deferring MACD fallback this cycle");
+                }
+                // Momentum said HOLD and isn't close — fall back to MACD in "sustained uptrend" mode.
                 // histogramThreshold=0.0 activates the sustainedUptrend check in MACDStrategy,
                 // which accepts an established positive MACD without requiring a growing histogram.
                 // In VIX=12 slow grinds, MACD crossed bullish days ago and the histogram plateaued;

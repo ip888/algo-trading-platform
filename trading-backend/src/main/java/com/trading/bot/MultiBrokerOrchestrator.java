@@ -28,29 +28,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Runs the trading bot on multiple broker accounts simultaneously.
+ * Runs the trading bot on Alpaca — the only broker this bot connects to.
  *
- * <p>Activation: set the {@code BROKERS} environment variable to a comma-separated list of
- * {@code broker:percent} pairs, e.g.:
- * <pre>
- *   BROKERS=alpaca:80,tradier:100,tradovate:100
- * </pre>
- *
- * <p><strong>Capital isolation</strong>: each broker is completely independent.
- * The percentage is the fraction of <em>that broker's own account balance</em> to allocate
- * to the bot (e.g. {@code alpaca:80} = use 80% of your Alpaca account equity).
- * Capital is fetched from each broker's own {@link BrokerClient#getAccount()} — Alpaca's
- * balance is never used for another broker.
- *
- * <p>Each broker gets its own {@link ProfileManager} running in a dedicated virtual thread
- * with isolated positions, orders, and risk limits.
- *
- * <p>Market data (bars, signals) always comes from Alpaca because Tradovate has no REST bar
- * endpoint and Tradier bars are optional. Order <em>execution</em> goes to each broker's
- * own account.
- *
- * <p>Supported broker names (case-insensitive): {@code alpaca}, {@code tradier},
- * {@code tradovate}, {@code ibkr}.
+ * <p>Activation: set the {@code BROKERS} environment variable, e.g. {@code BROKERS=alpaca:100}
+ * (the percentage is the fraction of the Alpaca account's own equity to allocate to the bot).
+ * The loop below is written generically over an allocation map for historical reasons — it
+ * previously supported multiple simultaneous broker accounts — but {@link #createBrokerClient}
+ * now only accepts {@code "alpaca"}; any other name fails fast rather than silently trading
+ * somewhere unintended.
  */
 public final class MultiBrokerOrchestrator {
     private static final Logger logger = LoggerFactory.getLogger(MultiBrokerOrchestrator.class);
@@ -69,7 +54,7 @@ public final class MultiBrokerOrchestrator {
         Map<String, Double> allocation = parseAllocation(config.getBrokersAllocation());
         if (allocation.isEmpty()) {
             logger.error("MultiBrokerOrchestrator: BROKERS env var is empty or invalid. "
-                + "Expected format: alpaca:80,tradier:100,tradovate:100");
+                + "Expected format: alpaca:<percent>, e.g. alpaca:100");
             System.exit(1);
         }
 
@@ -128,13 +113,8 @@ public final class MultiBrokerOrchestrator {
                 continue;
             }
 
-            // Per-broker PDT counter — each broker tracks its own day trades independently.
-            // Alpaca: counter synced from broker API each cycle (daytrade_count field).
-            // Others (e.g. Tradier): initialized at 0 and incremented locally on each day trade.
+            // PDT counter is synced from Alpaca's own API each cycle (daytrade_count field).
             var pdtProtection = new PDTProtection(database, config.isPDTProtectionEnabled(), brokerName);
-            if (!"alpaca".equalsIgnoreCase(brokerName)) {
-                pdtProtection.initializeLocal(0);
-            }
 
             // Per-broker data components — each broker uses its own market data feed
             logger.info("MultiBrokerOrchestrator: [{}] using own data feed for signal generation", brokerName.toUpperCase());
@@ -270,19 +250,14 @@ public final class MultiBrokerOrchestrator {
 
     // ── BrokerClient factory ──────────────────────────────────────────────────
 
+    /** Alpaca-only by design. Fails fast on anything else rather than silently defaulting to Alpaca. */
     private BrokerClient createBrokerClient(String brokerName) {
-        return switch (brokerName.toLowerCase()) {
-            case "tradier" -> {
-                if (!config.isTradierEnabled()) {
-                    throw new IllegalStateException(
-                        "Tradier is disabled (TRADIER_ENABLED=false). Set TRADIER_ENABLED=true to re-enable.");
-                }
-                yield new TradierClient(config);
-            }
-            case "tradovate" -> new TradovateClient(config);
-            case "ibkr"      -> new IBKRClient(config);
-            default          -> new AlpacaClient(config);   // "alpaca" or unknown
-        };
+        if (!"alpaca".equalsIgnoreCase(brokerName)) {
+            throw new IllegalArgumentException(
+                "Unsupported broker '" + brokerName + "' — this bot only trades via Alpaca. "
+                + "Set BROKERS=alpaca:<percent>.");
+        }
+        return new AlpacaClient(config);
     }
 
     // ── Capital helpers ───────────────────────────────────────────────────────
@@ -319,12 +294,8 @@ public final class MultiBrokerOrchestrator {
     }
 
     /**
-     * Returns a broker-specific initial capital override from config/env,
+     * Returns the Alpaca initial capital override from config/env (ALPACA_INITIAL_CAPITAL),
      * falling back to the global INITIAL_CAPITAL.
-     *
-     * Env vars checked (in order):
-     *   ALPACA_INITIAL_CAPITAL, TRADIER_INITIAL_CAPITAL, TRADOVATE_INITIAL_CAPITAL,
-     *   IBKR_INITIAL_CAPITAL, then INITIAL_CAPITAL.
      */
     private static double getConfigCapital(String brokerName) {
         String envKey = brokerName.toUpperCase() + "_INITIAL_CAPITAL";
@@ -345,8 +316,9 @@ public final class MultiBrokerOrchestrator {
     }
 
     /**
-     * Parses "alpaca:80,tradier:100,tradovate:100" →
-     * {"alpaca":80.0, "tradier":100.0, "tradovate":100.0}.
+     * Parses "name:percent" pairs, e.g. "alpaca:100" → {"alpaca":100.0}. Generic string
+     * parsing — accepts any name here; {@link #createBrokerClient} is what actually
+     * enforces Alpaca-only.
      *
      * The value is the <em>percentage of that broker's own account balance</em> to use.
      * Accepts values 1–100 (inclusive). Returns empty map on parse failure.

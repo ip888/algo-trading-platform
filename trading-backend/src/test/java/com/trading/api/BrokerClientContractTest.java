@@ -69,30 +69,6 @@ class BrokerClientContractTest {
     }
 
     @Test
-    @DisplayName("TradierClient declares 'implements BrokerClient'")
-    void testTradierClientImplementsBrokerClient() {
-        Class<?>[] interfaces = TradierClient.class.getInterfaces();
-        boolean implementsBrokerClient = Arrays.stream(interfaces)
-            .anyMatch(i -> i.equals(BrokerClient.class));
-        assertTrue(implementsBrokerClient, "TradierClient must implement BrokerClient");
-    }
-
-    @Test
-    @DisplayName("Every method in BrokerClient is implemented by TradierClient")
-    void testAllBrokerClientMethodsImplementedByTradierClient() {
-        Set<String> brokerMethods = Arrays.stream(BrokerClient.class.getMethods())
-            .map(Method::getName)
-            .collect(Collectors.toSet());
-        Set<String> tradierMethods = Arrays.stream(TradierClient.class.getMethods())
-            .map(Method::getName)
-            .collect(Collectors.toSet());
-        for (String method : brokerMethods) {
-            assertTrue(tradierMethods.contains(method),
-                "TradierClient missing method declared in BrokerClient: " + method);
-        }
-    }
-
-    @Test
     @DisplayName("MultiTimeframeAnalyzer constructor accepts BrokerClient (not AlpacaClient)")
     void testMultiTimeframeAnalyzerAcceptsBrokerClient() throws Exception {
         var ctor = com.trading.analysis.MultiTimeframeAnalyzer.class

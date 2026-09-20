@@ -79,8 +79,7 @@ public final class PDTProtection {
     }
 
     /**
-     * Sync day trade count from broker's account API (Alpaca: daytrade_count field).
-     * For non-Alpaca brokers that don't report this, use initializeLocal(0) instead.
+     * Sync day trade count from Alpaca's account API (daytrade_count field).
      */
     public void syncWithAlpaca(int count) {
         if (!synced) {
@@ -90,16 +89,6 @@ public final class PDTProtection {
         }
         this.dayTradeCount = count;
         this.synced = true;
-    }
-
-    /**
-     * Initialize PDT counter for brokers that don't report daytrade_count via API.
-     * Marks counter as synced so sell orders aren't blocked on startup.
-     */
-    public void initializeLocal(int startCount) {
-        this.dayTradeCount = startCount;
-        this.synced = true;
-        logger.info("PDT [{}] initialized with local tracking: count={}", brokerName, startCount);
     }
 
     /**

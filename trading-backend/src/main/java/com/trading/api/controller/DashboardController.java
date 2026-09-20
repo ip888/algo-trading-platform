@@ -46,10 +46,8 @@ public final class DashboardController {
     // instances); now that state is per-instance (see ProfileManager's "INSTANCE STATE"
     // comment block), this controller needs a direct reference to read it.
     private final ProfileManager profileManager;
-    // Cached per-request-free broker clients — created once, reused for every dashboard call.
-    // Avoids the "TradierClient initialized" log spam every 2 minutes from health-check threads.
+    // Cached per-request-free broker client — created once, reused for every dashboard call.
     private final com.trading.api.AlpacaClient cachedAlpacaClient;
-    private final com.trading.api.TradierClient cachedTradierClient; // null if Tradier not configured
 
     public DashboardController(TradeDatabase database, PortfolioManager portfolio,
                               MarketAnalyzer marketAnalyzer, MarketHoursFilter marketHoursFilter,
@@ -74,10 +72,6 @@ public final class DashboardController {
         this.profileManager = profileManager;
         this.alpacaClient = alpacaClient;
         this.cachedAlpacaClient = new com.trading.api.AlpacaClient(config);
-        String brokersAlloc = config.getBrokersAllocation();
-        this.cachedTradierClient = (config.isTradierEnabled()
-                && brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier"))
-            ? new com.trading.api.TradierClient(config) : null;
     }
     
     /**
@@ -524,38 +518,6 @@ public final class DashboardController {
                 positionMap.put("stop_loss", sl);
                 positionMap.put("take_profit", tp);
                 result.add(positionMap);
-            }
-
-            // Fetch Tradier positions if configured
-            String brokersAlloc = config.getBrokersAllocation();
-            if (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier")) {
-                try {
-                    var tradierPositions = cachedTradierClient.getPositions();
-                    for (var pos : tradierPositions) {
-                        Map<String, Object> positionMap = new java.util.HashMap<>();
-                        positionMap.put("symbol", pos.symbol());
-                        positionMap.put("qty", pos.quantity());
-                        positionMap.put("quantity", pos.quantity());
-                        positionMap.put("entry_price", pos.avgEntryPrice());
-                        positionMap.put("entryPrice", pos.avgEntryPrice());
-                        double currentPrice = pos.quantity() != 0 ? pos.marketValue() / pos.quantity() : 0.0;
-                        double costBasis = pos.quantity() * pos.avgEntryPrice();
-                        double plpc = costBasis != 0 ? pos.unrealizedPL() / costBasis : 0.0;
-                        positionMap.put("current_price", currentPrice);
-                        positionMap.put("currentPrice", currentPrice);
-                        positionMap.put("unrealized_pl", pos.unrealizedPL());
-                        positionMap.put("unrealized_plpc", plpc);
-                        positionMap.put("market_value", pos.marketValue());
-                        positionMap.put("broker", "tradier");
-                        positionMap.put("platform", "tradier");
-                        double entryPx = pos.avgEntryPrice();
-                        positionMap.put("stopLoss", entryPx * (1.0 - config.getMainStopLossPercent() / 100.0));
-                        positionMap.put("takeProfit", entryPx * (1.0 + config.getMainTakeProfitPercent() / 100.0));
-                        result.add(positionMap);
-                    }
-                } catch (Exception te) {
-                    logger.warn("Failed to fetch Tradier positions for dashboard: {}", te.getMessage());
-                }
             }
 
             ctx.json(result);
@@ -1420,8 +1382,7 @@ public final class DashboardController {
                     String[] kv = trimmed.split(":", 2);
                     String name = kv[0].trim().toLowerCase();
                     double allocation = kv.length == 2 ? Double.parseDouble(kv[1].trim()) : 100.0;
-                    boolean sandbox = "tradier".equals(name) && config.isTradierSandbox();
-                    brokerList.add(Map.of("name", name, "allocation", allocation, "sandbox", sandbox));
+                    brokerList.add(Map.of("name", name, "allocation", allocation, "sandbox", false));
                 }
             }
             ctx.json(Map.of("brokers", brokerList, "multiBroker", multiBroker));
@@ -1458,28 +1419,6 @@ public final class DashboardController {
             brokers.add(alpacaInfo);
         }
 
-        // Include Tradier if configured
-        if (brokersAlloc != null && brokersAlloc.toLowerCase().contains("tradier")) {
-            try {
-                var account = cachedTradierClient.getAccount();
-                Map<String, Object> tradierInfo = new java.util.HashMap<>();
-                tradierInfo.put("name", "tradier");
-                tradierInfo.put("sandbox", config.isTradierSandbox());
-                tradierInfo.put("connected", true);
-                tradierInfo.put("equity", account.path("equity").asDouble(0));
-                tradierInfo.put("cash", account.path("cash").asDouble(0));
-                tradierInfo.put("buyingPower", account.path("buying_power").asDouble(0));
-                brokers.add(tradierInfo);
-            } catch (Exception e) {
-                Map<String, Object> tradierInfo = new java.util.HashMap<>();
-                tradierInfo.put("name", "tradier");
-                tradierInfo.put("sandbox", config.isTradierSandbox());
-                tradierInfo.put("connected", false);
-                tradierInfo.put("error", e.getMessage());
-                brokers.add(tradierInfo);
-            }
-        }
-
         ctx.json(Map.of(
             "brokers", brokers,
             "multiBroker", brokersAlloc != null && !brokersAlloc.isBlank() && brokersAlloc.contains(":")
@@ -1487,7 +1426,7 @@ public final class DashboardController {
     }
 
     /**
-     * GET /api/trades/by-broker?broker=tradier
+     * GET /api/trades/by-broker?broker=alpaca
      * Returns trades filtered by broker, or all trades grouped by broker if no param given.
      */
     private void getTradesByBroker(Context ctx) {

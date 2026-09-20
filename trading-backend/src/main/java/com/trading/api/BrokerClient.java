@@ -9,9 +9,10 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Broker-agnostic interface for market data and order execution.
- * Implemented by AlpacaClient (and future brokers such as Tradier, IBKR).
- * ResilientBrokerClient wraps any BrokerClient with resilience patterns.
+ * Interface for market data and order execution. Implemented by AlpacaClient — the only
+ * broker this bot trades through. Kept as an interface (rather than using AlpacaClient
+ * directly) so ResilientBrokerClient, StrategyManager, and the analysis/backtest classes
+ * can be tested against a fake/replay implementation without a real Alpaca connection.
  */
 public interface BrokerClient {
 

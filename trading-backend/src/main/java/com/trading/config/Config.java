@@ -1571,57 +1571,12 @@ public class Config {
         return getDoubleProperty("WIDE_SPREAD_THRESHOLD", 0.005);
     }
 
-    // ==================== Tradier Broker Configuration ====================
-
-    public String getTradierAccessToken() {
-        String env = System.getenv("TRADIER_ACCESS_TOKEN");
-        return env != null ? env : getProperty("TRADIER_ACCESS_TOKEN", "");
-    }
-
-    public String getTradierAccountId() {
-        String env = System.getenv("TRADIER_ACCOUNT_ID");
-        return env != null ? env : getProperty("TRADIER_ACCOUNT_ID", "");
-    }
-
-    public boolean isTradierSandbox() {
-        String env = System.getenv("TRADIER_SANDBOX");
-        return "true".equalsIgnoreCase(env) || getBooleanProperty("TRADIER_SANDBOX", false);
-    }
-
-    /** Explicit opt-in gate — defaults false. Must be true for any Tradier code path to run. */
-    public boolean isTradierEnabled() {
-        String env = System.getenv("TRADIER_ENABLED");
-        if (env != null) return "true".equalsIgnoreCase(env);
-        return getBooleanProperty("TRADIER_ENABLED", false);
-    }
-
-    // ==================== Tradovate Broker Configuration ====================
-
-    public String getTradovateUsername() { return getProperty("TRADOVATE_USERNAME", ""); }
-    public String getTradovatePassword() { return getProperty("TRADOVATE_PASSWORD", ""); }
-    public String getTradovateAppId()    { return getProperty("TRADOVATE_APP_ID", ""); }
-    public String getTradovateAppVersion(){ return getProperty("TRADOVATE_APP_VERSION", "1.0"); }
-    /** Tradovate API Key ID (cid) — separate from appId, required for authentication */
-    public String getTradovateCid()      { return getProperty("TRADOVATE_CID", getProperty("TRADOVATE_APP_ID", "")); }
-    public String getTradovateAppSecret(){ return getProperty("TRADOVATE_APP_SECRET", ""); }
-    public boolean isTradovateDemo()     {
-        return Boolean.parseBoolean(getProperty("TRADOVATE_DEMO", "true"));
-    }
-
-    // ==================== IBKR Broker Configuration ====================
-
-    public String getIBKRAccessToken() { return getEnv("IBKR_ACCESS_TOKEN", ""); }
-    public String getIBKRAccountId()   { return getEnv("IBKR_ACCOUNT_ID", ""); }
-    public String getIBKRBaseUrl()     { return getEnv("IBKR_BASE_URL", "https://api.ibkr.com/v1/api"); }
-
     // ==================== Multi-Broker Configuration ====================
 
     /**
-     * Multi-broker allocation string.
-     * Format: "alpaca:40,tradier:35,tradovate:25"
-     * Each entry is broker_name:capital_percent.
-     * Percentages should sum to 100; if not, they are treated as weights.
-     * When set, the bot runs all listed brokers in parallel.
+     * Broker allocation string. Format: "alpaca:100" (broker_name:capital_percent) — this bot
+     * only trades via Alpaca; {@link com.trading.bot.MultiBrokerOrchestrator#createBrokerClient}
+     * rejects any other name.
      */
     public String getBrokersAllocation() {
         return getProperty("BROKERS", "");
@@ -1629,14 +1584,8 @@ public class Config {
 
     public boolean isMultiBrokerEnabled() {
         String v = getBrokersAllocation();
-        // Requires at least one valid "name:percent" entry (colon present).
-        // Works for single broker (BROKERS=tradier:100) and multi (BROKERS=alpaca:100,tradier:100).
+        // Requires a valid "name:percent" entry (colon present), e.g. BROKERS=alpaca:100.
         return v != null && !v.isBlank() && v.contains(":");
-    }
-
-    private String getEnv(String key, String defaultValue) {
-        String env = System.getenv(key);
-        return env != null ? env : getProperty(key, defaultValue);
     }
 
     // ==================== Profitability Improvement Knobs (2026-04 batch) ====================

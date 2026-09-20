@@ -517,17 +517,20 @@ public final class AlpacaClient implements BrokerClient {
         
         var startStr = start.format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME);
 
-        // For intraday timeframes: sort=desc returns the most recent `limit` bars (newest first),
-        // so today's data is always included regardless of how wide the start window is.
-        // The IEX feed with sort=asc + a wide start window would exhaust limit on old bars,
-        // leaving today's bars unfetched (confirmed: IEX returned bars only up to Aug 10 on Aug 14).
-        // Daily bars keep sort=asc — the "strip today's forming bar" logic below relies on stable ordering.
-        boolean isIntraday = !"1Day".equals(timeframe);
-        String sortParam = isIntraday ? "&sort=desc" : "";
-        String url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s%s",
+        // sort=desc returns the most recent `limit` bars (newest first), so today's data is
+        // always included regardless of how wide the start window is. The IEX feed with
+        // sort=asc + a wide start window would exhaust limit on old bars, leaving recent bars
+        // unfetched (confirmed for intraday: IEX returned bars only up to Aug 10 on Aug 14).
+        // CRITICAL FIX (2026-09-19): this was previously intraday-only — "1Day" kept sort=asc
+        // on the theory that the "strip today's forming bar" logic below needed stable
+        // ordering, but that logic works identically after the reverse-to-oldest-first step
+        // applied below, regardless of which sort fetched the data. Confirmed live: with the
+        // old sort=asc, getBars(symbol, "1Day", limit) silently returned only the OLDEST
+        // `limit` bars whenever the true trading-day count in [start, now) exceeded `limit`
+        // (e.g. PositionSizer's ATR calc, getMarketHistory's identical bug fixed the same way).
+        String url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s&sort=desc",
                 symbol, timeframe, limit,
-                java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8),
-                sortParam);
+                java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8));
 
         var response = sendRequest(url, "GET");
         var root = objectMapper.readTree(response);
@@ -541,10 +544,8 @@ public final class AlpacaClient implements BrokerClient {
             }
         }
 
-        // Intraday bars were fetched newest-first; reverse to oldest-first for indicator calculations.
-        if (isIntraday) {
-            java.util.Collections.reverse(bars);
-        }
+        // Bars were fetched newest-first; reverse to oldest-first for indicator calculations.
+        java.util.Collections.reverse(bars);
 
         // Strip today's forming daily bar so indicators never see an incomplete close.
         if ("1Day".equals(timeframe)) {
@@ -560,26 +561,39 @@ public final class AlpacaClient implements BrokerClient {
 
     public List<Bar> getMarketHistory(String symbol, int limit) throws Exception {
         logger.debug("Fetching {} bars for {}", limit, symbol);
-        
+
         // Request more days back to ensure we get enough trading days (skipping weekends/holidays)
         var start = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"))
                 .minusDays(limit * 2L)
                 .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-                
-        var url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=1Day&feed=iex&limit=%d&start=%s", 
+
+        // CRITICAL FIX (2026-09-19): Alpaca's bars endpoint defaults to sort=asc. With `start`
+        // deliberately set far in the past (to guarantee enough trading days exist) and no `end`,
+        // an ascending sort + limit returns the OLDEST `limit` bars in that window, not the most
+        // recent — confirmed live: getMarketHistory("SPY", 100) was returning Mar 4 - Jul 27 2026
+        // on Sep 20 2026, missing the most recent ~2 months entirely, whenever the true trading-day
+        // count between `start` and now exceeded `limit`. This is the exact same failure mode
+        // getBars() already fixed for intraday timeframes via sort=desc (see its comment: "IEX feed
+        // with sort=asc + a wide start window would exhaust limit on old bars, leaving today's bars
+        // unfetched") — that fix was never applied here. Every MACD/Momentum daily signal live has
+        // been computed on stale history for as long as this bug existed.
+        var url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=1Day&feed=iex&limit=%d&start=%s&sort=desc",
                 symbol, limit, java.net.URLEncoder.encode(start, java.nio.charset.StandardCharsets.UTF_8));
         var response = sendRequest(url, "GET");
         var root = objectMapper.readTree(response);
-        
+
         var bars = new ArrayList<Bar>();
         var barsArray = root.get("bars");
-        
+
         if (barsArray != null && barsArray.isArray()) {
             for (var barNode : barsArray) {
                 bars.add(objectMapper.treeToValue(barNode, Bar.class));
             }
         }
-        
+        // sort=desc returns newest-first; reverse to oldest-first for indicator calculations
+        // (EMA/SMA/RSI all assume chronological order), matching getBars()'s intraday handling.
+        java.util.Collections.reverse(bars);
+
         // Strip today's forming daily bar — it's incomplete until 4PM ET close.
         // Indicators (MACD, RSI, MA) computed on a live bar compare a settled
         // daily close to an intraday snapshot, producing misleading signals.

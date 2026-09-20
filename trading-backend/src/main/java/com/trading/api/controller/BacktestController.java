@@ -61,12 +61,22 @@ public final class BacktestController {
             Instant end = Instant.now();
             Instant start = end.minusSeconds(days * 86400L);
 
-            Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache");
+            // Cache key includes `days`: HistoricalBarCache keys files by symbol+timeframe+limit,
+            // and loadHistory() only requests fixed limits — without this, two requests with
+            // different `days` but the same symbols would silently reuse whichever bar set was
+            // fetched first, making the `days` param a no-op after the first call.
+            Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache-" + days + "d");
             var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
-            harness.loadHistory(liveClient, symbols);
+            harness.loadHistory(liveClient, symbols, days);
             var report = harness.run(symbols, start, end, capital, maxPositions);
 
-            ctx.json(report);
+            var response = new java.util.LinkedHashMap<String, Object>();
+            response.put("requestedDays", days);
+            response.put("requestedStart", start.toString());
+            response.put("requestedEnd", end.toString());
+            response.put("regimeStepCounts", harness.getLastRunRegimeCounts());
+            response.put("report", report);
+            ctx.json(response);
         } catch (Exception e) {
             logger.error("Walk-forward backtest failed", e);
             ctx.status(500).json(Map.of("error", e.getMessage()));

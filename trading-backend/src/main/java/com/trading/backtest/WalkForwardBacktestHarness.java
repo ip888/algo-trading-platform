@@ -66,6 +66,10 @@ public final class WalkForwardBacktestHarness {
 
     private volatile Instant simNow;
     private double equity;
+    // Diagnostic only — lets callers see which regimes the replay window actually hit,
+    // since a regime-specific fix (e.g. a WEAK_BULL-only threshold change) is untestable
+    // if the requested window never actually visits that regime.
+    private final Map<MarketRegimeDetector.MarketRegime, Integer> lastRunRegimeCounts = new LinkedHashMap<>();
     private final Map<String, TradePosition> openPositions = new LinkedHashMap<>();
     private final Map<String, String> openPositionStrategy = new LinkedHashMap<>();
     private final List<BacktestTrade> closedTrades = new ArrayList<>();
@@ -102,6 +106,13 @@ public final class WalkForwardBacktestHarness {
         return replayClient;
     }
 
+    /** Regime counts observed during the most recent run() — diagnostic only, see field comment. */
+    public Map<String, Integer> getLastRunRegimeCounts() {
+        var out = new LinkedHashMap<String, Integer>();
+        lastRunRegimeCounts.forEach((k, v) -> out.put(k.name(), v));
+        return out;
+    }
+
     /**
      * Fetch (or reuse cached) historical bars for every symbol this run needs — the traded
      * symbols plus SPY and the 8 sector ETFs the regime detector always consults. Requires a
@@ -109,26 +120,44 @@ public final class WalkForwardBacktestHarness {
      * every subsequent run against the same cache directory is fully offline.
      */
     public void loadHistory(AlpacaClient liveClient, List<String> tradedSymbols) {
+        loadHistory(liveClient, tradedSymbols, 30);
+    }
+
+    /**
+     * Same as {@link #loadHistory(AlpacaClient, List)} but scales intraday fetch depth to cover
+     * at least {@code minCalendarDays} back from today — the original fixed limits (780 15Min
+     * bars etc.) only covered ~30 calendar days, silently truncating any longer replay window
+     * to whatever that fixed limit actually reached, regardless of the caller's requested range.
+     */
+    public void loadHistory(AlpacaClient liveClient, List<String> tradedSymbols, int minCalendarDays) {
         var allSymbols = new LinkedHashSet<String>();
         allSymbols.addAll(tradedSymbols);
         allSymbols.add(MARKET_PROXY);
         allSymbols.addAll(SECTOR_ETFS);
 
+        // Bars per calendar day at each timeframe (6.5h regular session), with a safety margin.
+        int days = Math.max(minCalendarDays, 30);
+        int dailyLimit = Math.max(400, days + 60);
+        int oneMinLimit = Math.max(800, days * 390);
+        int fiveMinLimit = Math.max(1560, days * 78);
+        int fifteenMinLimit = Math.max(780, days * 26);
+        int oneHourLimit = Math.max(280, days * 7);
+
         for (String symbol : allSymbols) {
-            replayClient.loadBars(symbol, "1Day", cache.getOrFetch(liveClient, symbol, "1Day", 400));
-            replayClient.loadBars(symbol, "1Day-history", cache.getOrFetchMarketHistory(liveClient, symbol, 400));
+            replayClient.loadBars(symbol, "1Day", cache.getOrFetch(liveClient, symbol, "1Day", dailyLimit));
+            replayClient.loadBars(symbol, "1Day-history", cache.getOrFetchMarketHistory(liveClient, symbol, dailyLimit));
         }
         for (String symbol : tradedSymbols) {
-            replayClient.loadBars(symbol, "1Min", cache.getOrFetch(liveClient, symbol, "1Min", 800));
-            replayClient.loadBars(symbol, "5Min", cache.getOrFetch(liveClient, symbol, "5Min", 1560));
-            replayClient.loadBars(symbol, "15Min", cache.getOrFetch(liveClient, symbol, "15Min", 780));
-            replayClient.loadBars(symbol, "1Hour", cache.getOrFetch(liveClient, symbol, "1Hour", 280));
+            replayClient.loadBars(symbol, "1Min", cache.getOrFetch(liveClient, symbol, "1Min", oneMinLimit));
+            replayClient.loadBars(symbol, "5Min", cache.getOrFetch(liveClient, symbol, "5Min", fiveMinLimit));
+            replayClient.loadBars(symbol, "15Min", cache.getOrFetch(liveClient, symbol, "15Min", fifteenMinLimit));
+            replayClient.loadBars(symbol, "1Hour", cache.getOrFetch(liveClient, symbol, "1Hour", oneHourLimit));
         }
         // VIX often isn't fetchable directly via the equities bars endpoint; try VIXY as the
         // detector's own fallback does live. Best-effort — regime detection falls back to a
         // default VIX of 20.0 if neither is available, same as live.
         try {
-            replayClient.loadBars("VIXY", "1Day", cache.getOrFetch(liveClient, "VIXY", "1Day", 400));
+            replayClient.loadBars("VIXY", "1Day", cache.getOrFetch(liveClient, "VIXY", "1Day", dailyLimit));
         } catch (Exception e) {
             logger.debug("VIXY history unavailable for replay: {}", e.getMessage());
         }
@@ -147,6 +176,7 @@ public final class WalkForwardBacktestHarness {
         openPositionStrategy.clear();
         closedTrades.clear();
         equityCurve.clear();
+        lastRunRegimeCounts.clear();
 
         List<Instant> steps = stepTimestamps(tradedSymbols, start, end);
         logger.info("Replaying {} steps from {} to {}", steps.size(), start, end);
@@ -160,6 +190,7 @@ public final class WalkForwardBacktestHarness {
             // date changes — see OpeningRangeBreakoutStrategy.evaluate().
 
             var regimeAnalysis = regimeDetector.getCurrentRegime();
+            lastRunRegimeCounts.merge(regimeAnalysis.regime(), 1, Integer::sum);
 
             // Manage open positions first — exits before new entries, matching live priority.
             for (String symbol : new ArrayList<>(openPositions.keySet())) {

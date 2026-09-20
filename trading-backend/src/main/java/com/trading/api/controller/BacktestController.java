@@ -5,6 +5,7 @@ import com.trading.backtest.WalkForwardBacktestHarness;
 import com.trading.backtesting.Backtester;
 import com.trading.config.Config;
 import com.trading.strategy.MACDStrategy;
+import com.trading.strategy.MomentumStrategy;
 import com.trading.strategy.TradingSignal;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -29,6 +30,133 @@ public final class BacktestController {
         app.post("/api/backtest", this::runBacktest);
         app.get("/api/backtest/intraday-macd", this::runIntradayMacdSignal);
         app.get("/api/backtest/walkforward", this::runWalkForward);
+        app.get("/api/backtest/regime-sample", this::runRegimeSample);
+        app.get("/api/backtest/check-market-history", this::checkMarketHistory);
+        app.get("/api/backtest/momentum-diagnose", this::diagnoseMomentum);
+    }
+
+    /**
+     * Diagnostic-only: runs MomentumStrategy's real gate logic (WEAK_BULL relaxed path) against
+     * real, current daily history for one or more symbols and reports every intermediate gate
+     * value — to find exactly which condition blocks entry, rather than guessing from trade
+     * outcomes alone.
+     */
+    private void diagnoseMomentum(Context ctx) {
+        try {
+            String symbolsParam = ctx.queryParamAsClass("symbols", String.class).getOrDefault("SPY,QQQ,AMD,META,NVDA,TSLA,MSFT,AAPL,XLE,XOP");
+            List<String> symbols = Arrays.stream(symbolsParam.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
+            var config = new Config();
+            var client = new AlpacaClient(config);
+            var momentum = new MomentumStrategy(config);
+
+            var results = new java.util.LinkedHashMap<String, Object>();
+            for (String symbol : symbols) {
+                var bars = client.getMarketHistory(symbol, 100);
+                var closes = bars.stream().map(com.trading.api.model.Bar::close).toList();
+                double currentPrice = closes.isEmpty() ? 0 : closes.get(closes.size() - 1);
+                var gates = momentum.diagnoseWeakBull(currentPrice, closes);
+                results.put(symbol, gates);
+            }
+            ctx.json(results);
+        } catch (Exception e) {
+            logger.error("Momentum diagnostic failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * Diagnostic-only: calls the exact live method (AlpacaClient.getMarketHistory) that
+     * StrategyManager uses for MACD/Momentum's daily `history` list, right now, and reports
+     * the actual returned date range — to check whether it really reaches today or silently
+     * stops short (a sort=asc + overly-wide start window can exhaust `limit` on old bars).
+     */
+    private void checkMarketHistory(Context ctx) {
+        try {
+            String symbol = ctx.queryParamAsClass("symbol", String.class).getOrDefault("SPY");
+            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(100);
+            var config = new Config();
+            var client = new AlpacaClient(config);
+            var bars = client.getMarketHistory(symbol, limit);
+            ctx.json(Map.of(
+                "symbol", symbol,
+                "requestedLimit", limit,
+                "actualCount", bars.size(),
+                "oldest", bars.isEmpty() ? null : bars.get(0).timestamp().toString(),
+                "newest", bars.isEmpty() ? null : bars.get(bars.size() - 1).timestamp().toString(),
+                "now", Instant.now().toString()
+            ));
+        } catch (Exception e) {
+            logger.error("check-market-history failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * Diagnostic-only: samples the regime detector at several distinct dates across a window
+     * using a FRESH MarketRegimeDetector instance per sample (each with its own empty cache),
+     * to isolate whether an observed frozen regime is a caching bug in the shared detector vs.
+     * a genuine (if surprising) finding that the real data classifies the same way throughout.
+     */
+    private void runRegimeSample(Context ctx) {
+        try {
+            int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(19);
+            int samples = ctx.queryParamAsClass("samples", Integer.class).getOrDefault(8);
+
+            var config = new Config();
+            var liveClient = new AlpacaClient(config);
+            Instant end = Instant.now();
+            Instant start = end.minusSeconds(days * 86400L);
+
+            List<String> regimeSymbols = List.of("SPY", "XLK", "XLF", "XLE", "XLV", "XLI", "XLC", "XLU", "XLB", "VIXY");
+            Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache-" + days + "d");
+            var cache = new com.trading.backtest.HistoricalBarCache(cacheDir);
+            var replayClient = new com.trading.backtest.HistoricalReplayBrokerClient(start);
+            int dailyLimit = Math.min(10_000, Math.max(400, days + 60));
+            for (String sym : regimeSymbols) {
+                replayClient.loadBars(sym, "1Day", cache.getOrFetch(liveClient, sym, "1Day", dailyLimit));
+                if (!"VIXY".equals(sym)) {
+                    replayClient.loadBars(sym, "1Day-history", cache.getOrFetchMarketHistory(liveClient, sym, dailyLimit));
+                }
+            }
+
+            // Raw bar-range diagnostic: confirms whether the cached series actually spans
+            // the requested window, before trusting anything computed from it. Advance to
+            // `end` first so the isBefore(simulatedNow) filter doesn't hide anything.
+            replayClient.advanceTo(end);
+            var rawRanges = new java.util.LinkedHashMap<String, Object>();
+            for (String sym : regimeSymbols) {
+                var series = replayClient.getBars(sym, "1Day", 10_000);
+                if (series.isEmpty()) {
+                    rawRanges.put(sym, "EMPTY");
+                } else {
+                    rawRanges.put(sym, Map.of(
+                        "count", series.size(),
+                        "oldest", series.get(0).timestamp().toString(),
+                        "newest", series.get(series.size() - 1).timestamp().toString()));
+                }
+            }
+
+            var marketAnalyzer = new com.trading.analysis.MarketAnalyzer(replayClient);
+            var results = new ArrayList<Map<String, Object>>();
+            long spanSeconds = end.getEpochSecond() - start.getEpochSecond();
+            for (int i = 0; i < samples; i++) {
+                Instant sampleTime = start.plusSeconds(spanSeconds * i / Math.max(1, samples - 1));
+                replayClient.advanceTo(sampleTime);
+                // Fresh detector per sample — guarantees no cache carryover between samples.
+                var freshDetector = new com.trading.analysis.MarketRegimeDetector(replayClient, config, marketAnalyzer);
+                var analysis = freshDetector.getCurrentRegime();
+                results.add(Map.of(
+                    "sampleTime", sampleTime.toString(),
+                    "regime", analysis.regime().name(),
+                    "confidence", analysis.confidence(),
+                    "vix", analysis.vix()
+                ));
+            }
+            ctx.json(Map.of("samples", results, "rawBarRanges", rawRanges));
+        } catch (Exception e) {
+            logger.error("Regime sample diagnostic failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
     }
 
     /**

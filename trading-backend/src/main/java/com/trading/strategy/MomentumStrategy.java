@@ -107,6 +107,55 @@ public final class MomentumStrategy implements TradingStrategy {
         return evaluateWithHistory(symbol, currentPrice, positionQty, history, WEAK_BULL_MOMENTUM_MIN, false);
     }
 
+    /** Every intermediate gate value, for diagnosing exactly why an entry did/didn't fire. */
+    public record GateReport(
+        boolean sufficientHistory, double rsi, double rsiPrev, boolean rsiRising, boolean rsiInSweetSpot,
+        double momentum, boolean momentumConsistent, boolean hasPositiveMomentum,
+        double sma20, double sma50, double sma9,
+        boolean priceAboveSMA20, boolean priceAboveSMA50, boolean fastAboveSlow,
+        double percentAboveSMA, double atrPercent, boolean volatilityOK, boolean wouldBuy
+    ) {}
+
+    /** Diagnostic-only: reports every gate's value/pass-fail for the WEAK_BULL relaxed path without side effects. */
+    public GateReport diagnoseWeakBull(double currentPrice, List<Double> history) {
+        return computeGates(currentPrice, history, WEAK_BULL_MOMENTUM_MIN, false);
+    }
+
+    private GateReport computeGates(double currentPrice, List<Double> history,
+                                    double effectiveMomentumMin, boolean requireConsistency) {
+        if (history.size() < Math.max(RSI_PERIOD + 1, SMA_PERIOD_MACRO + 5)) {
+            return new GateReport(false, 0, 0, false, false, 0, false, false,
+                0, 0, 0, false, false, false, 0, 0, false, false);
+        }
+        double rsi = calculateRSI(history, RSI_PERIOD);
+        double rsiPrev = calculateRSI(history.subList(0, history.size() - 1), RSI_PERIOD);
+        boolean rsiRising = rsi > rsiPrev;
+        boolean rsiInSweetSpot = rsi >= rsiBuyMin && rsi <= rsiBuyMax;
+
+        double momentum = calculateMomentum(history, MOMENTUM_PERIOD);
+        boolean momentumConsistent = !requireConsistency || isMomentumConsistent(history, momentumConfirmationBars);
+        boolean hasPositiveMomentum = momentum >= effectiveMomentumMin;
+
+        double sma20 = calculateSMA(history, SMA_PERIOD);
+        double sma50 = calculateSMA(history, SMA_PERIOD_MACRO);
+        double sma9 = calculateSMA(history, SMA_PERIOD_FAST);
+        boolean priceAboveSMA = currentPrice > sma20;
+        boolean priceAboveSMA50 = currentPrice > sma50;
+        boolean fastAboveSlow = sma9 > sma20;
+        double percentAboveSMA = ((currentPrice - sma20) / sma20) * 100;
+
+        double atrPercent = calculateATRPercent(history, ATR_PERIOD, currentPrice);
+        boolean volatilityOK = atrPercent < maxAtrPercent;
+
+        boolean wouldBuy = volatilityOK && rsiInSweetSpot && rsiRising && hasPositiveMomentum
+            && momentumConsistent && priceAboveSMA && priceAboveSMA50 && fastAboveSlow
+            && percentAboveSMA < maxAboveSmaPercent;
+
+        return new GateReport(true, rsi, rsiPrev, rsiRising, rsiInSweetSpot, momentum, momentumConsistent,
+            hasPositiveMomentum, sma20, sma50, sma9, priceAboveSMA, priceAboveSMA50, fastAboveSlow,
+            percentAboveSMA, atrPercent, volatilityOK, wouldBuy);
+    }
+
     private TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty,
                                               List<Double> history, double effectiveMomentumMin,
                                               boolean requireConsistency) {
@@ -128,7 +177,7 @@ public final class MomentumStrategy implements TradingStrategy {
         boolean priceAboveSMA50 = currentPrice > sma50;
         boolean fastAboveSlow = sma9 > sma20; // SMA9 > SMA20 = bullish crossover
         double percentAboveSMA = ((currentPrice - sma20) / sma20) * 100;
-        
+
         // Calculate ATR for volatility check
         double atrPercent = calculateATRPercent(history, ATR_PERIOD, currentPrice);
         boolean volatilityOK = atrPercent < maxAtrPercent;

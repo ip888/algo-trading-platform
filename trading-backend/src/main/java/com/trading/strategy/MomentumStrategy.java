@@ -32,7 +32,12 @@ public final class MomentumStrategy implements TradingStrategy {
     private static final int SMA_PERIOD_FAST = 9;
     private static final int SMA_PERIOD_MACRO = 50;
     private static final int ATR_PERIOD = 14;
-    
+
+    // WEAK_BULL relaxation: ~40% of the default 0.8% threshold — a deliberate first estimate
+    // to validate via WalkForwardBacktestHarness, not a value derived from a closed-form
+    // calculation. Tune via real replay results, not guesswork, before/after live use.
+    private static final double WEAK_BULL_MOMENTUM_MIN = 0.003; // 0.3%
+
     // CONFIGURABLE parameters (read from config or use defaults)
     private final double rsiBuyMin;
     private final double rsiBuyMax;
@@ -78,6 +83,33 @@ public final class MomentumStrategy implements TradingStrategy {
     }
 
     public TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty, List<Double> history) {
+        return evaluateWithHistory(symbol, currentPrice, positionQty, history, momentumMin, true);
+    }
+
+    /**
+     * Relaxed entry for WEAK_BULL: this strategy is calibrated for high-volatility trending
+     * assets ("Gold during inflationary periods" — see class Javadoc), but StrategyManager
+     * routes it first for ALL symbols in WEAK_BULL (comment there: "confirmed Jul 28-31 2026:
+     * 10/10 MACD" — Momentum was routed but never actually fired). A 45-day/17-symbol
+     * walk-forward replay (Sep 19 2026) confirmed it directly: 0 Momentum trades, 100% MACD,
+     * even with Momentum evaluated first every time. Root cause: the default 0.8%/10-day
+     * momentum threshold and 3-bar consistency check don't clear in a sustained low-VIX grind
+     * (VIX ~10.5), where daily moves are small in absolute terms.
+     *
+     * Mirrors MACDStrategy's WEAK_BULL histogramThreshold=0.0 relaxation: the same structural
+     * trend-confirmation gates stay intact (RSI sweet spot, price above both SMAs, SMA9>SMA20,
+     * not too extended above SMA20) — only the momentum-magnitude bar is lowered and the 3-bar
+     * consistency requirement is dropped in favor of "currently positive," matching how MACD's
+     * "sustained" path dropped "growing" in favor of "clearly positive." Must be validated via
+     * WalkForwardBacktestHarness against real data before this path is ever live-deployed.
+     */
+    public TradingSignal evaluateWeakBull(String symbol, double currentPrice, double positionQty, List<Double> history) {
+        return evaluateWithHistory(symbol, currentPrice, positionQty, history, WEAK_BULL_MOMENTUM_MIN, false);
+    }
+
+    private TradingSignal evaluateWithHistory(String symbol, double currentPrice, double positionQty,
+                                              List<Double> history, double effectiveMomentumMin,
+                                              boolean requireConsistency) {
         if (history.size() < Math.max(RSI_PERIOD + 1, SMA_PERIOD_MACRO + 5)) {
             return new TradingSignal.Hold("Insufficient history for Momentum Strategy");
         }
@@ -87,7 +119,7 @@ public final class MomentumStrategy implements TradingStrategy {
         boolean rsiRising = rsi > rsiPrev;
 
         double momentum = calculateMomentum(history, MOMENTUM_PERIOD);
-        boolean momentumConsistent = isMomentumConsistent(history, momentumConfirmationBars);
+        boolean momentumConsistent = !requireConsistency || isMomentumConsistent(history, momentumConfirmationBars);
 
         double sma20 = calculateSMA(history, SMA_PERIOD);
         double sma50 = calculateSMA(history, SMA_PERIOD_MACRO);
@@ -141,7 +173,7 @@ public final class MomentumStrategy implements TradingStrategy {
             }
             
             boolean rsiInSweetSpot = rsi >= rsiBuyMin && rsi <= rsiBuyMax;
-            boolean hasPositiveMomentum = momentum >= momentumMin;
+            boolean hasPositiveMomentum = momentum >= effectiveMomentumMin;
             
             // ENTRY: Require ALL conditions
             // 1. RSI in sweet spot AND rising

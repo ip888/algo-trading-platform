@@ -398,7 +398,7 @@ public final class StrategyManager {
                 // Momentum's RSI, SMA, and 3-bar consistency checks naturally filter bad setups;
                 // MACD is the fallback when Momentum says HOLD.
                 activeStrategy = "Momentum (Weak Bull)";
-                var momSignal = momentumStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history);
+                var momSignal = momentumStrategy.evaluateWeakBull(symbol, currentPrice, positionQty, history);
                 if (!(momSignal instanceof TradingSignal.Hold)) yield momSignal;
                 // Momentum said HOLD — fall back to MACD in "sustained uptrend" mode.
                 // histogramThreshold=0.0 activates the sustainedUptrend check in MACDStrategy,

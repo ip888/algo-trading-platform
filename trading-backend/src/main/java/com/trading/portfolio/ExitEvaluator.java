@@ -198,9 +198,16 @@ final class ExitEvaluator {
             cancelExistingOrders("[" + profile.name() + "]", symbol);
 
             // Determine optimal order type for signal-based exit
+            // BUG FIX (2026-09-20): the 10-arg constructor below defaults qty to 0.0, so Rule 6b's
+            // "isFractionalOrder = ctx.qty() > 0 && ..." check in SmartOrderTypeSelector could never
+            // be true here — meaning the Sep 11 2026 fix (commit 14d6b9e0, extending Rule 6b to
+            // sells) never actually took effect for this call site despite being reported fixed.
+            // This is exactly the call site that produced the OIH duplicate-trade incident it was
+            // meant to close. Must pass the real quantity so fractional sells are correctly forced
+            // to MARKET instead of a limit order that can sit unfilled.
             var orderCtx = new OrderContext(
                 symbol, "sell", currentPrice, latestEquity.getAsDouble(), latestVix.getAsDouble(), latestRegime.get(),
-                profile.strategyType(), true, false, false
+                profile.strategyType(), true, false, false, position.quantity()
             );
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
             client.placeOrder(symbol, position.quantity(), "sell",
@@ -988,10 +995,12 @@ final class ExitEvaluator {
                             logger.warn("{} No existing orders to cancel for {}: {}", profilePrefix, symbol, cancelEx.getMessage());
                         }
 
-                        // Use smart order type for take-profit exits (limit is fine here)
+                        // Use smart order type for take-profit exits (limit is fine here).
+                        // Real qty required — see handleSell()'s identical fix above for why the
+                        // 10-arg (qty-defaulted-to-0) constructor silently disabled Rule 6b here too.
                         var tpCtx = new OrderContext(
                             symbol, "sell", currentPrice, latestEquity.getAsDouble(), latestVix.getAsDouble(), latestRegime.get(),
-                            profile.strategyType(), true, false, false
+                            profile.strategyType(), true, false, false, qty
                         );
                         var tpDecision = orderTypeSelector.selectOrderType(tpCtx);
 

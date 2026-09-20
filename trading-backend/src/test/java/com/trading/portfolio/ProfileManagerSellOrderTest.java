@@ -392,6 +392,45 @@ class ProfileManagerSellOrderTest {
         inOrder.verify(mockClient).placeOrder(eq("AAPL"), eq(qty), eq("sell"), anyString(), anyString(), any());
     }
 
+    @Test
+    @DisplayName("2b. checkAllPositionsForProfitTargets - fractional qty forces MARKET, not LIMIT "
+        + "(regression: 2026-09-20 found the take-profit OrderContext never passed qty, so this "
+        + "rule silently never fired despite being 'fixed' in commit 14d6b9e0)")
+    void testCheckAllPositionsForProfitTargets_fractionalQtyForcesMarket() throws Exception {
+        // equity=100_000 (Rule 7's small-account threshold doesn't apply) and vix=15 in
+        // RANGE_BOUND (Rule 8's take-profit-in-calm-market DOES apply) — without the fractional
+        // check, SmartOrderTypeSelector would pick LIMIT here. A fractional qty must override
+        // that via Rule 6b and force MARKET instead, exactly as it's meant to for the real
+        // fractional-share positions this account actually holds.
+        double entryPrice = 100.0;
+        double qty = 10.567; // fractional
+        double currentPrice = entryPrice * 1.05; // +5%, beyond take-profit threshold
+        double marketValue = currentPrice * qty;
+
+        Position position = new Position("AAPL", qty, marketValue, entryPrice, (currentPrice - entryPrice) * qty);
+        when(mockClient.getPositions()).thenReturn(List.of(position));
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(MAPPER.createArrayNode());
+
+        invokeOnExitEvaluator("checkAllPositionsForProfitTargets", new Class<?>[]{String.class}, "[MAIN]");
+
+        verify(mockClient).placeOrder(eq("AAPL"), eq(qty), eq("sell"), eq("market"), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("2c. handleSell (signal exit) - fractional qty forces MARKET, not LIMIT "
+        + "(same regression as 2b, for the other OrderContext call site commit 14d6b9e0 missed)")
+    void testHandleSell_fractionalQtyForcesMarket() throws Exception {
+        double qty = 0.384180035; // fractional — matches the real OIH incident's share count
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(MAPPER.createArrayNode());
+
+        TradePosition position = new TradePosition("AAPL", 100.0, qty, 99.0, 101.0, Instant.now());
+        invokeOnExitEvaluator("handleSell",
+            new Class<?>[]{String.class, double.class, TradePosition.class, String.class},
+            "AAPL", 100.5, position, "[MAIN]");
+
+        verify(mockClient).placeOrder(eq("AAPL"), eq(qty), eq("sell"), eq("market"), anyString(), any());
+    }
+
     // ---------- 3. checkAllPositionsForRiskExits: cancel before sell (enhanced exit) ----------
 
     @Test

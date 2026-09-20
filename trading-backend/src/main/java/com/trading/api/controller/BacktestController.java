@@ -33,6 +33,70 @@ public final class BacktestController {
         app.get("/api/backtest/regime-sample", this::runRegimeSample);
         app.get("/api/backtest/check-market-history", this::checkMarketHistory);
         app.get("/api/backtest/momentum-diagnose", this::diagnoseMomentum);
+        app.get("/api/backtest/scalp-walkforward", this::runScalpWalkForward);
+    }
+
+    /**
+     * Diagnostic-only: runs the real WalkForwardBacktestHarness with ScalpStrategy force-enabled
+     * for this run only (SCALP_STRATEGY_ENABLED=false stays untouched in config.properties/live).
+     * Optional query params override individual scalp tuning knobs so different candidate
+     * configurations can be tested against real data without a redeploy per attempt. Uses a
+     * fresh Config instance and reflectively mutates its own Properties object — isolated from
+     * the live trading loop's separately-constructed Config, and env vars (which take priority
+     * over the properties file — see Config.getProperty) are untouched either way.
+     */
+    private void runScalpWalkForward(Context ctx) {
+        try {
+            String symbolsParam = ctx.queryParamAsClass("symbols", String.class)
+                .getOrDefault("SPY,QQQ,IWM,NVDA,AAPL,META,MSFT,AMD,TSLA");
+            List<String> symbols = Arrays.stream(symbolsParam.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
+            int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(19);
+            double capital = ctx.queryParamAsClass("capital", Double.class).getOrDefault(1180.0);
+            int maxPositions = ctx.queryParamAsClass("maxPositions", Integer.class).getOrDefault(4);
+            if (days < 1 || days > 60) {
+                ctx.status(400).json(Map.of("error", "days must be 1-60"));
+                return;
+            }
+
+            var config = new Config();
+            overrideProperty(config, "SCALP_STRATEGY_ENABLED", "true");
+            for (var key : new String[]{"SCALP_RSI_MIN", "SCALP_RSI_MAX", "SCALP_VOLUME_MULTIPLIER",
+                    "SCALP_STOP_LOSS_PERCENT", "SCALP_TAKE_PROFIT_PERCENT", "SCALP_MAX_DAILY_TRADES"}) {
+                String override = ctx.queryParam(key);
+                if (override != null && !override.isBlank()) {
+                    overrideProperty(config, key, override);
+                }
+            }
+
+            var liveClient = new AlpacaClient(config);
+            Instant end = Instant.now();
+            Instant start = end.minusSeconds(days * 86400L);
+            Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache-scalp-" + days + "d");
+            var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
+            harness.loadHistory(liveClient, symbols, days);
+            var report = harness.run(symbols, start, end, capital, maxPositions);
+
+            var response = new java.util.LinkedHashMap<String, Object>();
+            response.put("requestedDays", days);
+            response.put("scalpConfig", Map.of(
+                "rsiMin", config.getScalpRsiBuyMin(), "rsiMax", config.getScalpRsiBuyMax(),
+                "volumeMultiplier", config.getScalpVolumeMultiplier(),
+                "stopLossPercent", config.getScalpStopLossPercent(), "takeProfitPercent", config.getScalpTakeProfitPercent(),
+                "maxDailyTrades", config.getScalpMaxDailyTrades()));
+            response.put("regimeStepCounts", harness.getLastRunRegimeCounts());
+            response.put("report", report);
+            ctx.json(response);
+        } catch (Exception e) {
+            logger.error("Scalp walk-forward backtest failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
+    }
+
+    private static void overrideProperty(Config config, String key, String value) throws Exception {
+        var field = Config.class.getDeclaredField("properties");
+        field.setAccessible(true);
+        var properties = (java.util.Properties) field.get(config);
+        properties.setProperty(key, value);
     }
 
     /**

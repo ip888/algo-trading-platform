@@ -115,6 +115,32 @@ class ProfileManagerPDTAndCooldownTest {
     }
 
     /**
+     * BUG (found 2026-09-20 while fixing the production PDT-reservation gate): setField
+     * ("pdtProtection", ...) only updates ProfileManager's own field — entryEvaluator captured
+     * its OWN PDTProtection reference by value in setUp()'s constructor call, before any test
+     * body runs, so re-setting ProfileManager's field never actually changed what the gate
+     * checks. Both PDT tests below were silently exercising dayTradeCount=0 (setUp()'s
+     * realPDTProtection) regardless of what they asked for. Rebuilding entryEvaluator here with
+     * the desired PDTProtection is the actual fix — swap this in wherever a test needs a
+     * different day-trade count than setUp()'s default.
+     */
+    private void rebuildEntryEvaluatorWithPdt(PDTProtection pdt) throws Exception {
+        var profile = (TradingProfile) getField("profile");
+        var portfolio = (PortfolioManager) getField("portfolio");
+        var riskGate = getField("riskGate");
+        java.util.function.DoubleSupplier todayPnLSupplier = () -> {
+            try { return (double) (Double) getField("todayPnL"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        java.util.function.Supplier<java.time.Instant> bearishRegimeMarketStartSupplier = () -> {
+            try { return (java.time.Instant) getField("bearishRegimeMarketStart"); } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        var entryEvaluator = new EntryEvaluator(profile, mockConfig, mockDatabase, mockClient, portfolio,
+            (RiskGate) riskGate, pdt, null, null, null, null, null, null, null,
+            todayPnLSupplier, bearishRegimeMarketStartSupplier);
+        setField("entryEvaluator", entryEvaluator);
+    }
+
+    /**
      * checkAllPositionsForProfitTargets lives on ExitEvaluator since 2026-08-30 (see its class
      * Javadoc) — invoke on the exitEvaluator instance held by profileManager instead.
      */
@@ -284,8 +310,13 @@ class ProfileManagerPDTAndCooldownTest {
     @Test
     @DisplayName("PDT threshold=1: buy is BLOCKED when dayTradeCount=1 (keeps 2 slots for exits)")
     void testPDT_blocksAtOneDayTrade() throws Exception {
-        // PDT gate lives in handleBuy — test it directly
-        setField("pdtProtection", createPDTProtection(1)); // 1/3 day trades used
+        // PDT gate lives in handleBuy — test it directly. Must explicitly enable PDT protection
+        // and set the threshold: EntryEvaluator's PDT reservation gate is a no-op when
+        // isPDTProtectionEnabled() is false (fixed 2026-09-20 — it used to run unconditionally,
+        // ignoring this flag even though PDTProtection.canTrade() already respected it).
+        when(mockConfig.isPDTProtectionEnabled()).thenReturn(true);
+        when(mockConfig.getPdtReserveThreshold()).thenReturn(1);
+        rebuildEntryEvaluatorWithPdt(createPDTProtection(1)); // 1/3 day trades used
 
         // equity < 25000 so PDT rules apply
         invokePrivate("handleBuy",
@@ -303,7 +334,9 @@ class ProfileManagerPDTAndCooldownTest {
     @DisplayName("PDT threshold=1: buy is ALLOWED when dayTradeCount=0 (PDT gate does not fire)")
     void testPDT_allowsAtZeroDayTrades() throws Exception {
         // PDT gate lives in handleBuy — with 0 trades the gate must NOT early-return.
-        setField("pdtProtection", createPDTProtection(0));
+        when(mockConfig.isPDTProtectionEnabled()).thenReturn(true);
+        when(mockConfig.getPdtReserveThreshold()).thenReturn(1);
+        rebuildEntryEvaluatorWithPdt(createPDTProtection(0));
 
         // handleBuy will proceed past the PDT gate and into deeper logic (market breadth,
         // position sizing etc.) which require additional collaborators not wired in this test.

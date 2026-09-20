@@ -191,21 +191,29 @@ final class EntryEvaluator {
         // buy could use the last slot, then a stop-loss exit gets PDT-blocked.
         // Solution: block all new buys when daytrade_count >= 2.
         int currentDayTrades = pdtProtection.getDayTradeCount();
-        riskGate.setStaticDayTradeCount(currentDayTrades); // sync for dashboard
-        // Reserve 1 PDT slot for exits (worst case: 1 position needs same-day stop-loss exit).
-        // Block new buys only when 2 of 3 day trades are already used.
-        // pdtReserveThreshold=2: allows buys at 0/3 and 1/3, blocks at 2/3 to keep 1 exit slot.
-        // Old threshold=1 was too aggressive: it blocked ALL trading after the first day trade.
-        int pdtReserveThreshold = config.getPdtReserveThreshold(); // default 2
-        if (currentDayTrades >= pdtReserveThreshold && equity < 25000) {
-            logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping slots for exits",
-                profilePrefix, symbol, currentDayTrades, 3);
-            TradingWebSocketHandler.broadcastActivity(
-                String.format("[%s] ⛔ BUY BLOCKED: %s — PDT slots reserved for exits (%d/3 used)",
-                    profile.name(), symbol, currentDayTrades),
-                "WARN"
-            );
-            return new Blocked("PDT reservation: " + currentDayTrades + "/3 day trades used");
+        riskGate.setStaticDayTradeCount(currentDayTrades); // sync for dashboard, regardless of gate below
+        // BUG FIX (2026-09-20): this block used to run unconditionally, ignoring
+        // config.isPDTProtectionEnabled() — PDTProtection.canTrade() (the sell-side PDT gate)
+        // correctly returns true immediately when disabled, but this entry-side reservation
+        // never consulted the same flag. PDT_PROTECTION_ENABLED=false since FINRA abolished the
+        // PDT rule effective 2026-06-04 (see config.properties), so this was silently reserving
+        // exit slots — and blocking real buy opportunities — for a rule that no longer applies.
+        if (config.isPDTProtectionEnabled()) {
+            // Reserve 1 PDT slot for exits (worst case: 1 position needs same-day stop-loss exit).
+            // Block new buys only when 2 of 3 day trades are already used.
+            // pdtReserveThreshold=2: allows buys at 0/3 and 1/3, blocks at 2/3 to keep 1 exit slot.
+            // Old threshold=1 was too aggressive: it blocked ALL trading after the first day trade.
+            int pdtReserveThreshold = config.getPdtReserveThreshold(); // default 2
+            if (currentDayTrades >= pdtReserveThreshold && equity < 25000) {
+                logger.warn("{} {} BUY BLOCKED — PDT reservation: {}/{} day trades used, keeping slots for exits",
+                    profilePrefix, symbol, currentDayTrades, 3);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] ⛔ BUY BLOCKED: %s — PDT slots reserved for exits (%d/3 used)",
+                        profile.name(), symbol, currentDayTrades),
+                    "WARN"
+                );
+                return new Blocked("PDT reservation: " + currentDayTrades + "/3 day trades used");
+            }
         }
 
         // ========== STOP LOSS COOLDOWN CHECK ==========
@@ -749,11 +757,31 @@ final class EntryEvaluator {
                 var now = LocalDateTime.now();
                 var tradeStats = database.getTradeStatistics();
                 double recentWinRate = tradeStats.totalTrades() > 5 ? tradeStats.winRate() : 0.55; // min 6 trades before trusting stats
+                // BUG FIX (2026-09-20): this was hardcoded to 1.0 ("computed by VolumeProfileAnalyzer
+                // above, not yet threaded here") — SignalPredictor learns a real correlation weight
+                // for this feature (see its volumeWeight field) and multiplies it in directly, so a
+                // constant input contributed zero signal regardless of actual volume conditions.
+                // VolumeProfileAnalyzer itself only exposes a boolean verdict, not a reusable ratio,
+                // so this computes the same "current bar vs N-bar average" ratio MomentumStrategy
+                // and MarketRegimeDetector already use elsewhere, from a fresh small bar fetch.
+                double volumeRatio = 1.0;
+                try {
+                    var volBars = client.getBars(symbol, "15Min", 20);
+                    if (volBars.size() >= 10) {
+                        double avgVolume = volBars.stream().mapToLong(com.trading.api.model.Bar::volume)
+                            .average().orElse(0);
+                        long currentVolume = volBars.get(volBars.size() - 1).volume();
+                        if (avgVolume > 0) volumeRatio = currentVolume / avgVolume;
+                    }
+                } catch (Exception ve) {
+                    logger.debug("{} {}: volume ratio fetch failed, using neutral 1.0: {}",
+                        profilePrefix, symbol, ve.getMessage());
+                }
                 var setup = new com.trading.ai.SignalPredictor.TradingSetup(
                     currentVix,
                     now.getHour(),
                     now.getDayOfWeek(),
-                    1.0, // volume ratio (computed by VolumeProfileAnalyzer above, not yet threaded here)
+                    volumeRatio,
                     recentWinRate,
                     80 // pattern confidence
                 );

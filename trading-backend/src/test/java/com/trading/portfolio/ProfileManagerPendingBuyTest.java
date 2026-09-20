@@ -31,6 +31,11 @@ class ProfileManagerPendingBuyTest extends ProfileManagerTestBase {
         when(mockConfig.isPerSymbolCooldownEnabled()).thenReturn(false);
         when(mockConfig.isVolumeProfileEnabled()).thenReturn(false);
         when(mockConfig.isMLEntryScoringEnabled()).thenReturn(false);
+        // isPDTProtectionEnabled must be true for getPdtReserveThreshold() to be reached at all
+        // (EntryEvaluator skips the whole PDT-reservation block otherwise, fixed 2026-09-20) —
+        // several tests below use "was getPdtReserveThreshold() called" as a proxy for "did
+        // execution get past the earlier race guard/gates."
+        when(mockConfig.isPDTProtectionEnabled()).thenReturn(true);
         when(mockConfig.getPdtReserveThreshold()).thenReturn(3); // never blocks
         when(mockDatabase.hasOpenTrade(anyString(), anyString())).thenReturn(false);
         when(mockDatabase.countOpenTrades(anyString(), anyString())).thenReturn(0);

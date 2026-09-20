@@ -39,6 +39,14 @@ public final class StrategyManager {
     private String activeStrategy = "None";
     private double latestVix = 20.0;
 
+    // WEAK_BULL Momentum-vs-MACD deference (see the WEAK_BULL case below): bounds how long a
+    // symbol can defer the MACD fallback while "close" to a Momentum entry, so a symbol that
+    // never fully resolves doesn't block MACD indefinitely with no compensating benefit. Keyed
+    // by history.size() (grows by one bar per new trading day) rather than a wall-clock date —
+    // self-consistent in both live and backtest replay without needing a separate clock here.
+    private final java.util.Map<String, Integer> weakBullDeferSinceHistorySize = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_WEAK_BULL_DEFER_DAYS = 2;
+
     public StrategyManager(BrokerClient client) {
         this(client, null, null);
     }
@@ -408,11 +416,26 @@ public final class StrategyManager {
                 // was confirmed directly via a 45-day/17-symbol walk-forward replay (0 Momentum
                 // trades, 100% MACD). Only applies to new entries (positionQty==0); MACD's
                 // bearish-crossover SELL path for an existing position is untouched.
+                // Bounded to MAX_WEAK_BULL_DEFER_DAYS trading days: a symbol that stays "close"
+                // without ever fully resolving would otherwise block MACD indefinitely with no
+                // compensating benefit — the grace period caps that downside.
                 if (positionQty == 0 && momentumStrategy.isCloseToWeakBullEntry(currentPrice, history)) {
-                    activeStrategy = "Momentum (Weak Bull, deferring MACD)";
-                    yield new TradingSignal.Hold("Momentum close to firing — deferring MACD fallback this cycle");
+                    int firstCloseSize = weakBullDeferSinceHistorySize.computeIfAbsent(symbol, k -> history.size());
+                    int daysDeferred = history.size() - firstCloseSize;
+                    if (daysDeferred < MAX_WEAK_BULL_DEFER_DAYS) {
+                        activeStrategy = "Momentum (Weak Bull, deferring MACD)";
+                        yield new TradingSignal.Hold(String.format(
+                            "Momentum close to firing — deferring MACD fallback (day %d/%d)",
+                            daysDeferred + 1, MAX_WEAK_BULL_DEFER_DAYS));
+                    }
+                    // Grace period exhausted — clear tracking (so a future "close" spell starts
+                    // fresh) and fall through to MACD below, same as not-close.
+                    weakBullDeferSinceHistorySize.remove(symbol);
+                } else {
+                    weakBullDeferSinceHistorySize.remove(symbol);
                 }
-                // Momentum said HOLD and isn't close — fall back to MACD in "sustained uptrend" mode.
+                // Momentum said HOLD and isn't close (or its grace period expired) — fall back
+                // to MACD in "sustained uptrend" mode.
                 // histogramThreshold=0.0 activates the sustainedUptrend check in MACDStrategy,
                 // which accepts an established positive MACD without requiring a growing histogram.
                 // In VIX=12 slow grinds, MACD crossed bullish days ago and the histogram plateaued;

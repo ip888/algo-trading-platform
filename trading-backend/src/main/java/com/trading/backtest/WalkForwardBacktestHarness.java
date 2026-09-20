@@ -136,12 +136,15 @@ public final class WalkForwardBacktestHarness {
         allSymbols.addAll(SECTOR_ETFS);
 
         // Bars per calendar day at each timeframe (6.5h regular session), with a safety margin.
-        int days = Math.max(minCalendarDays, 30);
-        int dailyLimit = Math.max(400, days + 60);
-        int oneMinLimit = Math.max(800, days * 390);
-        int fiveMinLimit = Math.max(1560, days * 78);
-        int fifteenMinLimit = Math.max(780, days * 26);
-        int oneHourLimit = Math.max(280, days * 7);
+        // Alpaca's bars API hard-caps `limit` at 10000 regardless of timeframe — 1Min bars hit
+        // that ceiling around 25 calendar days, so very long windows silently get whatever recent
+        // history fits under 10000 for 1Min while the coarser timeframes scale further.
+        int days = Math.max(minCalendarDays, 1);
+        int dailyLimit = Math.min(10_000, Math.max(400, days + 60));
+        int oneMinLimit = Math.min(10_000, Math.max(800, days * 390));
+        int fiveMinLimit = Math.min(10_000, Math.max(1560, days * 78));
+        int fifteenMinLimit = Math.min(10_000, Math.max(780, days * 26));
+        int oneHourLimit = Math.min(10_000, Math.max(280, days * 7));
 
         for (String symbol : allSymbols) {
             replayClient.loadBars(symbol, "1Day", cache.getOrFetch(liveClient, symbol, "1Day", dailyLimit));

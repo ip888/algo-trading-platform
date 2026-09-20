@@ -233,9 +233,38 @@ final class PositionSizer {
         if (riskPredictor != null) {
             try {
                 var now = LocalDateTime.now();
+                // BUG FIX (2026-09-20): symbolVolatility was hardcoded to 30.0 ("would need real
+                // data") — RiskPredictor.calculateSymbolVolatilityRisk() buckets this into 5/10/15/20
+                // points expecting a real annualized-% figure (its own comment: "typically 0-100
+                // annualized %"), so every symbol landed in the same 10-point bucket regardless of
+                // whether it's a calm ETF or a genuinely volatile stock — the exact same class of
+                // placeholder-feature bug found in the ML volume-ratio fix earlier this pass.
+                // Computes a real annualized volatility from recent daily closes (stdev of daily
+                // log returns × sqrt(252) × 100), falling back to the same 30.0 neutral estimate
+                // only if too little history is available to compute it.
+                double symbolVolatility = 30.0;
+                try {
+                    var volBars = client.getMarketHistory(symbol, 21);
+                    if (volBars.size() >= 10) {
+                        var returns = new java.util.ArrayList<Double>();
+                        for (int i = 1; i < volBars.size(); i++) {
+                            double prev = volBars.get(i - 1).close();
+                            double curr = volBars.get(i).close();
+                            if (prev > 0) returns.add(Math.log(curr / prev));
+                        }
+                        double mean = returns.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+                        double variance = returns.stream()
+                            .mapToDouble(r -> (r - mean) * (r - mean)).sum() / Math.max(1, returns.size() - 1);
+                        double dailyStdDev = Math.sqrt(variance);
+                        symbolVolatility = dailyStdDev * Math.sqrt(252) * 100.0;
+                    }
+                } catch (Exception ve) {
+                    logger.debug("{} {}: symbol volatility calc failed, using neutral 30.0: {}",
+                        profilePrefix, symbol, ve.getMessage());
+                }
                 var riskSetup = new com.trading.ai.RiskPredictor.TradingSetup(
                     currentVix,
-                    30.0, // symbol volatility (would need real data)
+                    symbolVolatility,
                     now.getHour(),
                     now.getDayOfWeek(),
                     portfolio.getActivePositionCount(),

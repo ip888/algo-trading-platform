@@ -537,35 +537,6 @@ public final class StrategyManager {
         return signal;
     }
 
-    /**
-     * Backward compatibility: evaluate with VolatilityState.
-     */
-    public TradingSignal evaluate(String symbol, double currentPrice, double positionQty, 
-                                 com.trading.filters.VolatilityFilter.VolatilityState volState) {
-        try {
-            var bars = client.getMarketHistory(symbol, 100);
-            var closes = bars.stream().map(Bar::close).toList();
-            
-            if (closes.size() < 50) {
-                logger.warn("Insufficient history: {} bars (need 50+)", closes.size());
-                return new TradingSignal.Hold("Insufficient history");
-            }
-            
-            // Convert VolatilityState to MarketRegime for backward compatibility
-            MarketRegime regime = switch (volState) {
-                case EXTREME -> MarketRegime.HIGH_VOLATILITY;
-                case HIGH -> MarketRegime.STRONG_BULL; // Assume trend in high vol
-                case NORMAL -> MarketRegime.RANGE_BOUND;
-            };
-            
-            return evaluateWithHistory(symbol, currentPrice, positionQty, closes, regime);
-            
-        } catch (Exception e) {
-            logger.error("Error evaluating strategy", e);
-            return new TradingSignal.Hold("Error: " + e.getMessage());
-        }
-    }
-
     public String getActiveStrategy() {
         return activeStrategy;
     }
@@ -685,9 +656,11 @@ public final class StrategyManager {
         long lastVolume = volumes.get(last);
         boolean confirming = lastVolume >= avgVolume * 0.70;
         if (!confirming) {
-            logger.debug("Low volume: last={} avg={} ratio={:.2f}",
+            // SLF4J uses "{}" placeholders, not Python-style "{:.2f}" — the old format string
+            // left the ratio argument unsubstituted (printed literally, value silently dropped).
+            logger.debug("Low volume: last={} avg={} ratio={}",
                 lastVolume, (long) avgVolume,
-                avgVolume > 0 ? lastVolume / avgVolume : 0.0);
+                String.format("%.2f", avgVolume > 0 ? lastVolume / avgVolume : 0.0));
         }
         return confirming;
     }

@@ -144,7 +144,7 @@ public class ScalpStrategy {
 
         if (rsiInWindow && rsiAbove50 && priceAboveVwap && volumeConfirmed && lastBarUp && !onCooldown) {
             int count = dailyScalpCount.incrementAndGet();
-            lastScalpEntryMs.put(symbol, System.currentTimeMillis());
+            lastScalpEntryMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
             String reason = String.format(
                 "Scalp: RSI %.1f in window [%.0f–%.0f], above VWAP $%.2f, vol %.1f× avg [%d/%d today]",
                 rsi, rsiBuyMin, rsiBuyMax, vwap, volumeRatio, count, config.getScalpMaxDailyTrades());
@@ -163,7 +163,7 @@ public class ScalpStrategy {
             boolean rsiBuilding = rsi >= 45.0 && rsi <= 65.0;
             if (vwapReclaim && rsiBuilding && lastBarUp) {
                 int count = dailyScalpCount.incrementAndGet();
-                lastScalpEntryMs.put(symbol, System.currentTimeMillis());
+                lastScalpEntryMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
                 String reason = String.format(
                     "Scalp VWAP reclaim: $%.2f crossed above VWAP $%.2f, RSI=%.1f, vol=%.1f× [%d/%d today]",
                     currentPrice, vwap, rsi, volumeRatio, count, config.getScalpMaxDailyTrades());
@@ -256,15 +256,25 @@ public class ScalpStrategy {
     /** Visible for testing — injects a fixed clock so time-window checks are deterministic. */
     void setNowSupplier(Supplier<ZonedDateTime> supplier) { this.nowSupplier = supplier; }
 
+    /**
+     * BUG FIX (2026-09-20): this and cooldownMinutesLeft() used real System.currentTimeMillis()
+     * instead of nowSupplier, unlike every other time check in this class. Harmless live (the
+     * default nowSupplier IS the real clock), but broke backtesting: a fast walk-forward replay
+     * compresses many simulated days into real seconds, so real elapsed time between two
+     * simulated entries is ~0 — every symbol looked permanently "on cooldown" after its first
+     * scalp entry for the rest of any backtest run. Confirmed empirically: identical backtest
+     * requests returned different scalp trade counts run-to-run purely from real-time drift.
+     */
     private boolean isOnCooldown(String symbol) {
         Long last = lastScalpEntryMs.get(symbol);
-        return last != null && (System.currentTimeMillis() - last) < SYMBOL_COOLDOWN_MS;
+        long now = nowSupplier.get().toInstant().toEpochMilli();
+        return last != null && (now - last) < SYMBOL_COOLDOWN_MS;
     }
 
     private double cooldownMinutesLeft(String symbol) {
         Long last = lastScalpEntryMs.get(symbol);
         if (last == null) return 0.0;
-        long elapsedMs = System.currentTimeMillis() - last;
+        long elapsedMs = nowSupplier.get().toInstant().toEpochMilli() - last;
         return Math.max(0.0, (SYMBOL_COOLDOWN_MS - elapsedMs) / 60_000.0);
     }
 
@@ -282,4 +292,19 @@ public class ScalpStrategy {
 
     /** Visible for testing — inject a last-entry timestamp to simulate an active cooldown. */
     static void setCooldown(String symbol, long epochMs) { lastScalpEntryMs.put(symbol, epochMs); }
+
+    /**
+     * Clears ALL static state (daily count, every symbol's cooldown). dailyScalpCount/
+     * lastScalpEntryMs/lastCounterDate are static by design for live trading (shared across
+     * every ScalpStrategy instance in the process, matching the single-Alpaca-instance
+     * deployment), but that means separate backtest runs in the same JVM otherwise leak state
+     * into each other — a scalp entry recorded in one walk-forward request could artificially
+     * cooldown-block a symbol in a completely unrelated later request. Call this before each
+     * isolated backtest run. No effect on live trading (never called from the live path).
+     */
+    public static void resetStaticStateForBacktest() {
+        dailyScalpCount.set(0);
+        lastCounterDate = null;
+        lastScalpEntryMs.clear();
+    }
 }

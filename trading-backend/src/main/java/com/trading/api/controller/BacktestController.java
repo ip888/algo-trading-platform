@@ -58,6 +58,7 @@ public final class BacktestController {
                 return;
             }
 
+            com.trading.strategy.ScalpStrategy.resetStaticStateForBacktest();
             var config = new Config();
             overrideProperty(config, "SCALP_STRATEGY_ENABLED", "true");
             for (var key : new String[]{"SCALP_RSI_MIN", "SCALP_RSI_MAX", "SCALP_VOLUME_MULTIPLIER",

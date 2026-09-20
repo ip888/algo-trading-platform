@@ -907,7 +907,22 @@ final class ExitEvaluator {
                 checkBreakevenStop(profilePrefix, symbol, entryPrice, pnlPercent, qty);
 
                 // ========== PHASE 2 EXIT STRATEGIES ==========
-                // Create temporary position for Phase 2 exit evaluation
+                // Create temporary position for Phase 2 exit evaluation.
+                // BUG FIX (2026-09-20): entryTime used to be hardcoded to "now minus 6 hours" for
+                // every position regardless of how long it was actually held. evaluateEODProfitLock()
+                // directly gates on holdTime.toHours() < minHours (default 4) — a constant 6h input
+                // means that check always evaluates the same way regardless of the real position,
+                // silently defeating its own per-position hold-time logic. Use the tracked position's
+                // real entryTime when available (this profile's own portfolio); only fall back to an
+                // estimate — logged, not silent — when the position is untracked here (e.g. owned by
+                // a different profile check elsewhere), since no real entry time exists to read.
+                Instant tempEntryTime = portfolio.getPosition(symbol)
+                    .map(TradePosition::entryTime)
+                    .orElseGet(() -> {
+                        logger.debug("{} {}: no tracked entryTime for EOD profit-lock check — estimating 6h held",
+                            profilePrefix, symbol);
+                        return Instant.now().minus(Duration.ofHours(6));
+                    });
                 var riskManager = new RiskManager(latestEquity.getAsDouble() > 0 ? latestEquity.getAsDouble() : capital);
                 var tempPosition = new TradePosition(
                     symbol,
@@ -915,7 +930,7 @@ final class ExitEvaluator {
                     qty,
                     riskManager.calculateStopLoss(entryPrice),
                     riskManager.calculateTakeProfit(entryPrice),
-                    Instant.now().minus(Duration.ofHours(6)) // Assume held 6 hours
+                    tempEntryTime
                 );
 
                 // Check EOD Profit Lock (Feature #23)

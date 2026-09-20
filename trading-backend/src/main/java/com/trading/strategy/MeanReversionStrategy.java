@@ -1,6 +1,5 @@
 package com.trading.strategy;
 
-import com.trading.api.model.Bar;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -385,10 +385,14 @@ class ScalpStrategyTest {
     @DisplayName("volumeRatio: lastBar / 20-bar avg (excluding last), forming bar skipped")
     void volumeRatio_correctFormula() throws Exception {
         var s = realStrategy();
-        // Use timestamps well in the past so neither bar is treated as forming.
-        // bar0: 2h ago (1 000 vol avg), bar1: 1h ago (2 000 vol → ratio 2.0)
-        Instant t0 = Instant.now().minusSeconds(7200);
-        Instant t1 = Instant.now().minusSeconds(3600);
+        // Use timestamps well in the past relative to realStrategy()'s injected clock (fixedNow,
+        // 10:00 AM), not real wall-clock time — volumeRatio() checks bar-completeness against
+        // the injected clock (fixed 2026-09-20, matching every other time check in the class),
+        // so timestamps built from the real Instant.now() would be validated against a
+        // different, unrelated point in time and get misclassified as still-forming.
+        // bar0: 2h before fixedNow (1 000 vol avg), bar1: 1h before fixedNow (2 000 vol → ratio 2.0)
+        Instant t0 = fixedNow.toInstant().minusSeconds(7200);
+        Instant t1 = fixedNow.toInstant().minusSeconds(3600);
         var bars = List.of(
             new Bar(t0, 100.0, 101.0, 99.0, 100.0, 1_000L),
             new Bar(t1, 101.0, 102.0, 100.0, 101.0, 2_000L)

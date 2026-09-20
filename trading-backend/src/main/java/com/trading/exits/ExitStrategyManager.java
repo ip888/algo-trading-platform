@@ -224,9 +224,12 @@ public class ExitStrategyManager {
 
         // Level 1 trigger price = entry + 25% of (TP - entry)
         double level1Price = position.entryPrice() + PARTIAL_EXIT_LEVEL_1 * (position.takeProfit() - position.entryPrice());
-        logger.debug("{}: partial-exit progress={:.1f}% (price=${} L1-trigger=${} exits=[{},{},{}])",
+        // SLF4J only supports "{}" placeholders, not Python-style "{:.1f}" — the old format
+        // string was silently misaligned: every value after the fake token shifted one slot
+        // left, and the third hasPartialExit() argument was dropped entirely.
+        logger.debug("{}: partial-exit progress={}% (price=${} L1-trigger=${} exits=[{},{},{}])",
             position.symbol(),
-            progressToTarget * 100,
+            String.format("%.1f", progressToTarget * 100),
             String.format("%.2f", currentPrice),
             String.format("%.2f", level1Price),
             position.hasPartialExit(1), position.hasPartialExit(2), position.hasPartialExit(3));

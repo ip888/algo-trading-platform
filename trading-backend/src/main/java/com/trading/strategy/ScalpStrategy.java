@@ -17,7 +17,8 @@ import java.util.function.Supplier;
  * Intraday scalp strategy using 15-minute bars.
  *
  * Entry conditions (all must be true):
- *   1. Time window: 9:45–11:30 AM ET (morning momentum) or 14:00–15:00 ET (afternoon momentum)
+ *   1. Time window: 9:45-11:30 AM ET (morning), 11:30 AM-1:00 PM ET (midday), or
+ *      2:00-3:00 PM ET (afternoon) — see isInScalpWindow() for the exact boundaries
  *   2. RSI in range [rsiBuyMin, rsiBuyMax] (default 40–62) AND RSI ≥ 50 (bullish bias)
  *   3. Current price ≥ VWAP (calculated from all intraday bars so far today)
  *   4. Last bar's volume ≥ volumeMultiplier × 20-bar average (institutional confirmation)
@@ -214,7 +215,10 @@ public class ScalpStrategy {
         // Comparing incomplete volume to settled bars gives a misleadingly high ratio.
         Bar lastBar = bars.get(last);
         java.time.Instant barEnd = lastBar.timestamp().plusSeconds(15 * 60);
-        if (barEnd.isAfter(java.time.Instant.now())) {
+        // Use the injected clock (nowSupplier), not the real wall clock — matches every other
+        // time check in this class and keeps this correct under WalkForwardBacktestHarness replay,
+        // which calls setNowSupplier() but would otherwise never affect this specific check.
+        if (barEnd.isAfter(nowSupplier.get().toInstant())) {
             last--;
         }
         if (last < 1) return 0.0;

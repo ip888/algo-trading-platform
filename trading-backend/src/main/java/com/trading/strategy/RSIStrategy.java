@@ -10,6 +10,15 @@ import java.util.List;
  * Standard Mean Reversion strategy:
  * - Buy when RSI < 30 (Oversold)
  * - Sell when RSI > 70 (Overbought)
+ *
+ * <p><b>Not wired into StrategyManager's regime routing</b> (verified 2026-09-20: zero
+ * {@code new RSIStrategy(...)} call sites in main source) — this class's own buy/sell logic
+ * never runs live. What IS live and load-bearing is the static {@link #calculateRSI(List, int)}
+ * utility below, called directly by {@code MomentumStrategy} and {@code StrategyManager} (RSI
+ * filters/gates on other strategies' signals). Kept as-is rather than removed: it's correctly
+ * implemented and has its own test coverage (RSIStrategyTest), just not a wired-in strategy —
+ * if you're looking for where live RSI filtering happens, check StrategyManager.rsiFilteredBuy()
+ * and the various regime-branch RSI gates instead.
  */
 public final class RSIStrategy implements TradingStrategy {
     private static final Logger logger = LoggerFactory.getLogger(RSIStrategy.class);

@@ -80,9 +80,11 @@ public class OpeningRangeBreakoutStrategy {
         // SELL: holding position and ORB structure fails (price breaks range low)
         if (positionQty > 0 && level != null && level.date().equals(today)) {
             if (currentPrice < level.breakdownBelow()) {
-                logger.info("ORB {} SELL — structure failed, price ${} below range low ${} (range was {:.1f}%)",
+                // SLF4J only supports "{}" placeholders, not Python-style "{:.1f}" — the old
+                // format string left rangeWidth() unsubstituted (printed literally, value dropped).
+                logger.info("ORB {} SELL — structure failed, price ${} below range low ${} (range was {}%)",
                     symbol, String.format("%.2f", currentPrice),
-                    String.format("%.2f", level.low()), level.rangeWidth());
+                    String.format("%.2f", level.low()), String.format("%.1f", level.rangeWidth()));
                 return new TradingSignal.Sell(
                     String.format("ORB structure failed — below range low $%.2f", level.low()));
             }
@@ -100,11 +102,11 @@ public class OpeningRangeBreakoutStrategy {
                 return new TradingSignal.Hold("ORB not yet computed for " + symbol);
             }
             levels.put(symbol, level);
-            logger.info("ORB {} range: low=${} high=${} width={:.2f}%",
+            logger.info("ORB {} range: low=${} high=${} width={}%",
                 symbol,
                 String.format("%.2f", level.low()),
                 String.format("%.2f", level.high()),
-                level.rangeWidth());
+                String.format("%.2f", level.rangeWidth()));
         }
 
         // BUY: price clears ORB high (with buffer), no existing position

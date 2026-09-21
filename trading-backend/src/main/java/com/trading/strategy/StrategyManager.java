@@ -718,6 +718,11 @@ public final class StrategyManager {
         return currentRegime.toString();
     }
 
+    /** Consume a scalp daily slot + start the symbol cooldown once a ScalpBuy was really executed. */
+    public void commitScalpEntry(String symbol) {
+        if (scalpStrategy != null) scalpStrategy.commitEntry(symbol);
+    }
+
     /**
      * Lightweight scalp-only evaluation — calls ScalpStrategy directly, skipping MTF/regime analysis.
      * Used by the scalp-priority scan in ProfileManager to check high-liquidity symbols every cycle.

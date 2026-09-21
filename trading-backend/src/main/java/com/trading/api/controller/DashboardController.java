@@ -91,6 +91,8 @@ public final class DashboardController {
             ctx.queryParamAsClass("days", Integer.class).getOrDefault(1),
             ctx.queryParamAsClass("limit", Integer.class).getOrDefault(1000))));
         
+        app.get("/api/reconciliation/daily", this::getDailyReconciliation);
+
         // Market analysis endpoints
         app.get("/api/market/analysis", this::getMarketAnalysis);
         app.get("/api/market/status", this::getMarketStatus);
@@ -688,6 +690,43 @@ public final class DashboardController {
         }
     }
     
+    /**
+     * Broker-truth reconciliation: today's Alpaca equity change vs the P&L the bot's own DB booked
+     * for trades closed today. The two only match cleanly when the account is flat (open positions
+     * carry unrealized P&L in equity but not in the DB), so {@code openPositions} is returned to
+     * qualify the gap. A persistent gap while flat means the DB's fills/entry/exit prices are
+     * off — this is the standing check that replaced hand-joining orders/history against the trades
+     * export in the 2026-09-21 review.
+     */
+    private void getDailyReconciliation(Context ctx) {
+        try {
+            var client = cachedAlpacaClient;
+            var account = client.getAccount();
+            double equity = account.get("equity").asDouble();
+            double lastEquity = account.has("last_equity") ? account.get("last_equity").asDouble() : equity;
+            double brokerDelta = equity - lastEquity;
+            double dbClosed = database.getTodayPnL();
+            int openPositions = client.getPositions().size();
+            double gap = dbClosed - brokerDelta;
+
+            var out = new HashMap<String, Object>();
+            out.put("brokerEquityDelta", Math.round(brokerDelta * 100.0) / 100.0);
+            out.put("dbClosedPnL", Math.round(dbClosed * 100.0) / 100.0);
+            out.put("gap", Math.round(gap * 100.0) / 100.0);
+            out.put("openPositions", openPositions);
+            out.put("comparable", openPositions == 0);
+            out.put("equity", equity);
+            out.put("lastEquity", lastEquity);
+            logger.info("[PNL_RECON] brokerDelta={} dbClosed={} gap={} openPositions={}",
+                String.format("%.2f", brokerDelta), String.format("%.2f", dbClosed),
+                String.format("%.2f", gap), openPositions);
+            ctx.json(out);
+        } catch (Exception e) {
+            logger.error("Daily reconciliation failed", e);
+            ctx.status(500).json(Map.of("error", "Reconciliation failed: " + e.getMessage()));
+        }
+    }
+
     /**
      * Get account data for UI (includes Phase 2 capital reserve info).
      */

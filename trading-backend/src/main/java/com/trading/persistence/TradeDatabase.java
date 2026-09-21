@@ -93,6 +93,14 @@ public class TradeDatabase {
         runMigration("ALTER TABLE trades ADD COLUMN partial_exits_executed INTEGER DEFAULT 0",
             "Schema migration: Added 'partial_exits_executed' column (bitmask of partial-exit levels fired)");
 
+        // Partial-exit proceeds. closeTrade() used to price the WHOLE original lot at the final exit
+        // price, so a trade that scaled out (or ran a "winner runner" half) was booked as if every
+        // share sold at the last price — the 2026-09-21 review measured DB +$4.84 vs broker +$2.35.
+        runMigration("ALTER TABLE trades ADD COLUMN partial_qty_sold REAL DEFAULT 0",
+            "Schema migration: Added 'partial_qty_sold' column (shares already sold via partial exits)");
+        runMigration("ALTER TABLE trades ADD COLUMN partial_pnl REAL DEFAULT 0",
+            "Schema migration: Added 'partial_pnl' column (realized P&L of partial exits)");
+
         // Market-context columns recorded at entry — enables regime-conditioned win-rate analysis.
         runMigration("ALTER TABLE trades ADD COLUMN regime TEXT",
             "Schema migration: Added 'regime' column (market regime at entry time)");
@@ -469,6 +477,57 @@ public class TradeDatabase {
     }
 
     /**
+     * Record the realized proceeds of a partial exit on the open lot so closeTrade() can price only
+     * the REMAINING shares at the final exit and add these proceeds on top.
+     */
+    public void recordPartialExitFill(String symbol, String broker, double qtySold, double exitPrice) {
+        String sql = """
+            UPDATE trades
+               SET partial_qty_sold = COALESCE(partial_qty_sold, 0) + ?,
+                   partial_pnl      = COALESCE(partial_pnl, 0) + (? - entry_price) * ?
+             WHERE id = (SELECT id FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN'
+                         ORDER BY entry_time DESC LIMIT 1)
+            """;
+        long stamp = lock.writeLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setDouble(1, qtySold);
+            stmt.setDouble(2, exitPrice);
+            stmt.setDouble(3, qtySold);
+            stmt.setString(4, symbol);
+            stmt.setString(5, broker);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            logger.error("recordPartialExitFill failed for {} ({}): {}", symbol, broker, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /**
+     * Re-anchor the open lot's entry price to the broker's actual average fill. The bot records the
+     * decision-time quote at entry; the real market-order fill differs by slippage, and every P&L
+     * figure derived from entry_price inherited that error.
+     */
+    public void updateEntryPrice(String symbol, String broker, double fillPrice) {
+        String sql = """
+            UPDATE trades SET entry_price = ?
+            WHERE id = (SELECT id FROM trades WHERE symbol = ? AND broker = ? AND status = 'OPEN'
+                        ORDER BY entry_time DESC LIMIT 1)
+            """;
+        long stamp = lock.writeLock();
+        try (var stmt = connection.prepareStatement(sql)) {
+            stmt.setDouble(1, fillPrice);
+            stmt.setString(2, symbol);
+            stmt.setString(3, broker);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            logger.error("updateEntryPrice failed for {} ({}): {}", symbol, broker, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /**
      * Persist the partial-exit bitmask so a restart doesn't re-fire already-executed scale-outs.
      */
     public void updatePartialExits(String symbol, String broker, int partialExitsExecuted) {
@@ -598,9 +657,15 @@ public class TradeDatabase {
      * is therefore redundant but kept for signature stability.
      */
     public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl, String broker) {
-        record Lot(int id, double entryPrice, double quantity) {}
+        record Lot(int id, double entryPrice, double quantity, double partialQtySold, double partialPnl) {
+            /** Final-exit P&L: only the shares still held, plus proceeds already banked by partial exits. */
+            double pnlAt(double exitPrice) {
+                return (exitPrice - entryPrice) * Math.max(0.0, quantity - partialQtySold) + partialPnl;
+            }
+        }
 
-        String selectSql = "SELECT id, entry_price, quantity FROM trades " +
+        String selectSql = "SELECT id, entry_price, quantity, COALESCE(partial_qty_sold, 0) AS pqs, " +
+                           "COALESCE(partial_pnl, 0) AS ppnl FROM trades " +
                            "WHERE symbol = ? AND broker = ? AND status = 'OPEN'";
         String updateSql = "UPDATE trades SET exit_time = ?, exit_price = ?, pnl = ?, status = 'CLOSED' WHERE id = ?";
 
@@ -612,7 +677,8 @@ public class TradeDatabase {
                 sel.setString(2, broker);
                 try (var rs = sel.executeQuery()) {
                     while (rs.next()) {
-                        lots.add(new Lot(rs.getInt("id"), rs.getDouble("entry_price"), rs.getDouble("quantity")));
+                        lots.add(new Lot(rs.getInt("id"), rs.getDouble("entry_price"), rs.getDouble("quantity"),
+                                rs.getDouble("pqs"), rs.getDouble("ppnl")));
                     }
                 }
             }
@@ -625,7 +691,7 @@ public class TradeDatabase {
             double totalPnl = 0.0;
             try (var upd = connection.prepareStatement(updateSql)) {
                 for (Lot lot : lots) {
-                    double lotPnl = (exitPrice - lot.entryPrice()) * lot.quantity();
+                    double lotPnl = lot.pnlAt(exitPrice);
                     totalPnl += lotPnl;
                     upd.setString(1, exitTime.toString());
                     upd.setDouble(2, exitPrice);
@@ -1326,8 +1392,14 @@ public class TradeDatabase {
      */
     public void closeTrade(String symbol, Instant exitTime, double exitPrice, double pnl,
                            String broker, String exitReason) {
-        record Lot(int id, double entryPrice, double quantity) {}
-        String selectSql = "SELECT id, entry_price, quantity FROM trades " +
+        record Lot(int id, double entryPrice, double quantity, double partialQtySold, double partialPnl) {
+            /** Final-exit P&L: only the shares still held, plus proceeds already banked by partial exits. */
+            double pnlAt(double exitPrice) {
+                return (exitPrice - entryPrice) * Math.max(0.0, quantity - partialQtySold) + partialPnl;
+            }
+        }
+        String selectSql = "SELECT id, entry_price, quantity, COALESCE(partial_qty_sold, 0) AS pqs, " +
+                           "COALESCE(partial_pnl, 0) AS ppnl FROM trades " +
                            "WHERE symbol = ? AND broker = ? AND status = 'OPEN'";
         String updateSql = "UPDATE trades SET exit_time = ?, exit_price = ?, pnl = ?, " +
                            "status = 'CLOSED', exit_reason = ? WHERE id = ?";
@@ -1339,7 +1411,8 @@ public class TradeDatabase {
                 sel.setString(2, broker);
                 try (var rs = sel.executeQuery()) {
                     while (rs.next()) {
-                        lots.add(new Lot(rs.getInt("id"), rs.getDouble("entry_price"), rs.getDouble("quantity")));
+                        lots.add(new Lot(rs.getInt("id"), rs.getDouble("entry_price"), rs.getDouble("quantity"),
+                                rs.getDouble("pqs"), rs.getDouble("ppnl")));
                     }
                 }
             }
@@ -1349,7 +1422,7 @@ public class TradeDatabase {
             }
             try (var upd = connection.prepareStatement(updateSql)) {
                 for (Lot lot : lots) {
-                    double lotPnl = (exitPrice - lot.entryPrice()) * lot.quantity();
+                    double lotPnl = lot.pnlAt(exitPrice);
                     upd.setString(1, exitTime.toString());
                     upd.setDouble(2, exitPrice);
                     upd.setDouble(3, lotPnl);

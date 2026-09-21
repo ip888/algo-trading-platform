@@ -152,6 +152,7 @@ final class ExitEvaluator {
         riskGate.scalpHeldSymbols().remove(symbol);
         trailingTargetManager.removePosition(symbol);
         breakevenStopsActive.remove(symbol);
+        entryAnchored.remove(symbol);
         database.deleteBotState("trailing:" + symbol + ":" + brokerName);
     }
 
@@ -183,6 +184,101 @@ final class ExitEvaluator {
             profilePrefix, symbol, cooldownMs / 60000, exitKind, String.format("%.2f", pnl));
     }
 
+    /** Symbols whose tracked/DB entry price has already been re-anchored to the broker fill. */
+    private final java.util.Set<String> entryAnchored = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Align the tracked position and its DB row with the broker's actual average entry price.
+     *
+     * handleBuy records the DECISION-time quote as entry; the market order then fills at a
+     * slightly different price, and every downstream P&L (DB, dashboard, partial-level progress)
+     * inherited that error. Stop and take-profit prices are deliberately left where they are: the
+     * native broker stop is already resting at that absolute level, and moving the bot's copy
+     * without also replacing the broker order would make the two disagree.
+     *
+     * Runs once per symbol (cleared by clearPositionTracking) and only for a meaningful difference
+     * (>0.01%) that still leaves take-profit above the new entry (a TradePosition invariant).
+     */
+    TradePosition anchorEntryToFill(String profilePrefix, String symbol, TradePosition position, double fillPrice) {
+        if (fillPrice <= 0 || entryAnchored.contains(symbol)) return position;
+        double diffPct = Math.abs(fillPrice - position.entryPrice()) / position.entryPrice() * 100.0;
+        if (diffPct <= 0.01 || position.takeProfit() <= fillPrice) {
+            entryAnchored.add(symbol);
+            return position;
+        }
+        var anchored = new TradePosition(symbol, fillPrice, position.quantity(), position.stopLoss(),
+            position.takeProfit(), position.entryTime(), Math.max(position.highestPrice(), fillPrice),
+            position.partialExitsExecuted());
+        portfolio.setPosition(symbol, Optional.of(anchored));
+        database.updateEntryPrice(symbol, brokerName, fillPrice);
+        entryAnchored.add(symbol);
+        logger.info("{} {}: entry re-anchored to broker fill ${} (decision-time quote was ${}, slippage {}%)",
+            profilePrefix, symbol, String.format("%.2f", fillPrice),
+            String.format("%.2f", position.entryPrice()), String.format("%.3f", diffPct));
+        return anchored;
+    }
+
+    /**
+     * Re-arm broker-side protection for the shares that remain after a PARTIAL exit.
+     *
+     * Every partial-exit path first calls {@link #cancelExistingOrders} (it must, to free the shares
+     * being sold), which also cancels the position's native stop. Before 2026-09-22 nothing placed a
+     * new one, so a runner/partial position sat with NO broker-side stop until the next trailing
+     * update or breakeven trigger — the 2026-09-21 review measured all 6 partial exits that day
+     * unprotected for 17–60+ min (and, because the exit also armed pendingExitOrders, the bot's own
+     * polling skipped the symbol too). Placing the stop for only the REMAINING quantity is safe even
+     * while the partial market sell is still settling: Alpaca reserves the pending sell's shares and
+     * this order needs only the rest.
+     *
+     * @param stopPrice the stop to protect the remainder with (already-locked level for a runner,
+     *                  the tracked stop otherwise); clamped below the market so Alpaca never sees a
+     *                  sell-stop above the current price.
+     */
+    void placeStopForRemainder(String profilePrefix, String symbol, double remainingQty,
+                               double stopPrice, double currentPrice) {
+        if (testSimulator != null) return;
+        if (remainingQty <= 0 || remainingQty * currentPrice < 1.0) {
+            logger.debug("{} {}: no stop needed for remainder {} (dust/none)", profilePrefix, symbol, remainingQty);
+            return;
+        }
+        double stop = Math.min(stopPrice, currentPrice - 0.01);
+        try {
+            client.placeNativeStopOrder(symbol, remainingQty, stop);
+            logger.info("{} {}: ✅ Native stop re-armed for remaining {} shares @ ${} after partial exit",
+                profilePrefix, symbol, String.format("%.4f", remainingQty), String.format("%.2f", stop));
+        } catch (Exception e) {
+            // Same loud signal as the entry path: a position with no broker-side stop is only
+            // protected by the 20s polling loop.
+            logger.error("{} {}: 🚨 NATIVE STOP FAILED after partial exit ({}). Remainder protected ONLY by client-side polling.",
+                profilePrefix, symbol, e.getMessage());
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] 🚨 BROKER STOP FAILED after partial exit: %s — only client-side stop active.",
+                    profile.name(), symbol), "ERROR");
+        }
+    }
+
+    /**
+     * Quantity a signal-sell should actually send: the tracked quantity capped by what the broker
+     * really holds. TradePosition.quantity() is the ORIGINAL size and is never reduced by partial
+     * exits, so selling it verbatim after a partial would ask Alpaca for more shares than exist.
+     * Falls back to the tracked quantity when the broker position cannot be read.
+     */
+    double sellableQuantity(String symbol, double trackedQty) {
+        try {
+            var positions = client.getPositions();
+            if (positions != null) {
+                for (var p : positions) {
+                    if (symbol.equals(p.symbol()) && Math.abs(p.quantity()) > 0) {
+                        return Math.min(trackedQty, Math.abs(p.quantity()));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Could not read live qty for {} ({}); using tracked qty", symbol, e.getMessage());
+        }
+        return trackedQty;
+    }
+
     void handleSell(String symbol, double currentPrice, TradePosition position,
                      String profilePrefix) throws Exception {
 
@@ -196,6 +292,7 @@ final class ExitEvaluator {
         if (testSimulator == null) {
             // Cancel existing orders to free up held shares
             cancelExistingOrders("[" + profile.name() + "]", symbol);
+            double sellQty = sellableQuantity(symbol, position.quantity());
 
             // Determine optimal order type for signal-based exit
             // BUG FIX (2026-09-20): the 10-arg constructor below defaults qty to 0.0, so Rule 6b's
@@ -207,10 +304,10 @@ final class ExitEvaluator {
             // to MARKET instead of a limit order that can sit unfilled.
             var orderCtx = new OrderContext(
                 symbol, "sell", currentPrice, latestEquity.getAsDouble(), latestVix.getAsDouble(), latestRegime.get(),
-                profile.strategyType(), true, false, false, position.quantity()
+                profile.strategyType(), true, false, false, sellQty
             );
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
-            client.placeOrder(symbol, position.quantity(), "sell",
+            client.placeOrder(symbol, sellQty, "sell",
                 orderDecision.orderType(), orderDecision.timeInForce(), orderDecision.limitPrice());
         }
 
@@ -401,6 +498,9 @@ final class ExitEvaluator {
                 if (trackedPos.isPresent()) {
                     TradePosition position = trackedPos.get();
 
+                    // One-time re-anchor of the tracked/DB entry price to the broker's real average fill.
+                    position = anchorEntryToFill(profilePrefix, symbol, position, entryPrice);
+
                     // Calculate current volatility (simplified - using price movement)
                     double volatility = Math.abs(currentPrice - entryPrice) / entryPrice;
 
@@ -473,6 +573,7 @@ final class ExitEvaluator {
                             client.placeOrderDirect(symbol, halfQty, "sell", "market", "day", null);
                             double runnerPnl = (currentPrice - entryPrice) * halfQty;
                             updateDailyPnLFn.accept(profilePrefix, runnerPnl);
+                            database.recordPartialExitFill(symbol, brokerName, halfQty, currentPrice);
                             // Mark all partial levels done (1-3 are superseded; 4 = runner guard)
                             // and raise TP to 1.5× original so the runner half can run further
                             var marked = position.markPartialExit(1).markPartialExit(2)
@@ -497,7 +598,10 @@ final class ExitEvaluator {
                             TradingWebSocketHandler.broadcastActivity(
                                 String.format("[%s] 🏃 RUNNER TP: %s — half sold at $%.2f, runner stop locked at $%.2f (+%.2f%%)",
                                     profile.name(), symbol, currentPrice, lockedStop, lockedPnlPct), "INFO");
-                            riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            // Re-arm the broker stop for the remaining half at the locked level, and do NOT
+                            // arm pendingExitOrders: this is a partial exit, the position is still live and
+                            // must keep being monitored (pending suspends all risk checks for ~20 min).
+                            placeStopForRemainder(profilePrefix, symbol, qty - halfQty, lockedStop, currentPrice);
                             continue;
                         } catch (Exception e) {
                             logger.error("{} Runner TP failed for {}: {}", profilePrefix, symbol, e.getMessage());
@@ -571,8 +675,12 @@ final class ExitEvaluator {
                     if (exitDecision.type() != ExitStrategyManager.ExitType.NONE) {
                         // Use live broker qty for full exits to prevent "insufficient qty" errors
                         // when internal tracker has drifted from actual broker position.
+                        // Partial sizes are documented as "1/3, then 1/2 of REMAINING, then 1/2 of
+                        // remaining" — so take the fraction of the LIVE quantity. The old
+                        // position.quantity() * fraction used the original size, making the third
+                        // partial ask for more shares than were left (rejected → queued for retry).
                         double qtyToExit = exitDecision.isPartial()
-                            ? position.quantity() * exitDecision.quantity()  // partial: fraction of internal
+                            ? Math.min(qty, qty * exitDecision.quantity())
                             : qty;  // full exit: always use live broker qty
 
                         logger.info("{} 🎯 ENHANCED EXIT: {} - {}",
@@ -586,12 +694,19 @@ final class ExitEvaluator {
                             if (exitDecision.isPartial()) {
                                 logger.info("{} ✅ Partial exit executed: {} ({}% of position)",
                                     profilePrefix, symbol, String.format("%.1f", exitDecision.quantity() * 100));
+                                // Bank the proceeds on the DB lot so closeTrade() prices only the remainder.
+                                database.recordPartialExitFill(symbol, brokerName, qtyToExit, currentPrice);
+                                updateDailyPnLFn.accept(profilePrefix, (currentPrice - entryPrice) * qtyToExit);
                                 // Mark the partial exit level so it won't re-trigger next cycle
                                 if (exitDecision.partialLevel() > 0) {
                                     var marked = position.markPartialExit(exitDecision.partialLevel());
                                     portfolio.setPosition(symbol, Optional.of(marked));
                                     database.updatePartialExits(symbol, brokerName, marked.partialExitsExecuted());
                                 }
+                                // The cancel above removed the native stop — re-arm it for what is left.
+                                double protectStop = breakevenStopsActive.contains(symbol)
+                                    ? Math.max(position.stopLoss(), entryPrice) : position.stopLoss();
+                                placeStopForRemainder(profilePrefix, symbol, qty - qtyToExit, protectStop, currentPrice);
                             } else {
                                 logger.info("{} ✅ Full exit executed: {}", profilePrefix, symbol);
                                 double tradePnl = (currentPrice - entryPrice) * qty;
@@ -627,8 +742,12 @@ final class ExitEvaluator {
                                 exitDecision.isPartial() ? "INFO" : "WARN"
                             );
 
-                            // Mark as pending to prevent duplicate sells in this and future cycles
-                            riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            // Mark FULL exits as pending to prevent duplicate sells in this and future
+                            // cycles. Partial exits must not: the remainder is still an open position
+                            // that needs its stop/target checks every cycle.
+                            if (!exitDecision.isPartial()) {
+                                riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
+                            }
                             continue;
                         } catch (PDTRejectedException e) {
                             riskGate.setStaticPdtBlockedUntil(System.currentTimeMillis() + millisUntilMarketClose());

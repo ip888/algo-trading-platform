@@ -277,6 +277,10 @@ public final class WalkForwardBacktestHarness {
         openPositions.put(symbol, position);
         openPositionStrategy.put(symbol, strategyLabel);
         equity -= shares * price;
+        // Same commit-on-execution contract as live: only a really-opened scalp consumes a daily slot.
+        if (signal instanceof TradingSignal.ScalpBuy) {
+            strategyManager.commitScalpEntry(symbol);
+        }
     }
 
     private void checkExit(String symbol, double price, Instant t) {

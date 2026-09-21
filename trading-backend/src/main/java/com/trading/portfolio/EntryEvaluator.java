@@ -119,6 +119,19 @@ final class EntryEvaluator {
      */
     Result evaluate(String symbol, double currentPrice, double equity, double currentVix,
                      MarketRegime regime, Double[] scalpOverrides, String profilePrefix) {
+        Result result = evaluateGates(symbol, currentPrice, equity, currentVix, regime, scalpOverrides, profilePrefix);
+        // Only ~8 of the ~19 gates below call blockBuy() themselves; the rest just returned
+        // Blocked, so the blocked-entries table and dashboard panel silently missed most
+        // rejections (roadmap gap tracked since 2026-08-31). Record any Blocked that a gate did
+        // not already record, here, at the single exit point.
+        if (result instanceof Blocked blocked) {
+            blockBuy(symbol, blocked.reason(), currentPrice, regime, currentVix);
+        }
+        return result;
+    }
+
+    private Result evaluateGates(String symbol, double currentPrice, double equity, double currentVix,
+                     MarketRegime regime, Double[] scalpOverrides, String profilePrefix) {
 
         // ========== CROSS-PROFILE POSITION EXCLUSION ==========
         // If another profile (MAIN vs EXPERIMENTAL) already holds this symbol, skip.
@@ -817,11 +830,29 @@ final class EntryEvaluator {
      */
     private void blockBuy(String symbol, String reason, double price, MarketRegime regime, double vix) {
         riskGate.blockedBuys().put(symbol, reason);
+        // Dedupe the log line + DB row: every symbol is re-evaluated every 10-20s cycle, so a
+        // standing block (cooldown, max positions, stagger...) would otherwise write thousands of
+        // identical rows a day. Digits are normalised so "42 min remaining" / "41 min remaining"
+        // count as the same block.
+        String key = symbol + "|" + reason.replaceAll("\\d+(\\.\\d+)?", "#");
+        long now = System.currentTimeMillis();
+        Long last = recentBlockPersist.get(key);
+        if (last != null && now - last < BLOCK_PERSIST_DEDUPE_MS) {
+            return;
+        }
+        recentBlockPersist.put(key, now);
+        if (recentBlockPersist.size() > 2_000) {
+            recentBlockPersist.entrySet().removeIf(e -> now - e.getValue() > BLOCK_PERSIST_DEDUPE_MS);
+        }
         logger.info("[BUY_BLOCKED] {} {} price=${} reason={}",
             profile.name(), symbol, String.format("%.2f", price), reason);
         database.saveBlockedEntry(symbol, profile.name(), reason, price,
             regime != null ? regime.name() : "UNKNOWN", vix);
     }
+
+    private static final long BLOCK_PERSIST_DEDUPE_MS = 5 * 60_000L;
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> recentBlockPersist =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * Blocks new entries while an existing position is bleeding — prevents compounding risk

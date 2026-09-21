@@ -52,6 +52,17 @@ public class ScalpStrategy {
 
     // Per-symbol cooldown: after a scalp entry, block the same symbol for N minutes.
     // Prevents hammering the same symbol on every 20-second cycle when conditions hold.
+    /**
+     * Signal-time throttle, separate from the executed-entry cooldown below. A scalp signal now only
+     * consumes the daily counter and the 45-min cooldown once an order has really been placed
+     * ({@link #commitEntry}); before 2026-09-22 both were consumed inside evaluate(), so a signal
+     * that a downstream gate dropped still burned a daily slot and locked the symbol for 45 min
+     * (2026-09-21: the scalp counter read 9 while only 2 scalp trades executed). This short
+     * throttle just keeps a persistently-rejected signal from re-firing every 10-20s cycle.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> lastScalpAttemptMs =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long ATTEMPT_THROTTLE_MS = 5 * 60_000L;
     private static final java.util.concurrent.ConcurrentHashMap<String, Long> lastScalpEntryMs =
         new java.util.concurrent.ConcurrentHashMap<>();
     private static final long SYMBOL_COOLDOWN_MS = 45 * 60 * 1000L; // 45 minutes
@@ -143,8 +154,8 @@ public class ScalpStrategy {
             isInScalpWindow(), rsiInWindow, rsiAbove50, priceAboveVwap, volumeConfirmed, lastBarUp, onCooldown);
 
         if (rsiInWindow && rsiAbove50 && priceAboveVwap && volumeConfirmed && lastBarUp && !onCooldown) {
-            int count = dailyScalpCount.incrementAndGet();
-            lastScalpEntryMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
+            int count = dailyScalpCount.get() + 1; // prospective — committed only on execution
+            lastScalpAttemptMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
             String reason = String.format(
                 "Scalp: RSI %.1f in window [%.0f–%.0f], above VWAP $%.2f, vol %.1f× avg [%d/%d today]",
                 rsi, rsiBuyMin, rsiBuyMax, vwap, volumeRatio, count, config.getScalpMaxDailyTrades());
@@ -162,8 +173,8 @@ public class ScalpStrategy {
             boolean vwapReclaim = prevClose < vwap && currentPrice >= vwap;
             boolean rsiBuilding = rsi >= 45.0 && rsi <= 65.0;
             if (vwapReclaim && rsiBuilding && lastBarUp) {
-                int count = dailyScalpCount.incrementAndGet();
-                lastScalpEntryMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
+                int count = dailyScalpCount.get() + 1; // prospective — committed only on execution
+                lastScalpAttemptMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
                 String reason = String.format(
                     "Scalp VWAP reclaim: $%.2f crossed above VWAP $%.2f, RSI=%.1f, vol=%.1f× [%d/%d today]",
                     currentPrice, vwap, rsi, volumeRatio, count, config.getScalpMaxDailyTrades());
@@ -266,16 +277,30 @@ public class ScalpStrategy {
      * requests returned different scalp trade counts run-to-run purely from real-time drift.
      */
     private boolean isOnCooldown(String symbol) {
-        Long last = lastScalpEntryMs.get(symbol);
-        long now = nowSupplier.get().toInstant().toEpochMilli();
-        return last != null && (now - last) < SYMBOL_COOLDOWN_MS;
+        return cooldownMinutesLeft(symbol) > 0.0;
     }
 
     private double cooldownMinutesLeft(String symbol) {
-        Long last = lastScalpEntryMs.get(symbol);
-        if (last == null) return 0.0;
-        long elapsedMs = nowSupplier.get().toInstant().toEpochMilli() - last;
-        return Math.max(0.0, (SYMBOL_COOLDOWN_MS - elapsedMs) / 60_000.0);
+        long now = nowSupplier.get().toInstant().toEpochMilli();
+        double left = 0.0;
+        Long entry = lastScalpEntryMs.get(symbol);
+        if (entry != null) left = Math.max(left, (SYMBOL_COOLDOWN_MS - (now - entry)) / 60_000.0);
+        Long attempt = lastScalpAttemptMs.get(symbol);
+        if (attempt != null) left = Math.max(left, (ATTEMPT_THROTTLE_MS - (now - attempt)) / 60_000.0);
+        return Math.max(0.0, left);
+    }
+
+    /**
+     * Record that a scalp entry from {@link #evaluate} was actually executed: consume one daily slot
+     * and start the 45-min per-symbol cooldown. The caller invokes this only after its order went
+     * through, so signals dropped by downstream gates never burn capacity.
+     */
+    public void commitEntry(String symbol) {
+        resetDailyCounterIfNeeded();
+        int count = dailyScalpCount.incrementAndGet();
+        lastScalpEntryMs.put(symbol, nowSupplier.get().toInstant().toEpochMilli());
+        lastScalpAttemptMs.remove(symbol);
+        logger.info("Scalp {}: entry committed [{}/{} today]", symbol, count, config.getScalpMaxDailyTrades());
     }
 
     /** Visible for testing. */
@@ -288,7 +313,7 @@ public class ScalpStrategy {
     }
 
     /** Visible for testing — clear per-symbol cooldown so tests can fire multiple entries. */
-    static void clearCooldown(String symbol) { lastScalpEntryMs.remove(symbol); }
+    static void clearCooldown(String symbol) { lastScalpEntryMs.remove(symbol); lastScalpAttemptMs.remove(symbol); }
 
     /** Visible for testing — inject a last-entry timestamp to simulate an active cooldown. */
     static void setCooldown(String symbol, long epochMs) { lastScalpEntryMs.put(symbol, epochMs); }
@@ -306,5 +331,6 @@ public class ScalpStrategy {
         dailyScalpCount.set(0);
         lastCounterDate = null;
         lastScalpEntryMs.clear();
+        lastScalpAttemptMs.clear();
     }
 }

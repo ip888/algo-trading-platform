@@ -431,6 +431,23 @@ class ProfileManagerSellOrderTest {
         verify(mockClient).placeOrder(eq("AAPL"), eq(qty), eq("sell"), eq("market"), anyString(), any());
     }
 
+    @Test
+    @DisplayName("2d. handleSell after a partial exit sells the LIVE remainder, not the original tracked qty")
+    void testHandleSell_afterPartialExit_sellsLiveRemainder() throws Exception {
+        // TradePosition.quantity() is the ORIGINAL size (9) and is never reduced by partial exits;
+        // the broker only holds 6 after a 1/3 partial. Selling 9 would be rejected as insufficient qty.
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(MAPPER.createArrayNode());
+        when(mockClient.getPositions()).thenReturn(List.of(
+            new Position("AAPL", 6.0, 6.0 * 100.5, 100.0, 3.0)));
+
+        TradePosition position = new TradePosition("AAPL", 100.0, 9.0, 99.0, 101.0, Instant.now());
+        invokeOnExitEvaluator("handleSell",
+            new Class<?>[]{String.class, double.class, TradePosition.class, String.class},
+            "AAPL", 100.5, position, "[MAIN]");
+
+        verify(mockClient).placeOrder(eq("AAPL"), eq(6.0), eq("sell"), anyString(), anyString(), any());
+    }
+
     // ---------- 3. checkAllPositionsForRiskExits: cancel before sell (enhanced exit) ----------
 
     @Test

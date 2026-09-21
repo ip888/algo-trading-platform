@@ -1000,13 +1000,13 @@ public class ProfileManager implements Runnable {
                     riskGate.staticScalpDailyCount().set(0);
                     riskGate.setScalpCountDate(today);
                 }
-                riskGate.staticScalpDailyCount().incrementAndGet();
                 scalpOverrides = new Double[]{scalpBuy.stopLossPercent(), scalpBuy.takeProfitPercent()};
                 try {
                     handleBuy(symbol, currentPrice, equity, buyingPower, currentVix, regime, profilePrefix);
                 } finally {
                     scalpOverrides = null;
                 }
+                commitScalpIfExecuted(symbol);
             }
         } else if (signal instanceof TradingSignal.Buy buy) {
             // Only buy if symbol is target for current regime
@@ -1174,9 +1174,23 @@ public class ProfileManager implements Runnable {
                 } finally {
                     scalpOverrides = null;
                 }
+                commitScalpIfExecuted(symbol);
             } catch (Exception e) {
                 logger.debug("{} Scalp priority check failed for {}: {}", profilePrefix, symbol, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Consume the scalp daily slot + symbol cooldown only if handleBuy really opened a position
+     * (it tracks the position as its last step; every rejection path returns before that). Both
+     * the dashboard counter (riskGate) and the strategy's own daily cap/cooldown are committed here
+     * instead of when the signal is generated — see ScalpStrategy.commitEntry.
+     */
+    private void commitScalpIfExecuted(String symbol) {
+        if (portfolio.getPosition(symbol).isPresent()) {
+            riskGate.staticScalpDailyCount().incrementAndGet();
+            strategyManager.commitScalpEntry(symbol);
         }
     }
 

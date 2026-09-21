@@ -198,6 +198,7 @@ class ScalpStrategyTest {
         var signal = s.evaluate("SPY", 500.0, 0);
         assertInstanceOf(TradingSignal.ScalpBuy.class, signal,
             "Counter should reset for today, enabling a new scalp");
+        s.commitEntry("SPY");
         assertEquals(1, s.getDailyScalpCount());
     }
 
@@ -216,7 +217,43 @@ class ScalpStrategyTest {
         assertEquals(0.35, sb.stopLossPercent(), 0.001);
         assertEquals(0.70, sb.takeProfitPercent(), 0.001);
         assertTrue(sb.reason().contains("Scalp:"));
-        assertEquals(1, s.getDailyScalpCount(), "Daily counter should increment on entry");
+        assertEquals(0, s.getDailyScalpCount(),
+            "A signal alone must NOT consume a daily slot — only commitEntry() (order executed) does");
+        s.commitEntry("SPY");
+        assertEquals(1, s.getDailyScalpCount(), "Daily counter should increment once the entry is committed");
+    }
+
+    @Test
+    @DisplayName("uncommitted signal (dropped downstream) burns neither a daily slot nor the 45-min cooldown")
+    void uncommittedSignal_doesNotBurnDailySlotOrLongCooldown() throws Exception {
+        var s = controlled();
+        assertInstanceOf(TradingSignal.ScalpBuy.class, s.evaluate("SPY", 500.0, 0));
+        assertEquals(0, s.getDailyScalpCount());
+
+        // Only the short anti-spam throttle applies to an uncommitted signal — it must lapse
+        // long before the 45-min executed-entry cooldown would.
+        ScalpStrategy.clearCooldown("SPY");
+        assertInstanceOf(TradingSignal.ScalpBuy.class, s.evaluate("SPY", 500.0, 0),
+            "After the throttle is cleared the same symbol can signal again — no 45-min lockout");
+    }
+
+    @Test
+    @DisplayName("committed entry starts the 45-min cooldown")
+    void committedEntry_startsLongCooldown() throws Exception {
+        var s = controlled();
+        assertInstanceOf(TradingSignal.ScalpBuy.class, s.evaluate("SPY", 500.0, 0));
+        s.commitEntry("SPY");
+        var again = s.evaluate("SPY", 500.0, 0);
+        assertInstanceOf(TradingSignal.Hold.class, again);
+        assertTrue(((TradingSignal.Hold) again).reason().contains("cooldown"));
+    }
+
+    @Test
+    @DisplayName("daily cap is enforced on committed entries")
+    void dailyCap_countsCommittedEntriesOnly() throws Exception {
+        var s = controlled();
+        s.setDailyScalpCount(4, fixedNow.toLocalDate()); // cap is 4 in this fixture
+        assertInstanceOf(TradingSignal.Hold.class, s.evaluate("SPY", 500.0, 0));
     }
 
     @Test
@@ -285,6 +322,7 @@ class ScalpStrategyTest {
 
         // Fire SPY
         s.evaluate("SPY", 500.0, 0);
+        s.commitEntry("SPY");
         assertEquals(1, s.getDailyScalpCount());
 
         // QQQ has no cooldown — should fire independently
@@ -292,6 +330,7 @@ class ScalpStrategyTest {
         var qqq = s.evaluate("QQQ", 500.0, 0); // same price as SPY so price ≥ injected VWAP=498
         assertInstanceOf(TradingSignal.ScalpBuy.class, qqq,
             "QQQ should enter even when SPY is on cooldown");
+        s.commitEntry("QQQ");
         assertEquals(2, s.getDailyScalpCount());
     }
 

@@ -1389,8 +1389,13 @@ public class ProfileManager implements Runnable {
             marketBreadthAnalyzer.getCurrentBreadth()
         );
         // Stamp entry_reason: strategy tag + VIX + regime so post-analysis can filter by conditions.
-        String entryReason = String.format("%s | regime=%s vix=%.1f sl=%.2f tp=%.2f",
-            entryStrategyTag, regime != null ? regime.name() : "UNKNOWN", currentVix, stopLoss, takeProfit);
+        // The `strategy` column carries only profile.strategyType() ("MACD") for every non-scalp
+        // entry, so it cannot tell a Momentum/MTF/ORB/MeanReversion entry from a MACD one — the
+        // 2026-09-21 review found earlier "Momentum never fires / 100% MACD" conclusions were an
+        // artifact of exactly that. entry_reason records the real signal source instead.
+        String signalSource = scalpOverrides != null ? "SCALP" : strategyManager.getActiveStrategy();
+        String entryReason = String.format("%s | %s | regime=%s vix=%.1f sl=%.2f tp=%.2f",
+            entryStrategyTag, signalSource, regime != null ? regime.name() : "UNKNOWN", currentVix, stopLoss, takeProfit);
         database.setEntryReason(symbol, brokerName, entryReason);
         logger.info("[TRADE_OPEN] {} {} qty={} entry=${} sl=${} tp=${} reason={}",
             profile.name(), symbol, String.format("%.3f", positionSize),

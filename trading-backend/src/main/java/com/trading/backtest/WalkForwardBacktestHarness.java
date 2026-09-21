@@ -249,7 +249,10 @@ public final class WalkForwardBacktestHarness {
         } else {
             stopLossPct = config.getVixScaledStopLoss(regime.vix());
             takeProfitPct = config.getVixScaledTakeProfit(regime.vix());
-            strategyLabel = "MACD";
+            // Real signal source (activeStrategy is set by StrategyManager.evaluate() just above,
+            // single-threaded here) — was hard-coded "MACD" for every non-scalp entry, which made
+            // "Momentum never fires" impossible to test.
+            strategyLabel = strategyManager.getActiveStrategy();
         }
 
         double stopLoss = price * (1.0 - stopLossPct / 100.0);

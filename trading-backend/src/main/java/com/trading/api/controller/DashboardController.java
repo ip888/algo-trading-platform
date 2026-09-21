@@ -87,6 +87,9 @@ public final class DashboardController {
         app.get("/api/trades", this::getTrades);
         app.get("/api/trades/stats", this::getTradeStats);
         app.get("/api/trades/recent", this::getRecentTrades); // NEW: Recent trades for execution archive
+        app.get("/api/blocked-entries", ctx -> ctx.json(database.getBlockedEntries(
+            ctx.queryParamAsClass("days", Integer.class).getOrDefault(1),
+            ctx.queryParamAsClass("limit", Integer.class).getOrDefault(1000))));
         
         // Market analysis endpoints
         app.get("/api/market/analysis", this::getMarketAnalysis);

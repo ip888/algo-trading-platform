@@ -1481,6 +1481,39 @@ public class TradeDatabase {
         return 0;
     }
 
+    /**
+     * Recent blocked entries (newest first) for post-session diagnosis — "what did the bot NOT
+     * trade today and why?". ts is stored by SQLite datetime('now'), i.e. UTC.
+     */
+    public java.util.List<java.util.Map<String, Object>> getBlockedEntries(int days, int limit) {
+        String sql = "SELECT ts, symbol, profile, reason, price, regime, vix FROM blocked_entries " +
+                     "WHERE ts >= datetime('now', ?) ORDER BY id DESC LIMIT ?";
+        var out = new java.util.ArrayList<java.util.Map<String, Object>>();
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, "-" + Math.max(1, days) + " days");
+            ps.setInt(2, Math.max(1, Math.min(limit, 5000)));
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    var row = new java.util.LinkedHashMap<String, Object>();
+                    row.put("ts", rs.getString("ts"));
+                    row.put("symbol", rs.getString("symbol"));
+                    row.put("profile", rs.getString("profile"));
+                    row.put("reason", rs.getString("reason"));
+                    row.put("price", rs.getDouble("price"));
+                    row.put("regime", rs.getString("regime"));
+                    row.put("vix", rs.getDouble("vix"));
+                    out.add(row);
+                }
+            }
+        } catch (SQLException e) {
+            logger.warn("getBlockedEntries failed: {}", e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return out;
+    }
+
     // ── regime_log ───────────────────────────────────────────────────────────
 
     /** Record a regime change. Non-fatal — never throws. */

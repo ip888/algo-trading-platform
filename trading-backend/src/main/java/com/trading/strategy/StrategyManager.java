@@ -107,6 +107,7 @@ public final class StrategyManager {
             if (client != null) {
                 var orbSignal = orbStrategy.evaluate(symbol, currentPrice, positionQty, client);
                 if (orbSignal instanceof TradingSignal.Buy || orbSignal instanceof TradingSignal.Sell) {
+                    activeStrategy = "ORB";
                     logger.info("Regime: {} (Strategy=ORB) → Signal: {}",
                         regime, orbSignal instanceof TradingSignal.Buy ? "BUY" : "SELL");
                     return orbSignal;
@@ -221,6 +222,7 @@ public final class StrategyManager {
                             }
                             return mtfBlockSignal;
                         }
+                        activeStrategy = "MTF Direct Buy";
                         return new TradingSignal.Buy("Multi-timeframe BUY signal");
                     }
                 }

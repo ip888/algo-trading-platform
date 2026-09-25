@@ -69,6 +69,20 @@ public final class BacktestController {
                 }
             }
 
+            // Generic experiment overrides: ?cfg.KEY=value (KEY = an UPPER_SNAKE config key). Applies to this
+            // run's private Config only — never the live one. Lets exit/entry settings be swept on the
+            // realistic replay (breakeven trigger, flat-position hours, runner, strategy kill-switches...).
+            var appliedOverrides = new java.util.LinkedHashMap<String, String>();
+            for (var e : ctx.queryParamMap().entrySet()) {
+                if (e.getKey().startsWith("cfg.") && !e.getValue().isEmpty()) {
+                    String key = e.getKey().substring(4);
+                    if (key.matches("[A-Z][A-Z0-9_]{2,80}")) {
+                        overrideProperty(config, key, e.getValue().get(0));
+                        appliedOverrides.put(key, e.getValue().get(0));
+                    }
+                }
+            }
+
             var liveClient = new AlpacaClient(config);
             Instant end = Instant.now();
             Instant start = end.minusSeconds(days * 86400L);
@@ -81,6 +95,7 @@ public final class BacktestController {
 
             var response = new java.util.LinkedHashMap<String, Object>();
             response.put("requestedDays", days);
+            response.put("appliedOverrides", appliedOverrides);
             response.put("scalpConfig", Map.of(
                 "rsiMin", config.getScalpRsiBuyMin(), "rsiMax", config.getScalpRsiBuyMax(),
                 "volumeMultiplier", config.getScalpVolumeMultiplier(),

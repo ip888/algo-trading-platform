@@ -839,6 +839,11 @@ public class Config {
     
     // ==================== EOD Exit Configuration ====================
     
+    /** When true, WEAK_BULL no longer takes new entries from the MACD "sustained uptrend" fallback. */
+    public boolean isWeakBullMacdFallbackDisabled() {
+        return getBooleanProperty("WEAK_BULL_MACD_FALLBACK_DISABLED", false);
+    }
+
     public boolean isEodExitEnabled() {
         return getBooleanProperty("EOD_EXIT_ENABLED", true);
     }

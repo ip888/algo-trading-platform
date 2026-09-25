@@ -443,11 +443,18 @@ public final class StrategyManager {
                 // In VIX=12 slow grinds, MACD crossed bullish days ago and the histogram plateaued;
                 // the default "growing" requirement permanently blocks entry in these markets.
                 // RSI cap raised 65→70: RSI 65-70 is normal momentum in a bull, not overextension.
-                activeStrategy = isMomentumAsset ? "MACD Trend (Weak Bull, Mom Fallback)" : "MACD Trend (Weak Bull)";
-                var macdSignal = rsiFilteredBuy(
-                    macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.0),
-                    history, symbol, positionQty, 70.0);
-                if (!(macdSignal instanceof TradingSignal.Hold)) yield macdSignal;
+                // WEAK_BULL_MACD_FALLBACK_DISABLED (2026-09-24, user-approved): this entry path was
+                // net-negative in every replay (19d/45d old sampling, 19d intrabar: -14.6/-31.7/-23.5)
+                // and never won live attribution. Entries are skipped, but MACD stays consulted for
+                // an already-held position so its bearish-crossover SELL still works.
+                boolean macdEntryDisabled = config != null && config.isWeakBullMacdFallbackDisabled() && positionQty == 0;
+                if (!macdEntryDisabled) {
+                    activeStrategy = isMomentumAsset ? "MACD Trend (Weak Bull, Mom Fallback)" : "MACD Trend (Weak Bull)";
+                    var macdSignal = rsiFilteredBuy(
+                        macdStrategy.evaluateWithHistory(symbol, currentPrice, positionQty, history, 0.0),
+                        history, symbol, positionQty, 70.0);
+                    if (!(macdSignal instanceof TradingSignal.Hold)) yield macdSignal;
+                }
 
                 // Last resort for high-confidence MTF signals: if both Momentum and MACD say
                 // HOLD but MTF is ≥80% confident AND price is above SMA-20 AND RSI is normal,

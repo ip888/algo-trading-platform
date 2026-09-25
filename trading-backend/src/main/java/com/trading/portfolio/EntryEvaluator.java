@@ -107,6 +107,8 @@ final class EntryEvaluator {
         this.mlEntryScorer = mlEntryScorer;
         this.volumeProfileAnalyzer = volumeProfileAnalyzer;
         this.todayPnL = todayPnL;
+        this.eventDayDetector = new com.trading.ops.EventDayDetector(
+            sym -> client.getMarketHistory(sym, 3), sym -> client.getBars(sym, "15Min", 40), config);
         this.bearishRegimeMarketStart = bearishRegimeMarketStart;
     }
 
@@ -632,6 +634,15 @@ final class EntryEvaluator {
             logger.debug("{} Could not check pending orders for {}: {}", profilePrefix, symbol, e.getMessage());
         }
 
+        // ========== EVENT-DAY (EARNINGS-GAP) GATE — single stocks ==========
+        // The earnings calendar is inert (placeholder API key), so detect the event from price instead:
+        // a >=3% open gap vs the prior close. See EventDayDetector for the full rationale.
+        var eventReason = eventDayDetector.eventReason(symbol);
+        if (eventReason.isPresent()) {
+            logger.info("{} {}: ❌ EVENT-DAY GATE — {}", profilePrefix, symbol, eventReason.get());
+            return new Blocked(eventReason.get());
+        }
+
         // ========== AI COMPONENT 1: SENTIMENT ANALYSIS ==========
         if (sentimentAnalyzer != null) {
             try {
@@ -690,22 +701,26 @@ final class EntryEvaluator {
             String.format("{\"breadth\":%.2f}", breadth)
         );
 
-        // ========== PHASE 3: REGIME WIN-RATE GATE ==========
-        // If this symbol has a losing track record in the current regime (≥5 trades, <35% win rate),
-        // block new entries to avoid repeating a known bad setup. This adaptive gate prevents
-        // the bot from repeatedly entering the same symbol under conditions where it historically loses.
+        // ========== PHASE 3: ROLLING-EXPECTANCY SYMBOL GATE ==========
+        // Blocks a symbol that is LOSING MONEY in this regime lately: >= WINRATE_GATE_MIN_TRADES closed trades
+        // inside the last WINRATE_GATE_WINDOW_DAYS (max WINRATE_GATE_WINDOW_TRADES most recent), win rate below
+        // WINRATE_GATE_MAX_WIN_RATE AND negative average return. Replaces the old all-time "<35% over >=5
+        // trades" ban, which (a) ignored payoff size, so a 33% win rate with 2:1 winners was banned, and
+        // (b) could never lift: a banned symbol stops trading, so its all-time stats never changed. Old trades
+        // now age out of the window, so a blocked symbol gets a fresh look on its own.
         if (regime != null) {
             String regimeName = regime.name();
-            var regimeStats = database.getSymbolStatistics(symbol, regimeName, 5);
-            if (regimeStats != null && regimeStats.winRate() < 0.35) {
-                logger.warn("{} {}: ❌ WIN-RATE GATE — {}% win rate in {} over {} trades, blocking entry",
+            var w = database.getRecentSymbolStats(symbol, regimeName,
+                config.getWinRateGateWindowDays(), config.getWinRateGateWindowTrades());
+            if (w != null && w.trades() >= config.getWinRateGateMinTrades()
+                    && w.winRate() < config.getWinRateGateMaxWinRate() && w.avgReturnPct() < 0) {
+                logger.warn("{} {}: ❌ EXPECTANCY GATE — {}% win rate, {}% avg return over last {} {} trades ({}d window), blocking entry",
                     profilePrefix, symbol,
-                    String.format("%.0f", regimeStats.winRate() * 100),
-                    regimeName, regimeStats.totalTrades());
+                    String.format("%.0f", w.winRate() * 100), String.format("%.2f", w.avgReturnPct()),
+                    w.trades(), regimeName, config.getWinRateGateWindowDays());
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ⚠️ %s blocked — low win rate in %s (%.0f%% over %d trades)",
-                        profile.name(), symbol, regimeName,
-                        regimeStats.winRate() * 100, regimeStats.totalTrades()),
+                    String.format("[%s] ⚠️ %s blocked — losing in %s (%.0f%% wins, %.2f%% avg over %d trades)",
+                        profile.name(), symbol, regimeName, w.winRate() * 100, w.avgReturnPct(), w.trades()),
                     "WARNING"
                 );
                 return new Blocked("low win rate in " + regimeName);
@@ -851,6 +866,7 @@ final class EntryEvaluator {
     }
 
     private static final long BLOCK_PERSIST_DEDUPE_MS = 5 * 60_000L;
+    private final com.trading.ops.EventDayDetector eventDayDetector;
     private final java.util.concurrent.ConcurrentHashMap<String, Long> recentBlockPersist =
         new java.util.concurrent.ConcurrentHashMap<>();
 

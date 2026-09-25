@@ -92,6 +92,29 @@ public final class DashboardController {
             ctx.queryParamAsClass("limit", Integer.class).getOrDefault(1000))));
         
         app.get("/api/reconciliation/daily", this::getDailyReconciliation);
+        app.get("/api/digest/daily", ctx -> {
+            var job = com.trading.ops.DailyCloseJob.instance();
+            if (job == null) { ctx.status(503).json(Map.of("error", "digest job not running")); return; }
+            String date = ctx.queryParamAsClass("date", String.class).getOrDefault("latest");
+            String json = job.loadDigest(date);
+            if (json == null) { ctx.status(404).json(Map.of("error", "no digest for " + date)); return; }
+            ctx.contentType("application/json").result(json);
+        });
+        app.get("/api/digest/history", ctx -> {
+            var job = com.trading.ops.DailyCloseJob.instance();
+            if (job == null) { ctx.status(503).json(Map.of("error", "digest job not running")); return; }
+            int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(14);
+            ctx.contentType("application/json").result("[" + String.join(",", job.loadHistory(days)) + "]");
+        });
+        // Re-run (idempotent) the fill re-pricing + digest for a date — default: today (ET).
+        app.post("/api/digest/run", ctx -> {
+            var job = com.trading.ops.DailyCloseJob.instance();
+            if (job == null) { ctx.status(503).json(Map.of("error", "digest job not running")); return; }
+            String d = ctx.queryParam("date");
+            var date = d == null || d.isBlank()
+                ? java.time.LocalDate.now(java.time.ZoneId.of("America/New_York")) : java.time.LocalDate.parse(d);
+            ctx.json(job.runFor(date));
+        });
 
         // Market analysis endpoints
         app.get("/api/market/analysis", this::getMarketAnalysis);

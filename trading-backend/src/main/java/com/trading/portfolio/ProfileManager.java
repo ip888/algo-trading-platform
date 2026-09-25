@@ -357,6 +357,19 @@ public class ProfileManager implements Runnable {
             synchronized (ProfileManager.class) {
                 if (riskGate.earningsCalendar() == null) {
                     String key = System.getenv("ALPHA_VANTAGE_API_KEY");
+                    if (key == null || key.isBlank()) {
+                        // Verified 2026-09-25: no key is configured in production, so this calendar never
+                        // returns a date — the +/-24h earnings blackout and the pre-earnings exit are INERT.
+                        // Earnings gaps are covered instead by (1) EOD flatten (nothing is held overnight) and
+                        // (2) EventDayDetector, a price-based entry gate. If EOD flatten is ever disabled,
+                        // overnight earnings risk is UNPROTECTED — say so loudly.
+                        logger.warn("Earnings calendar INERT (no ALPHA_VANTAGE_API_KEY): earnings blackout/pre-earnings exit "
+                            + "cannot fire. Protection relies on EOD flatten + the price-based event-day gate.");
+                        if (!config.isEodExitEnabled()) {
+                            logger.error("🚨 EOD_EXIT_ENABLED=false AND earnings calendar inert — positions can be held through "
+                                + "earnings with NO earnings protection. Re-enable EOD exit or configure a calendar key.");
+                        }
+                    }
                     riskGate.setEarningsCalendar(new EarningsCalendarService(
                         key == null ? "" : key,
                         config.getEarningsCacheTtlMs()));

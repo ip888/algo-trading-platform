@@ -849,6 +849,23 @@ public class Config {
         return getBooleanProperty("WEAK_BULL_MTF_TREND_ENTRY_DISABLED", false);
     }
 
+    // ---- Rolling-expectancy symbol gate (replaces the permanent all-time win-rate ban) ----
+    public int getWinRateGateWindowDays() { return getIntProperty("WINRATE_GATE_WINDOW_DAYS", 30); }
+    public int getWinRateGateWindowTrades() { return getIntProperty("WINRATE_GATE_WINDOW_TRADES", 12); }
+    public int getWinRateGateMinTrades() { return getIntProperty("WINRATE_GATE_MIN_TRADES", 6); }
+    public double getWinRateGateMaxWinRate() { return getDoubleProperty("WINRATE_GATE_MAX_WIN_RATE", 0.35); }
+
+    // ---- Event-day (earnings-gap) entry gate for single stocks ----
+    /** Default true; a mocked Config returns false so unit tests are unaffected. */
+    public boolean isEventDayGateEnabled() { return getBooleanProperty("EVENT_DAY_GATE_ENABLED", true); }
+    public double getEventDayGapPercent() { return getDoubleProperty("EVENT_DAY_GAP_PERCENT", 3.0); }
+    public String getSingleStockSymbols() {
+        return getProperty("SINGLE_STOCK_SYMBOLS", "AAPL,MSFT,NVDA,META,AMZN,GOOGL,TSLA,AMD,ORCL,NFLX");
+    }
+
+    // ---- Daily close digest ----
+    public double getDigestGapAlertUsd() { return getDoubleProperty("DIGEST_GAP_ALERT_USD", 1.0); }
+
     public boolean isEodExitEnabled() {
         return getBooleanProperty("EOD_EXIT_ENABLED", true);
     }

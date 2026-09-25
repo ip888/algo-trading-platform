@@ -175,6 +175,11 @@ public final class MultiBrokerOrchestrator {
         dashboard.start();
         logger.info("Dashboard available at: http://localhost:8080");
 
+        // End-of-day fill re-pricing + persisted daily digest (+ gap alert). Read-only w.r.t. orders.
+        var dailyClose = new com.trading.ops.DailyCloseJob(database, alpacaDataClient, config, "alpaca");
+        com.trading.ops.DailyCloseJob.register(dailyClose);
+        dailyClose.start();
+
         // ── Safety autopilot (dead-man's-switch + manual panic-stop) ──────────────────
         // This used to be wired only inside TradingBot.runMultiProfileMode(), a code path
         // that never executes once BROKERS is set (this class is the actual entry point then)

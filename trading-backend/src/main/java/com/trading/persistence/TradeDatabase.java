@@ -1587,6 +1587,105 @@ public class TradeDatabase {
         return out;
     }
 
+    // ── fill reconciliation / rolling symbol stats ───────────────────────────
+
+    /** A closed trade row, as needed by the daily fill reconciler and digest. */
+    public record TradeRow(int id, String symbol, String strategy, Instant entryTime, Instant exitTime,
+                           double entryPrice, double exitPrice, double quantity, double pnl,
+                           String exitReason, String entryReason) {}
+
+    /** Closed trades of {@code broker} whose exit_time falls in [from, to). */
+    public java.util.List<TradeRow> getClosedTradesBetween(String broker, Instant from, Instant to) {
+        // exit_time is Instant.toString() (variable fractional digits), so narrow by date prefix in SQL
+        // and do the exact comparison in Java rather than trusting string order at second boundaries.
+        String sql = "SELECT id, symbol, strategy, entry_time, exit_time, entry_price, exit_price, quantity, pnl, " +
+                     "exit_reason, entry_reason FROM trades WHERE broker = ? AND status = 'CLOSED' " +
+                     "AND exit_time >= ? ORDER BY exit_time";
+        var out = new java.util.ArrayList<TradeRow>();
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, broker);
+            ps.setString(2, from.minus(java.time.Duration.ofDays(1)).toString().substring(0, 10));
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String et = rs.getString("exit_time");
+                    if (et == null) continue;
+                    Instant exit;
+                    try { exit = Instant.parse(et); } catch (Exception e) { continue; }
+                    if (exit.isBefore(from) || !exit.isBefore(to)) continue;
+                    out.add(new TradeRow(rs.getInt("id"), rs.getString("symbol"), rs.getString("strategy"),
+                        Instant.parse(rs.getString("entry_time")), exit,
+                        rs.getDouble("entry_price"), rs.getDouble("exit_price"), rs.getDouble("quantity"),
+                        rs.getDouble("pnl"), rs.getString("exit_reason"), rs.getString("entry_reason")));
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("getClosedTradesBetween failed: {}", e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return out;
+    }
+
+    /** Overwrite a closed trade's prices/P&L with broker-fill-based values (see FillReconciler). */
+    public void updateTradeFills(int id, double entryPrice, double exitPrice, double pnl) {
+        String sql = "UPDATE trades SET entry_price = ?, exit_price = ?, pnl = ? WHERE id = ? AND status = 'CLOSED'";
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setDouble(1, entryPrice);
+            ps.setDouble(2, exitPrice);
+            ps.setDouble(3, pnl);
+            ps.setInt(4, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.error("updateTradeFills failed for trade {}: {}", id, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Trailing per-symbol(+regime) performance over a window — feeds the rolling-expectancy entry gate. */
+    public record SymbolWindowStats(int trades, double winRate, double avgReturnPct, double netPnl) {}
+
+    /**
+     * Last {@code limit} closed trades of {@code symbol} in {@code regime} (null = any regime) that closed
+     * within {@code sinceDays}. Old trades age out of the window, so a symbol the gate blocked recovers by
+     * itself instead of being banned forever. 'recovered' rows are bookkeeping duplicates, not signals.
+     * Returns null when there are no trades in the window.
+     */
+    public SymbolWindowStats getRecentSymbolStats(String symbol, String regime, int sinceDays, int limit) {
+        String sql = "SELECT pnl, entry_price, quantity FROM trades WHERE symbol = ? AND status = 'CLOSED' " +
+                     "AND COALESCE(strategy, '') != 'recovered' AND exit_time >= ? " +
+                     (regime != null ? "AND regime = ? " : "") + "ORDER BY exit_time DESC LIMIT ?";
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            int i = 1;
+            ps.setString(i++, symbol);
+            ps.setString(i++, Instant.now().minus(java.time.Duration.ofDays(Math.max(1, sinceDays))).toString());
+            if (regime != null) ps.setString(i++, regime);
+            ps.setInt(i, Math.max(1, limit));
+            int n = 0, wins = 0;
+            double retSum = 0, net = 0;
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    double pnl = rs.getDouble("pnl");
+                    double notional = rs.getDouble("entry_price") * rs.getDouble("quantity");
+                    n++;
+                    if (pnl > 0) wins++;
+                    net += pnl;
+                    if (notional > 0) retSum += pnl / notional * 100.0;
+                }
+            }
+            if (n == 0) return null;
+            return new SymbolWindowStats(n, (double) wins / n, retSum / n, net);
+        } catch (SQLException e) {
+            logger.warn("getRecentSymbolStats failed for {}: {}", symbol, e.getMessage());
+            return null;
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
     // ── regime_log ───────────────────────────────────────────────────────────
 
     /** Record a regime change. Non-fatal — never throws. */

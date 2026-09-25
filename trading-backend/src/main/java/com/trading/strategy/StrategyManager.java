@@ -464,7 +464,10 @@ public final class StrategyManager {
                 // is a minimal "trend intact" check that passes the trade through.
                 // RSI cap is 78 here (not 70): in a strong bull, RSI 70-78 is normal momentum,
                 // not overextension. The MTF ≥80% gate already filters weak/choppy setups.
-                if (highMtfConfidence && positionQty == 0 && history.size() >= 20) {
+                // WEAK_BULL_MTF_TREND_ENTRY_DISABLED (2026-09-24, user-approved): consistent replay loser
+                // (19d/45d intrabar: -12.8/-26.4; also negative in earlier replays). Entries only.
+                boolean mtfTrendEntryDisabled = config != null && config.isWeakBullMtfTrendEntryDisabled();
+                if (highMtfConfidence && positionQty == 0 && history.size() >= 20 && !mtfTrendEntryDisabled) {
                     double sma20 = history.stream().skip(history.size() - 20).mapToDouble(d -> d).average().orElse(0);
                     double rsi = RSIStrategy.calculateRSI(history, 14);
                     // RSI window 38-72: avoids deep oversold (RSI<38 = momentum collapse)

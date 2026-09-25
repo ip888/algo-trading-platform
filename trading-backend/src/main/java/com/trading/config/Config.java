@@ -844,6 +844,11 @@ public class Config {
         return getBooleanProperty("WEAK_BULL_MACD_FALLBACK_DISABLED", false);
     }
 
+    /** When true, WEAK_BULL no longer takes new entries from the "MTF Trend Entry (Weak Bull)" last resort. */
+    public boolean isWeakBullMtfTrendEntryDisabled() {
+        return getBooleanProperty("WEAK_BULL_MTF_TREND_ENTRY_DISABLED", false);
+    }
+
     public boolean isEodExitEnabled() {
         return getBooleanProperty("EOD_EXIT_ENABLED", true);
     }

@@ -156,9 +156,36 @@ class WalkForwardBacktestHarnessSmokeTest {
 
         // fresh harness: the 1-min series is cached per harness after its first scan
         var h2 = new WalkForwardBacktestHarness(config, tempDir.resolve("b"), t0);
-        mins.add(new Bar(t0.plusSeconds(300), 100.0, 100.45, 99.95, 100.2, 1000L));
+        // take-profit is bot-polled live (fractional positions have no native TP): it needs a CLOSE at/above TP,
+        // a wick to the target that closes back below must NOT count.
+        mins.add(new Bar(t0.plusSeconds(300), 100.0, 100.60, 99.95, 100.2, 1000L));
         h2.getReplayClient().loadBars("SPY", "1Min", mins);
         h2.openPositionForTest("SPY", new com.trading.risk.TradePosition("SPY", 100.0, 1.0, 99.75, 100.40, t0), "SCALP");
-        assertTrue(h2.scanIntrabarExit("SPY", t0, t0.plusSeconds(360)), "high reached take-profit");
+        assertFalse(h2.scanIntrabarExit("SPY", t0, t0.plusSeconds(360)), "wick above TP but close below: no exit");
+
+        var h3 = new WalkForwardBacktestHarness(config, tempDir.resolve("c"), t0);
+        var closeAbove = new ArrayList<>(mins.subList(0, 5));
+        closeAbove.add(new Bar(t0.plusSeconds(300), 100.0, 100.60, 99.95, 100.45, 1000L));
+        h3.getReplayClient().loadBars("SPY", "1Min", closeAbove);
+        h3.openPositionForTest("SPY", new com.trading.risk.TradePosition("SPY", 100.0, 1.0, 99.75, 100.40, t0), "SCALP");
+        assertTrue(h3.scanIntrabarExit("SPY", t0, t0.plusSeconds(360)), "close at/above TP exits");
+    }
+
+    @Test
+    void winnerRunner_sellsHalfAtTakeProfit_thenStopsOutAtLockedLevel_andFinalPnlIncludesBothLegs(@TempDir Path tempDir) {
+        var t0 = ZonedDateTime.of(LocalDate.of(2026, 9, 22), java.time.LocalTime.of(10, 0), ET).toInstant();
+        var h = new WalkForwardBacktestHarness(config, tempDir, t0);
+        var mins = new ArrayList<Bar>();
+        mins.add(new Bar(t0, 100.0, 100.9, 100.0, 100.85, 1000L));                 // close >= TP 100.80 -> runner
+        mins.add(new Bar(t0.plusSeconds(60), 100.8, 100.85, 100.2, 100.3, 1000L)); // wick through locked stop 100.56
+        h.getReplayClient().loadBars("ORBX", "1Min", mins);
+        h.openPositionForTest("ORBX", new com.trading.risk.TradePosition("ORBX", 100.0, 2.0, 99.3, 100.80, t0), "ORB");
+
+        assertTrue(h.scanIntrabarExit("ORBX", t0, t0.plusSeconds(120)));
+
+        var trade = h.closedTradesForTest().get(0);
+        // half (1.0 sh) at 100.85 = +0.85 ; remainder (1.0 sh) stopped at 100.56 = +0.56
+        assertEquals(1.41, trade.pnl(), 0.02);
+        assertEquals(2.0, trade.quantity(), 1e-9, "reports the original size");
     }
 }

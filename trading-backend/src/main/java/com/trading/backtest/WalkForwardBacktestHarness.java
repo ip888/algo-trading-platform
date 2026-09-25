@@ -73,6 +73,9 @@ public final class WalkForwardBacktestHarness {
     private boolean intrabarExits = true;
     private final Map<String, List<Bar>> oneMinCache = new java.util.HashMap<>();
     private Instant prevStep;
+    // Realized P&L and original size of positions that have scaled out (final trade = remainder + these)
+    private final Map<String, Double> partialPnl = new java.util.HashMap<>();
+    private final Map<String, Double> originalQty = new java.util.HashMap<>();
     // Diagnostic only — lets callers see which regimes the replay window actually hit,
     // since a regime-specific fix (e.g. a WEAK_BULL-only threshold change) is untestable
     // if the requested window never actually visits that regime.
@@ -192,6 +195,8 @@ public final class WalkForwardBacktestHarness {
         equityCurve.clear();
         lastRunRegimeCounts.clear();
         prevStep = null;
+        partialPnl.clear();
+        originalQty.clear();
 
         List<Instant> steps = stepTimestamps(tradedSymbols, start, end);
         logger.info("Replaying {} steps from {} to {}", steps.size(), start, end);
@@ -304,6 +309,7 @@ public final class WalkForwardBacktestHarness {
             t, price, 0);
         openPositions.put(symbol, position);
         openPositionStrategy.put(symbol, strategyLabel);
+        originalQty.put(symbol, shares);
         equity -= shares * price;
         // Same commit-on-execution contract as live: only a really-opened scalp consumes a daily slot.
         if (signal instanceof TradingSignal.ScalpBuy) {
@@ -329,50 +335,121 @@ public final class WalkForwardBacktestHarness {
         }
 
         var decision = exitStrategyManager.evaluateExit(position, price, 0.0, Map.of(), isScalp);
-        if (decision.type() != ExitStrategyManager.ExitType.NONE && !decision.isPartial()) {
+        if (decision.type() == ExitStrategyManager.ExitType.NONE) return;
+        if (decision.isPartial()) {
+            if (!intrabarExits) return; // legacy mode: whole-position round trips only
+            applyPartial(symbol, position, decision, price);
+        } else {
             closePosition(symbol, decision.expectedPrice(), decision.type().name(), t);
         }
-        // Partial exits are not simulated — the harness tracks whole-position round trips only,
-        // consistent with its documented scope (validating entry/exit/sizing thresholds, not
-        // reproducing every live partial-fill mechanic).
     }
 
     /**
-     * Scan the 1-min bars in [from, to) for a touch of the position's stop or take-profit and close
-     * at that level. Same-bar stop+TP resolves to the stop (conservative); a bar that opens through
-     * the stop fills at the open (gap), like a real stop-market order.
-     * @return true if the position was closed
+     * Replays the 1-min bars in [from, to) for one open position, mirroring how live splits
+     * protection between the BROKER and the BOT:
+     * <ul>
+     *   <li>Native stop (broker-side, triggers on any tick) → checked against each bar's open/low;
+     *       gap-through fills at the open, same-bar ambiguity resolves against us (stop wins).</li>
+     *   <li>Everything the bot polls every ~20s — breakeven-stop move, winner-runner launch,
+     *       partial exits, take-profit — is evaluated at each bar's CLOSE (a 1-min bar is a fair
+     *       stand-in for a 20s poll; using the high would be optimistic).</li>
+     * </ul>
+     * Not simulated: multi-level trailing stop (TrailingTargetManager), orphan/max-loss paths.
+     * @return true if the position was fully closed
      */
     boolean scanIntrabarExit(String symbol, Instant from, Instant to) {
-        var pos = openPositions.get(symbol);
-        if (pos == null) return false;
+        var first = openPositions.get(symbol);
+        if (first == null) return false;
         List<Bar> bars = oneMinCache.computeIfAbsent(symbol, s -> allBarsUnfiltered(s, "1Min"));
-        Instant lo = pos.entryTime() != null && pos.entryTime().isAfter(from) ? pos.entryTime() : from;
+        Instant lo = first.entryTime() != null && first.entryTime().isAfter(from) ? first.entryTime() : from;
         int idx = java.util.Collections.binarySearch(bars, new Bar(lo, 1, 1, 1, 1, 0L),
             java.util.Comparator.comparing(Bar::timestamp));
         if (idx < 0) idx = -idx - 1;
-        for (int i = idx; i < bars.size(); i++) {
-            Bar b = bars.get(i);
-            if (!b.timestamp().isBefore(to)) break;
-            if (b.open() <= pos.stopLoss()) {
-                closePosition(symbol, b.open(), "STOP_LOSS", b.timestamp());
-                return true;
+        Instant savedNow = simNow;
+        try {
+            for (int i = idx; i < bars.size(); i++) {
+                Bar b = bars.get(i);
+                if (!b.timestamp().isBefore(to)) break;
+                var pos = openPositions.get(symbol);
+                if (pos == null) return true;
+                Instant barEnd = b.timestamp().plusSeconds(60);
+                simNow = barEnd; // time-aware exit logic (hold-time rules) sees the bar's own time
+                boolean isScalp = "SCALP".equals(openPositionStrategy.get(symbol));
+
+                // --- native broker stop: wick-triggered ---
+                if (b.open() <= pos.stopLoss()) {
+                    closePosition(symbol, b.open(), "STOP_LOSS", barEnd);
+                    return true;
+                }
+                if (b.low() <= pos.stopLoss()) {
+                    closePosition(symbol, pos.stopLoss(), "STOP_LOSS", barEnd);
+                    return true;
+                }
+
+                // --- bot-polled logic at the bar close ---
+                double c = b.close();
+                if (config.isBreakevenStopEnabled() && pos.stopLoss() < pos.entryPrice()
+                        && (c - pos.entryPrice()) / pos.entryPrice() * 100.0 >= config.getBreakevenTriggerPercent()) {
+                    pos = new TradePosition(symbol, pos.entryPrice(), pos.quantity(), pos.entryPrice(),
+                        pos.takeProfit(), pos.entryTime(), Math.max(pos.highestPrice(), c), pos.partialExitsExecuted());
+                    openPositions.put(symbol, pos);
+                }
+                if (!isScalp && config.isWinnerRunnerEnabled() && !pos.hasPartialExit(4) && pos.isTakeProfitHit(c)) {
+                    launchRunner(symbol, pos, c);
+                    continue;
+                }
+                var decision = exitStrategyManager.evaluateExit(pos, c, 0.0, Map.of(), isScalp);
+                if (decision.type() == ExitStrategyManager.ExitType.NONE) continue;
+                if (decision.isPartial()) {
+                    applyPartial(symbol, pos, decision, c);
+                } else {
+                    closePosition(symbol, decision.expectedPrice() > 0 ? decision.expectedPrice() : c,
+                        decision.type().name(), barEnd);
+                    return true;
+                }
             }
-            if (b.low() <= pos.stopLoss()) {
-                closePosition(symbol, pos.stopLoss(), "STOP_LOSS", b.timestamp());
-                return true;
-            }
-            if (b.high() >= pos.takeProfit()) {
-                closePosition(symbol, pos.takeProfit(), "TAKE_PROFIT", b.timestamp());
-                return true;
-            }
+        } finally {
+            simNow = savedNow;
         }
         return false;
+    }
+
+    /** Sell `decision.quantity()` of the REMAINING shares at `price`; bank the P&L; keep the stop. */
+    private void applyPartial(String symbol, TradePosition pos, ExitStrategyManager.ExitDecision d, double price) {
+        double sold = pos.quantity() * d.quantity();
+        if (sold <= 0 || sold >= pos.quantity()) return;
+        bankPartial(symbol, pos, sold, price);
+        var reduced = new TradePosition(symbol, pos.entryPrice(), pos.quantity() - sold, pos.stopLoss(),
+            pos.takeProfit(), pos.entryTime(), Math.max(pos.highestPrice(), price), pos.partialExitsExecuted());
+        if (d.partialLevel() > 0) reduced = reduced.markPartialExit(d.partialLevel());
+        openPositions.put(symbol, reduced);
+    }
+
+    /** ExitEvaluator's winner runner: sell half at TP, lock a profitable stop, extend TP 1.5x. */
+    private void launchRunner(String symbol, TradePosition pos, double price) {
+        double half = pos.quantity() * 0.5;
+        bankPartial(symbol, pos, half, price);
+        double lockedStop = pos.entryPrice() + (pos.takeProfit() - pos.entryPrice()) * config.getRunnerLockPct();
+        double runnerTp = pos.takeProfit() + (pos.takeProfit() - pos.entryPrice()) * 0.5;
+        var marked = pos.markPartialExit(1).markPartialExit(2).markPartialExit(3).markPartialExit(4);
+        openPositions.put(symbol, new TradePosition(symbol, pos.entryPrice(), pos.quantity() - half, lockedStop,
+            runnerTp, pos.entryTime(), Math.max(pos.highestPrice(), price), marked.partialExitsExecuted()));
+    }
+
+    private void bankPartial(String symbol, TradePosition pos, double qtySold, double price) {
+        equity += qtySold * price;
+        partialPnl.merge(symbol, (price - pos.entryPrice()) * qtySold, Double::sum);
+    }
+
+    /** Visible for testing. */
+    List<BacktestTrade> closedTradesForTest() {
+        return closedTrades;
     }
 
     /** Visible for testing. */
     void openPositionForTest(String symbol, TradePosition p, String strategy) {
         openPositions.put(symbol, p);
+        originalQty.put(symbol, p.quantity());
         openPositionStrategy.put(symbol, strategy);
     }
 
@@ -380,10 +457,14 @@ public final class WalkForwardBacktestHarness {
         var position = openPositions.remove(symbol);
         String strategy = openPositionStrategy.remove(symbol);
         if (position == null) return;
-        double pnl = (exitPrice - position.entryPrice()) * position.quantity();
+        double pnl = (exitPrice - position.entryPrice()) * position.quantity()
+            + partialPnl.getOrDefault(symbol, 0.0);
+        double qtyReported = originalQty.getOrDefault(symbol, position.quantity());
+        partialPnl.remove(symbol);
+        originalQty.remove(symbol);
         equity += position.quantity() * exitPrice;
         closedTrades.add(new BacktestTrade(symbol, strategy, position.entryTime(), exitTime,
-            position.entryPrice(), exitPrice, position.quantity(), pnl, exitReason));
+            position.entryPrice(), exitPrice, qtyReported, pnl, exitReason));
     }
 
     private double openPositionsValue(Instant t) {

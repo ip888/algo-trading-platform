@@ -66,6 +66,13 @@ public final class WalkForwardBacktestHarness {
 
     private volatile Instant simNow;
     private double equity;
+    // Fidelity switches. Live stops are native broker orders that trigger on ANY tick, but the
+    // replay only sampled price at 15-min step boundaries — so a 0.25% scalp stop was checked ~3
+    // times in its 45-min life. Intrabar scanning of the 1-min bars (default on) fixes that; set
+    // false to reproduce the pre-2026-09-24 optimistic behaviour for comparison.
+    private boolean intrabarExits = true;
+    private final Map<String, List<Bar>> oneMinCache = new java.util.HashMap<>();
+    private Instant prevStep;
     // Diagnostic only — lets callers see which regimes the replay window actually hit,
     // since a regime-specific fix (e.g. a WEAK_BULL-only threshold change) is untestable
     // if the requested window never actually visits that regime.
@@ -95,6 +102,10 @@ public final class WalkForwardBacktestHarness {
         strategyManager.setNowSupplier(() -> ZonedDateTime.ofInstant(simNow, ET));
         exitStrategyManager.setNowSupplier(this::getSimNow);
         timeDecayExitManager.setNowSupplier(this::getSimNow);
+    }
+
+    public void setIntrabarExits(boolean enabled) {
+        this.intrabarExits = enabled;
     }
 
     private Instant getSimNow() {
@@ -180,6 +191,7 @@ public final class WalkForwardBacktestHarness {
         closedTrades.clear();
         equityCurve.clear();
         lastRunRegimeCounts.clear();
+        prevStep = null;
 
         List<Instant> steps = stepTimestamps(tradedSymbols, start, end);
         logger.info("Replaying {} steps from {} to {}", steps.size(), start, end);
@@ -197,13 +209,29 @@ public final class WalkForwardBacktestHarness {
 
             // Manage open positions first — exits before new entries, matching live priority.
             for (String symbol : new ArrayList<>(openPositions.keySet())) {
+                // Native-stop/TP fidelity: did the 1-min bars since the last step touch either level?
+                if (intrabarExits && prevStep != null && scanIntrabarExit(symbol, prevStep, t)) continue;
                 double price = latestClose(symbol, t);
                 if (Double.isNaN(price)) continue;
                 checkExit(symbol, price, t);
             }
+            prevStep = t;
+
+            // Live flattens everything at EOD_EXIT_TIME and takes no new entries after it.
+            boolean pastEod = false;
+            if (config.isEodExitEnabled()) {
+                var et = ZonedDateTime.ofInstant(t, ET).toLocalTime();
+                pastEod = !et.isBefore(java.time.LocalTime.parse(config.getEodExitTime()));
+                if (pastEod) {
+                    for (String symbol : new ArrayList<>(openPositions.keySet())) {
+                        double price = latestClose(symbol, t);
+                        if (!Double.isNaN(price)) closePosition(symbol, price, "EOD_EXIT", t);
+                    }
+                }
+            }
 
             // Consider new entries if under the position cap.
-            if (openPositions.size() < maxPositions) {
+            if (!pastEod && openPositions.size() < maxPositions) {
                 for (String symbol : tradedSymbols) {
                     if (openPositions.containsKey(symbol)) continue;
                     if (openPositions.size() >= maxPositions) break;
@@ -288,6 +316,13 @@ public final class WalkForwardBacktestHarness {
         if (position == null) return;
         boolean isScalp = "SCALP".equals(openPositionStrategy.get(symbol));
 
+        // Live SCALP_MAX_HOLD_MINUTES timeout (ExitEvaluator) — scalp is exempt from time-decay there.
+        if (isScalp && position.entryTime() != null
+                && java.time.Duration.between(position.entryTime(), simNow).toMinutes() >= config.getScalpMaxHoldMinutes()) {
+            closePosition(symbol, price, "SCALP_TIMEOUT", t);
+            return;
+        }
+
         if (timeDecayExitManager.shouldExit(position, price)) {
             closePosition(symbol, price, "TIME_DECAY", t);
             return;
@@ -300,6 +335,45 @@ public final class WalkForwardBacktestHarness {
         // Partial exits are not simulated — the harness tracks whole-position round trips only,
         // consistent with its documented scope (validating entry/exit/sizing thresholds, not
         // reproducing every live partial-fill mechanic).
+    }
+
+    /**
+     * Scan the 1-min bars in [from, to) for a touch of the position's stop or take-profit and close
+     * at that level. Same-bar stop+TP resolves to the stop (conservative); a bar that opens through
+     * the stop fills at the open (gap), like a real stop-market order.
+     * @return true if the position was closed
+     */
+    boolean scanIntrabarExit(String symbol, Instant from, Instant to) {
+        var pos = openPositions.get(symbol);
+        if (pos == null) return false;
+        List<Bar> bars = oneMinCache.computeIfAbsent(symbol, s -> allBarsUnfiltered(s, "1Min"));
+        Instant lo = pos.entryTime() != null && pos.entryTime().isAfter(from) ? pos.entryTime() : from;
+        int idx = java.util.Collections.binarySearch(bars, new Bar(lo, 1, 1, 1, 1, 0L),
+            java.util.Comparator.comparing(Bar::timestamp));
+        if (idx < 0) idx = -idx - 1;
+        for (int i = idx; i < bars.size(); i++) {
+            Bar b = bars.get(i);
+            if (!b.timestamp().isBefore(to)) break;
+            if (b.open() <= pos.stopLoss()) {
+                closePosition(symbol, b.open(), "STOP_LOSS", b.timestamp());
+                return true;
+            }
+            if (b.low() <= pos.stopLoss()) {
+                closePosition(symbol, pos.stopLoss(), "STOP_LOSS", b.timestamp());
+                return true;
+            }
+            if (b.high() >= pos.takeProfit()) {
+                closePosition(symbol, pos.takeProfit(), "TAKE_PROFIT", b.timestamp());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Visible for testing. */
+    void openPositionForTest(String symbol, TradePosition p, String strategy) {
+        openPositions.put(symbol, p);
+        openPositionStrategy.put(symbol, strategy);
     }
 
     private void closePosition(String symbol, double exitPrice, String exitReason, Instant exitTime) {

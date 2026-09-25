@@ -74,6 +74,8 @@ public final class BacktestController {
             Instant start = end.minusSeconds(days * 86400L);
             Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache-scalp-" + days + "d");
             var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
+            // intrabar=false reproduces the pre-2026-09-24 15-min-sampled exits (for comparison only)
+            harness.setIntrabarExits(!"false".equalsIgnoreCase(ctx.queryParam("intrabar")));
             harness.loadHistory(liveClient, symbols, days);
             var report = harness.run(symbols, start, end, capital, maxPositions);
 
@@ -260,6 +262,8 @@ public final class BacktestController {
             // fetched first, making the `days` param a no-op after the first call.
             Path cacheDir = Path.of(System.getProperty("java.io.tmpdir"), "backtest-cache-" + days + "d");
             var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
+            // intrabar=false reproduces the pre-2026-09-24 15-min-sampled exits (for comparison only)
+            harness.setIntrabarExits(!"false".equalsIgnoreCase(ctx.queryParam("intrabar")));
             harness.loadHistory(liveClient, symbols, days);
             var report = harness.run(symbols, start, end, capital, maxPositions);
 

@@ -78,7 +78,7 @@ class TradeDatabaseTodayPnLTest {
         Instant now = Instant.now();
         db.recordTrade("SPY", "MACD", "MAIN", "alpaca",
             now.minus(3, ChronoUnit.HOURS), 500.0, 2.0, 490.0, 515.0);
-        db.closeTrade("SPY", now.minus(1, ChronoUnit.HOURS), 510.0, 20.0, "alpaca");
+        db.closeTrade("SPY", now, 510.0, 20.0, "alpaca"); // exit=now: "an hour ago" crosses the UTC date near 00:xx UTC
 
         db.recordTrade("GLD", "MACD", "MAIN", "alpaca",
             now.minus(2, ChronoUnit.HOURS), 200.0, 1.0, 195.0, 206.0);

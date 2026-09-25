@@ -128,4 +128,37 @@ class WalkForwardBacktestHarnessSmokeTest {
         assertEquals(1000.0, report.startEquity());
         assertTrue(report.trades().size() == report.totalTrades());
     }
+
+    @Test
+    void intrabarScan_closesAtStopWhenAWickTouchesItBetweenSteps(@TempDir Path tempDir) {
+        var t0 = ZonedDateTime.of(LocalDate.of(2026, 9, 22), java.time.LocalTime.of(10, 0), ET).toInstant();
+        var h = new WalkForwardBacktestHarness(config, tempDir, t0);
+        var mins = new ArrayList<Bar>();
+        for (int i = 0; i < 15; i++) {
+            double low = i == 7 ? 99.70 : 99.95; // one wick below the 99.75 stop, close still above it
+            mins.add(new Bar(t0.plusSeconds(60L * i), 100.0, 100.05, low, 100.0, 1000L));
+        }
+        h.getReplayClient().loadBars("SPY", "1Min", mins);
+        h.openPositionForTest("SPY", new com.trading.risk.TradePosition("SPY", 100.0, 1.0, 99.75, 100.40, t0), "SCALP");
+
+        assertTrue(h.scanIntrabarExit("SPY", t0, t0.plusSeconds(900)));
+    }
+
+    @Test
+    void intrabarScan_takeProfitAndNoTouch(@TempDir Path tempDir) {
+        var t0 = ZonedDateTime.of(LocalDate.of(2026, 9, 22), java.time.LocalTime.of(10, 0), ET).toInstant();
+        var h = new WalkForwardBacktestHarness(config, tempDir, t0);
+        var mins = new ArrayList<Bar>();
+        for (int i = 0; i < 5; i++) mins.add(new Bar(t0.plusSeconds(60L * i), 100.0, 100.10, 99.90, 100.0, 1000L));
+        h.getReplayClient().loadBars("SPY", "1Min", mins);
+        h.openPositionForTest("SPY", new com.trading.risk.TradePosition("SPY", 100.0, 1.0, 99.75, 100.40, t0), "SCALP");
+        assertFalse(h.scanIntrabarExit("SPY", t0, t0.plusSeconds(300)), "no level touched");
+
+        // fresh harness: the 1-min series is cached per harness after its first scan
+        var h2 = new WalkForwardBacktestHarness(config, tempDir.resolve("b"), t0);
+        mins.add(new Bar(t0.plusSeconds(300), 100.0, 100.45, 99.95, 100.2, 1000L));
+        h2.getReplayClient().loadBars("SPY", "1Min", mins);
+        h2.openPositionForTest("SPY", new com.trading.risk.TradePosition("SPY", 100.0, 1.0, 99.75, 100.40, t0), "SCALP");
+        assertTrue(h2.scanIntrabarExit("SPY", t0, t0.plusSeconds(360)), "high reached take-profit");
+    }
 }

@@ -191,9 +191,13 @@ public final class DailyCloseJob {
 
             String json = MAPPER.writeValueAsString(digest);
             database.saveBotState("digest:" + date, json);
+            // "done" tracking is about the trading DATE, not whether it's historical — a manual
+            // backfill for a past date must mark it done too, or every tick() (which only ever
+            // passes "now") would be a no-op anyway; this only matters for repeated manual
+            // /api/digest/run calls, which should also be idempotent.
+            database.saveBotState("digest_done:" + date, Instant.now().toString());
             if (!historical) {
                 database.saveBotState("digest:latest", json);
-                database.saveBotState("digest_done:" + date, Instant.now().toString());
             }
             logger.info("[DAILY_DIGEST] {} trades={} wins={} dbNet={} gap={} open={} alerts={} historical={}",
                 date, trades.size(), wins, String.format("%.2f", net),

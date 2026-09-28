@@ -1552,6 +1552,12 @@ public class ProfileManager implements Runnable {
             try {
                 var orderHistory = client.getDelegate().getOrderHistory(null, 50);
                 if (orderHistory != null && orderHistory.isArray()) {
+                    // Needed to compute pnl (for the post-loss gates below) before closeTrade() marks
+                    // the row CLOSED and its entry_price/quantity become historical.
+                    var openRecordsBySymbol = new java.util.HashMap<String, TradeDatabase.OpenTradeRecord>();
+                    for (var rec : database.getOpenTradeRecords(brokerName)) {
+                        openRecordsBySymbol.put(rec.symbol(), rec);
+                    }
                     for (var order : orderHistory) {
                         String side = order.path("side").asText("");
                         String status = order.path("status").asText("");
@@ -1568,6 +1574,22 @@ public class ProfileManager implements Runnable {
                         database.closeTrade(sym, fillTime, fillPrice, 0, brokerName, "reconciliation");
                         logger.info("{} Orphan recovery: closed {} with real fill price ${} from order history",
                             profilePrefix, sym, String.format("%.2f", fillPrice));
+
+                        // BUG FIX (2026-09-28): this path — a native stop/TP that filled at the broker
+                        // between polling cycles — used to ONLY close the DB row. It never armed the
+                        // price-improvement gate, never fed the consecutive-loss counter, and never fed
+                        // the circuit breaker, unlike every other exit path (all of which call
+                        // ExitEvaluator.applyPostExitCooldown()). Confirmed live: AAPL stopped out via
+                        // this exact path at 12:05 ET, and because the gate was never armed, the bot
+                        // re-bought AAPL 2h17m later just 0.18% below that exit — the 1% price-improvement
+                        // gate would have blocked it — for an avoidable second loss the same day. The flat
+                        // re-entry cooldown was already armed a few lines above (by symbol/portfolio, not
+                        // by price) — this closes the remaining gap using the fill price now in hand.
+                        var openRecord = openRecordsBySymbol.get(sym);
+                        if (openRecord != null) {
+                            double pnl = (fillPrice - openRecord.entryPrice()) * openRecord.quantity();
+                            exitEvaluator.applyPostExitCooldown(sym, fillPrice, pnl, profilePrefix, "reconciliation");
+                        }
                     }
                 }
             } catch (Exception e) {

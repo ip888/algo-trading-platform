@@ -175,6 +175,12 @@ final class ExitEvaluator {
                 riskGate.consecutiveStopLosses().merge(symbol, 1, Integer::sum);
             }
         } else if (pnl > 0) {
+            // Matches handleSell's own inline win-handling: a win clears any stale gate from an
+            // earlier loss on this symbol too, not just the consecutive-loss counter. Before this,
+            // every forced-exit caller of this method (time_decay, scalp_timeout, regime_flip,
+            // pre_earnings, reconciliation) could win right after a qualifying prior loss and leave
+            // the 1%-price-improvement gate armed at the OLD (lower) exit price indefinitely.
+            riskGate.lastExitPrices().remove(symbol);
             riskGate.consecutiveStopLosses().remove(symbol);
             if (riskGate.postLossCooldown() != null) riskGate.postLossCooldown().recordWin(symbol);
         }

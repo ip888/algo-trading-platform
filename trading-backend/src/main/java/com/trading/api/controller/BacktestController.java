@@ -227,12 +227,18 @@ public final class BacktestController {
                 // Fresh detector per sample — guarantees no cache carryover between samples.
                 var freshDetector = new com.trading.analysis.MarketRegimeDetector(replayClient, config, marketAnalyzer);
                 var analysis = freshDetector.getCurrentRegime();
-                results.add(Map.of(
-                    "sampleTime", sampleTime.toString(),
-                    "regime", analysis.regime().name(),
-                    "confidence", analysis.confidence(),
-                    "vix", analysis.vix()
-                ));
+                var row = new java.util.LinkedHashMap<String, Object>();
+                row.put("sampleTime", sampleTime.toString());
+                row.put("regime", analysis.regime().name());
+                row.put("confidence", analysis.confidence());
+                row.put("vix", analysis.vix());
+                // Breadth diagnostic (added 2026-09-30): surfaces the raw advance/decline count behind
+                // the MARKET_BREADTH_FILTER gate, since it's an 8-bucket ratio (any single sector ETF's
+                // daily wobble moves it by 12.5 points) and was otherwise invisible outside log lines.
+                row.put("breadth", analysis.breadth().strength());
+                row.put("advancing", analysis.breadth().advancingStocks());
+                row.put("declining", analysis.breadth().decliningStocks());
+                results.add(row);
             }
             ctx.json(Map.of("samples", results, "rawBarRanges", rawRanges));
         } catch (Exception e) {

@@ -179,7 +179,19 @@ public final class DailyCloseJob {
             }
             digest.put("blockedEntries", blocked);
 
-            // 5) Alerts
+            // 5) Explain a quiet day at a glance — added 2026-09-30, after a "why isn't the bot
+            // trading?" question that took a manual dig through /api/blocked-entries to answer. A
+            // gate correctly blocking every candidate (e.g. MARKET_BREADTH_FILTER) is NOT itself a
+            // problem, so this is a "notes" entry, not an "alert" — it explains, it doesn't warn.
+            var notes = new ArrayList<String>();
+            if (trades.size() < 3 && !blocked.isEmpty()) {
+                var top = blocked.entrySet().stream().max(Map.Entry.comparingByValue()).orElseThrow();
+                notes.add(String.format("Quiet day (%d trade%s) — most-blocked reason: \"%s\" (%dx)",
+                    trades.size(), trades.size() == 1 ? "" : "s", top.getKey(), top.getValue()));
+            }
+            digest.put("notes", notes);
+
+            // 6) Alerts
             double limit = config.getDigestGapAlertUsd();
             if (!historical && openPositions == 0 && Math.abs(gap) > limit) {
                 alerts.add(String.format("DB P&L differs from Alpaca equity change by $%.2f (limit $%.2f)", gap, limit));

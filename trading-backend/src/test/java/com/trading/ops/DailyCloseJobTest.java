@@ -104,6 +104,41 @@ class DailyCloseJobTest {
     }
 
     @Test
+    @DisplayName("a quiet day (few trades, many blocks) gets an explanatory note, not an alert")
+    void quietDay_getsExplanatoryNote() throws Exception {
+        when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));
+        account(1000.0, 1000.0); // flat day, no trades
+        for (int i = 0; i < 5; i++) {
+            db.saveBlockedEntry("SPY", "MAIN", "market breadth too low", 500.0, "WEAK_BULL", 10.0);
+        }
+        for (int i = 0; i < 2; i++) {
+            db.saveBlockedEntry("QQQ", "MAIN", "lunch blackout 11:30-13:00 ET", 700.0, "WEAK_BULL", 10.0);
+        }
+
+        var d = job.runFor(DAY);
+
+        assertTrue(((List<?>) d.get("alerts")).isEmpty(), "a correctly-blocking gate is not itself a problem");
+        var notes = (List<?>) d.get("notes");
+        assertEquals(1, notes.size());
+        assertTrue(notes.get(0).toString().contains("market breadth too low"));
+        assertTrue(notes.get(0).toString().contains("5x"));
+    }
+
+    @Test
+    @DisplayName("a normal trading day (3+ trades) gets no note even if some entries were blocked")
+    void normalDay_getsNoNote() throws Exception {
+        Instant entry = ZonedDateTime.of(DAY.atTime(10, 0), ET).toInstant();
+        for (int i = 0; i < 3; i++) seedTrade(entry.plusSeconds(i * 100), entry.plusSeconds(3600 + i * 100), 100.0, 101.0);
+        when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));
+        db.saveBlockedEntry("SPY", "MAIN", "market breadth too low", 500.0, "WEAK_BULL", 10.0);
+        account(1003.0, 1000.0);
+
+        var d = job.runFor(DAY);
+
+        assertTrue(((List<?>) d.get("notes")).isEmpty());
+    }
+
+    @Test
     @DisplayName("tick runs once after 16:10 ET on a weekday, never before, never on a weekend")
     void tick_schedule() throws Exception {
         when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));

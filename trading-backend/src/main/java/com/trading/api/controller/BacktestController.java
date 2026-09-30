@@ -90,6 +90,8 @@ public final class BacktestController {
             var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
             // intrabar=false reproduces the pre-2026-09-24 15-min-sampled exits (for comparison only)
             harness.setIntrabarExits(!"false".equalsIgnoreCase(ctx.queryParam("intrabar")));
+            // ?gates=false reproduces the pre-2026-09-30 ungated behaviour for comparison.
+            harness.setGatesEnabled(!"false".equalsIgnoreCase(ctx.queryParam("gates")));
             harness.loadHistory(liveClient, symbols, days);
             var report = harness.run(symbols, start, end, capital, maxPositions);
 
@@ -102,6 +104,7 @@ public final class BacktestController {
                 "stopLossPercent", config.getScalpStopLossPercent(), "takeProfitPercent", config.getScalpTakeProfitPercent(),
                 "maxDailyTrades", config.getScalpMaxDailyTrades()));
             response.put("regimeStepCounts", harness.getLastRunRegimeCounts());
+            response.put("gateBlockCounts", harness.getLastRunGateBlockCounts());
             response.put("report", report);
             ctx.json(response);
         } catch (Exception e) {
@@ -285,6 +288,8 @@ public final class BacktestController {
             var harness = new WalkForwardBacktestHarness(config, cacheDir, start);
             // intrabar=false reproduces the pre-2026-09-24 15-min-sampled exits (for comparison only)
             harness.setIntrabarExits(!"false".equalsIgnoreCase(ctx.queryParam("intrabar")));
+            // ?gates=false reproduces the pre-2026-09-30 ungated behaviour for comparison.
+            harness.setGatesEnabled(!"false".equalsIgnoreCase(ctx.queryParam("gates")));
             harness.loadHistory(liveClient, symbols, days);
             var report = harness.run(symbols, start, end, capital, maxPositions);
 
@@ -293,6 +298,7 @@ public final class BacktestController {
             response.put("requestedStart", start.toString());
             response.put("requestedEnd", end.toString());
             response.put("regimeStepCounts", harness.getLastRunRegimeCounts());
+            response.put("gateBlockCounts", harness.getLastRunGateBlockCounts());
             response.put("report", report);
             ctx.json(response);
         } catch (Exception e) {

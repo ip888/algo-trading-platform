@@ -9,6 +9,11 @@ import com.trading.api.model.Bar;
 import com.trading.config.Config;
 import com.trading.exits.ExitStrategyManager;
 import com.trading.exits.TimeDecayExitManager;
+import com.trading.analysis.MarketBreadthAnalyzer;
+import com.trading.filters.MarketHoursFilter;
+import com.trading.ops.EventDayDetector;
+import com.trading.risk.CircuitBreakerState;
+import com.trading.risk.PostLossCooldownTracker;
 import com.trading.persistence.TradeDatabase;
 import com.trading.risk.AdvancedPositionSizer;
 import com.trading.risk.CapitalTierManager;
@@ -32,18 +37,24 @@ import java.util.*;
  * validated against a historical window before it ever touches real capital, instead of the
  * previous validation method of "deploy, then watch a handful of live trades."
  *
- * <p><b>Explicit scope — what this does NOT replay</b> (documented so results are never mistaken
- * for full live-parity): sentiment gate, RiskPredictor, AnomalyDetector, the correlation entry
- * cap, circuit breakers/daily-loss halts, cooldowns, and Kelly sizing's database-backed win-rate
- * stats (the position sizer runs with a fresh, empty {@link TradeDatabase} each backtest, so its
- * win-rate defaults to {@code POSITION_SIZING_DEFAULT_WIN_RATE} rather than real history — this
- * only matters if {@code POSITION_SIZING_METHOD=KELLY}; it's a no-op under the currently-live
- * {@code FIXED} method). Those are all real, separate live gates layered on top of the signal
- * pipeline in {@code ProfileManager}, not part of the core "what does the strategy say, how big
- * a position, when does it exit" question this harness answers.
+ * <p><b>Entry gates modelled</b> (added 2026-09-30, faithfully mirroring {@code EntryEvaluator}'s
+ * logic — see each check's comment in {@link #checkEntryGates}): entry stagger, the session
+ * circuit breaker (consecutive losses / drawdown halt), daily loss/profit halts, the per-symbol
+ * flat stop-loss cooldown, the escalating {@link PostLossCooldownTracker} cooldown, the 1%
+ * price-improvement-after-loss rule, EOD entry cutoff, lunch blackout, the opening-window block
+ * ({@link MarketHoursFilter}), the VIX-minimum gate, the economic-calendar blackout, the real
+ * {@link MarketBreadthAnalyzer} (fed the same {@code regimeAnalysis.breadth()} live uses, not a
+ * simulation), "existing position in significant loss", the DB-backed rolling-expectancy
+ * win-rate gate (closed replay trades are now written to the backtest {@link TradeDatabase} so
+ * this — and the position sizer's own win-rate lookups — see real data instead of an always-empty
+ * table), and the price-based {@link EventDayDetector}. Toggle with {@link #setGatesEnabled} to
+ * reproduce the pre-2026-09-30 ungated behaviour for comparison.
  *
- * <p>Also does not replay real news (sentiment score stays neutral/0.0 for the duration), so any
- * future change that wires sentiment into the harness needs real historical news data first.
+ * <p><b>Still NOT replayed</b>: the sentiment gate (needs historical news, which the replay
+ * client doesn't have — see {@code HistoricalReplayBrokerClient.getNews}, always empty),
+ * RiskPredictor, AnomalyDetector, ML entry scoring, volume-profile analysis, the correlation
+ * entry cap, PDT reservation (a no-op live anyway — {@code PDT_PROTECTION_ENABLED=false}), and
+ * the inverse-ETF VIX/persistence gate. Those remain real gaps versus live.
  */
 public final class WalkForwardBacktestHarness {
     private static final Logger logger = LoggerFactory.getLogger(WalkForwardBacktestHarness.class);
@@ -85,6 +96,27 @@ public final class WalkForwardBacktestHarness {
     private final List<BacktestTrade> closedTrades = new ArrayList<>();
     private final List<double[]> equityCurve = new ArrayList<>(); // [epochSeconds, equity]
 
+    // ── Entry gates (2026-09-30) ────────────────────────────────────────────────────────────
+    // Toggle to reproduce the pre-2026-09-30 ungated behaviour for before/after comparison.
+    private boolean gatesEnabled = true;
+    private final MarketBreadthAnalyzer breadthAnalyzer;
+    private final EventDayDetector eventDayDetector;
+    private final CircuitBreakerState circuitBreaker;
+    private final PostLossCooldownTracker postLossCooldown;
+    // Per-symbol flat cooldown after ANY exit (mirrors riskGate.stopLossCooldowns()).
+    private final Map<String, Long> stopLossCooldownExpiry = new HashMap<>();
+    // Per-symbol price-improvement-after-loss gate (mirrors riskGate.lastExitPrices()).
+    private final Map<String, Double> lastExitPriceBySymbol = new HashMap<>();
+    // Global throttle between any two entries, regardless of symbol (mirrors
+    // RiskGate.MIN_ENTRY_SPACING_MS — package-private in a different package, so the same
+    // 90-second value is hardcoded here with this comment as the cross-reference).
+    private long lastEntryEpochMs = 0L;
+    private double todaySimPnL = 0.0;
+    private java.time.LocalDate todaySimDate = null;
+    // Diagnostic — how often each entry gate actually fired, so a "why did volume change"
+    // question doesn't require re-deriving it from the trade list.
+    private final Map<String, Integer> gateBlockCounts = new TreeMap<>();
+
     public WalkForwardBacktestHarness(Config config, Path cacheDir, Instant startingNow) {
         this.config = config;
         this.cache = new HistoricalBarCache(cacheDir);
@@ -99,6 +131,13 @@ public final class WalkForwardBacktestHarness {
         this.exitStrategyManager = new ExitStrategyManager(config);
         this.timeDecayExitManager = new TimeDecayExitManager(config);
         this.positionSizer = new AdvancedPositionSizer(config, database);
+        this.breadthAnalyzer = new MarketBreadthAnalyzer(config);
+        this.eventDayDetector = new EventDayDetector(
+            sym -> replayClient.getMarketHistory(sym, 3), sym -> replayClient.getBars(sym, "15Min", 40), config);
+        this.circuitBreaker = new CircuitBreakerState(
+            config.getCircuitBreakerConsecutiveLosses(), config.getCircuitBreakerSessionDrawdownPercent() / 100.0);
+        this.postLossCooldown = new PostLossCooldownTracker(
+            config.getPostLossCooldownMs(), config.getPostLossCooldownExtendedMs(), 2);
 
         regimeDetector.setNowSupplier(this::getSimNow);
         mtfAnalyzer.setNowSupplier(this::getSimNow);
@@ -109,6 +148,15 @@ public final class WalkForwardBacktestHarness {
 
     public void setIntrabarExits(boolean enabled) {
         this.intrabarExits = enabled;
+    }
+
+    public void setGatesEnabled(boolean enabled) {
+        this.gatesEnabled = enabled;
+    }
+
+    /** Diagnostic — how many times each entry gate blocked a candidate in the most recent run(). */
+    public Map<String, Integer> getLastRunGateBlockCounts() {
+        return new TreeMap<>(gateBlockCounts);
     }
 
     private Instant getSimNow() {
@@ -197,6 +245,14 @@ public final class WalkForwardBacktestHarness {
         prevStep = null;
         partialPnl.clear();
         originalQty.clear();
+        stopLossCooldownExpiry.clear();
+        lastExitPriceBySymbol.clear();
+        gateBlockCounts.clear();
+        lastEntryEpochMs = 0L;
+        todaySimPnL = 0.0;
+        todaySimDate = null;
+        circuitBreaker.resetForNewSession(initialCapital);
+        postLossCooldown.clear();
 
         List<Instant> steps = stepTimestamps(tradedSymbols, start, end);
         logger.info("Replaying {} steps from {} to {}", steps.size(), start, end);
@@ -211,6 +267,19 @@ public final class WalkForwardBacktestHarness {
 
             var regimeAnalysis = regimeDetector.getCurrentRegime();
             lastRunRegimeCounts.merge(regimeAnalysis.regime(), 1, Integer::sum);
+
+            // Day rollover: reset the daily P&L halt and the session circuit breaker, same as
+            // live's midnight-ET rollover. Total mark-to-market equity (cash + open positions),
+            // matching what ProfileManager passes into these checks live.
+            double totalEquity = equity + openPositionsValue(t);
+            var etDate = ZonedDateTime.ofInstant(t, ET).toLocalDate();
+            if (!etDate.equals(todaySimDate)) {
+                todaySimDate = etDate;
+                todaySimPnL = 0.0;
+                circuitBreaker.resetForNewSession(totalEquity);
+            }
+            circuitBreaker.updateEquity(totalEquity);
+            breadthAnalyzer.updateBreadth(regimeAnalysis.breadth().strength());
 
             // Manage open positions first — exits before new entries, matching live priority.
             for (String symbol : new ArrayList<>(openPositions.keySet())) {
@@ -235,8 +304,25 @@ public final class WalkForwardBacktestHarness {
                 }
             }
 
+            // Cycle-level halts (apply to every symbol, matching live's pre-loop circuit-breaker
+            // and daily-loss/profit checks in ProfileManager.handleBuy/EntryEvaluator).
+            boolean haltAllEntries = false;
+            if (gatesEnabled) {
+                if (circuitBreaker.shouldHaltEntries()) {
+                    haltAllEntries = true;
+                    gateBlockCounts.merge("circuit breaker " + circuitBreaker.tripReason(), 1, Integer::sum);
+                } else if (config.isDailyMaxLossEnabled()
+                        && todaySimPnL < -Math.abs(totalEquity * config.getDailyMaxLossPercent() / 100.0)) {
+                    haltAllEntries = true;
+                    gateBlockCounts.merge("daily loss limit hit", 1, Integer::sum);
+                } else if (config.isDailyProfitTargetEnabled() && todaySimPnL >= config.getDailyProfitTarget()) {
+                    haltAllEntries = true;
+                    gateBlockCounts.merge("daily profit target reached", 1, Integer::sum);
+                }
+            }
+
             // Consider new entries if under the position cap.
-            if (!pastEod && openPositions.size() < maxPositions) {
+            if (!pastEod && !haltAllEntries && openPositions.size() < maxPositions) {
                 for (String symbol : tradedSymbols) {
                     if (openPositions.containsKey(symbol)) continue;
                     if (openPositions.size() >= maxPositions) break;
@@ -270,6 +356,14 @@ public final class WalkForwardBacktestHarness {
         }
         if (!(signal instanceof TradingSignal.Buy) && !(signal instanceof TradingSignal.ScalpBuy)) {
             return;
+        }
+        boolean isScalpSignal = signal instanceof TradingSignal.ScalpBuy;
+        if (gatesEnabled) {
+            String blockReason = checkEntryGates(symbol, price, regime, isScalpSignal, t);
+            if (blockReason != null) {
+                gateBlockCounts.merge(blockReason, 1, Integer::sum);
+                return;
+            }
         }
 
         double stopLossPct;
@@ -311,10 +405,129 @@ public final class WalkForwardBacktestHarness {
         openPositionStrategy.put(symbol, strategyLabel);
         originalQty.put(symbol, shares);
         equity -= shares * price;
+        lastEntryEpochMs = t.toEpochMilli();
+        // Persist to the backtest DB so DB-backed gates/sizing (rolling-expectancy gate,
+        // AdvancedPositionSizer's Kelly win-rate lookup) see real data instead of an always-empty
+        // table — a latent fidelity gap that predates the 2026-09-30 gate work.
+        database.recordTradeWithContext(symbol, strategyLabel, "BACKTEST", "backtest", t, price, shares,
+            stopLoss, takeProfit, regime.regime().name(), regime.vix(), regime.breadth().strength());
         // Same commit-on-execution contract as live: only a really-opened scalp consumes a daily slot.
         if (signal instanceof TradingSignal.ScalpBuy) {
             strategyManager.commitScalpEntry(symbol);
         }
+    }
+
+    /**
+     * Mirrors {@code EntryEvaluator.evaluate()}'s gate chain (see its class Javadoc for the full
+     * live list). Order follows the live gate order where it matters for interaction; gates not
+     * modelled here are listed in this class's own Javadoc.
+     * @return a block reason, or null if every modelled gate passes.
+     */
+    /** Package-visible (not private) so tests can exercise the gate chain directly. */
+    String checkEntryGates(String symbol, double price, MarketRegimeDetector.MarketRegimeAnalysis regime,
+                                   boolean isScalp, Instant t) {
+        long nowMs = t.toEpochMilli();
+        double vix = regime.vix();
+        var zdt = ZonedDateTime.ofInstant(t, ET);
+
+        // Entry stagger — global, not per-symbol (see the field comment for the hardcoded value).
+        if (nowMs - lastEntryEpochMs < 90_000L) {
+            return "entry stagger";
+        }
+
+        // Escalating post-loss cooldown (per symbol).
+        if (postLossCooldown.isInCooldown(symbol, nowMs)) {
+            return "post-loss cooldown";
+        }
+
+        // Flat stop-loss cooldown after ANY exit (per symbol) — not scalp-exempt live, so not here either.
+        Long cooldownExpiry = stopLossCooldownExpiry.get(symbol);
+        if (cooldownExpiry != null && nowMs < cooldownExpiry) {
+            return "stop loss cooldown";
+        }
+
+        // Price-improvement-after-loss (1%), including the same state-clearing side effects as
+        // EntryEvaluator: a recovery above the exit price, or enough of a discount, clears the gate.
+        Double lastExit = lastExitPriceBySymbol.get(symbol);
+        if (lastExit != null) {
+            double improvementPercent = (lastExit - price) / lastExit * 100.0;
+            if (price > lastExit) {
+                lastExitPriceBySymbol.remove(symbol);
+            } else if (improvementPercent < 1.0) {
+                return "waiting for price improvement below last exit";
+            } else {
+                lastExitPriceBySymbol.remove(symbol);
+            }
+        }
+
+        // Time-of-day gates — scalp-exempt live (ScalpStrategy has its own window), so exempt here too.
+        if (!isScalp) {
+            if (config.isEodExitEnabled()) {
+                try {
+                    var eodTime = java.time.LocalTime.parse(config.getEodExitTime());
+                    var mainCutoff = eodTime.minusMinutes(config.getMainEodEntryCutoffMinutes());
+                    if (!zdt.toLocalTime().isBefore(mainCutoff)) {
+                        return "within " + config.getMainEodEntryCutoffMinutes() + "min of EOD";
+                    }
+                } catch (Exception ignored) { /* malformed EOD_EXIT_TIME: fail open, matches live's catch */ }
+            }
+            if (config.isLunchBlackoutEnabled()) {
+                try {
+                    var lunchStart = java.time.LocalTime.parse(config.getLunchBlackoutStart());
+                    var lunchEnd = java.time.LocalTime.parse(config.getLunchBlackoutEnd());
+                    var nowET = zdt.toLocalTime();
+                    if (!nowET.isBefore(lunchStart) && nowET.isBefore(lunchEnd)) {
+                        return "lunch blackout " + lunchStart + "-" + lunchEnd + " ET";
+                    }
+                } catch (Exception ignored) { }
+            }
+            if (config.isNoTradeOpenWindowEnabled()
+                    && MarketHoursFilter.isInOpeningWindow(zdt, config.getNoTradeOpenWindowMinutes())) {
+                return "opening-window block: first " + config.getNoTradeOpenWindowMinutes() + "min";
+            }
+            if (config.isVixEntryGateEnabled() && vix > 0 && vix < config.getVixEntryMinimum()) {
+                return "VIX " + vix + " below minimum " + config.getVixEntryMinimum();
+            }
+        }
+
+        if (config.isEconomicCalendarBlackoutEnabled()
+                && config.getEconomicBlackoutDates().contains(zdt.toLocalDate())) {
+            return "economic calendar blackout";
+        }
+
+        // Real market breadth (already computed every step from the same sector-ETF bars live uses),
+        // not a simulation — see run()'s per-step breadthAnalyzer.updateBreadth() call.
+        boolean skipBreadthFilter = regime.regime() == MarketRegimeDetector.MarketRegime.RANGE_BOUND && vix < 15.0;
+        if (!skipBreadthFilter && !breadthAnalyzer.isMarketHealthy()) {
+            return "market breadth too low";
+        }
+
+        // An existing held position already down >0.20% blocks adding fresh exposure.
+        for (var e : openPositions.entrySet()) {
+            double heldPrice = latestClose(e.getKey(), t);
+            if (Double.isNaN(heldPrice)) continue;
+            double lossPct = (heldPrice - e.getValue().entryPrice()) / e.getValue().entryPrice() * 100.0;
+            if (lossPct <= -0.20) {
+                return "existing position is in significant loss";
+            }
+        }
+
+        // Rolling-expectancy win-rate gate (2026-09-25 live addition) — reads the backtest DB
+        // rows tryEnter() now writes, not the live production database.
+        String regimeName = regime.regime().name();
+        var w = database.getRecentSymbolStats(symbol, regimeName,
+            config.getWinRateGateWindowDays(), config.getWinRateGateWindowTrades());
+        if (w != null && w.trades() >= config.getWinRateGateMinTrades()
+                && w.winRate() < config.getWinRateGateMaxWinRate() && w.avgReturnPct() < 0) {
+            return "low win rate in " + regimeName;
+        }
+
+        // Price-based event-day gate (2026-09-25 live addition) — single stocks only.
+        if (eventDayDetector.eventReason(symbol).isPresent()) {
+            return "event day";
+        }
+
+        return null;
     }
 
     private void checkExit(String symbol, double price, Instant t) {
@@ -438,13 +651,26 @@ public final class WalkForwardBacktestHarness {
 
     private void bankPartial(String symbol, TradePosition pos, double qtySold, double price) {
         equity += qtySold * price;
-        partialPnl.merge(symbol, (price - pos.entryPrice()) * qtySold, Double::sum);
+        double legPnl = (price - pos.entryPrice()) * qtySold;
+        partialPnl.merge(symbol, legPnl, Double::sum);
+        // Live's partial/runner paths feed todayPnL (updateDailyPnLFn) but NOT the cooldown/circuit
+        // breaker — only a full exit does that (see ExitEvaluator, and the 2026-09-21 fix that
+        // closed this exact live gap for partials specifically).
+        todaySimPnL += legPnl;
     }
 
     /** Visible for testing. */
     List<BacktestTrade> closedTradesForTest() {
         return closedTrades;
     }
+
+    // ── Test-only seeding hooks for the entry-gate chain ────────────────────────────────────
+    void seedStopLossCooldownForTest(String symbol, long expiryMs) { stopLossCooldownExpiry.put(symbol, expiryMs); }
+    void seedLastExitPriceForTest(String symbol, double price) { lastExitPriceBySymbol.put(symbol, price); }
+    void seedLastEntryEpochMsForTest(long ms) { lastEntryEpochMs = ms; }
+    MarketBreadthAnalyzer breadthAnalyzerForTest() { return breadthAnalyzer; }
+    CircuitBreakerState circuitBreakerForTest() { return circuitBreaker; }
+    PostLossCooldownTracker postLossCooldownForTest() { return postLossCooldown; }
 
     /** Visible for testing. */
     void openPositionForTest(String symbol, TradePosition p, String strategy) {
@@ -465,6 +691,23 @@ public final class WalkForwardBacktestHarness {
         equity += position.quantity() * exitPrice;
         closedTrades.add(new BacktestTrade(symbol, strategy, position.entryTime(), exitTime,
             position.entryPrice(), exitPrice, qtyReported, pnl, exitReason));
+
+        // Post-exit gate state (mirrors ExitEvaluator.applyPostExitCooldown, run for every full
+        // exit including EOD/end-of-window — a simplification: live's EOD flatten doesn't arm
+        // these, but the overnight gap outlasts every cooldown here except the escalated
+        // post-loss one, so this errs toward slightly MORE caution than live, never less).
+        long nowMs = exitTime.toEpochMilli();
+        stopLossCooldownExpiry.put(symbol, nowMs + config.getStopLossCooldownMs());
+        if (pnl < 0) {
+            lastExitPriceBySymbol.put(symbol, exitPrice);
+            postLossCooldown.recordLoss(symbol, nowMs);
+        } else if (pnl > 0) {
+            lastExitPriceBySymbol.remove(symbol);
+            postLossCooldown.recordWin(symbol);
+        }
+        circuitBreaker.recordTrade(pnl);
+        todaySimPnL += pnl;
+        database.closeTrade(symbol, exitTime, exitPrice, pnl, "backtest", exitReason);
     }
 
     private double openPositionsValue(Instant t) {

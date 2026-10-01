@@ -35,6 +35,42 @@ public final class BacktestController {
         app.get("/api/backtest/momentum-diagnose", this::diagnoseMomentum);
         app.get("/api/backtest/scalp-walkforward", this::runScalpWalkForward);
         app.get("/api/backtest/raw-bars", this::getRawBars);
+        app.get("/api/backtest/sentiment-test", this::testSentiment);
+    }
+
+    /**
+     * Diagnostic-only, read-only: tests the FinGPT/HuggingFace sentiment call directly, WITHOUT
+     * touching FINGPT_ENABLED (which would immediately start affecting the live negative-sentiment
+     * entry gate). Builds its own short-lived FinGPTClient from HUGGINGFACE_API_TOKEN (never
+     * logged or returned) so connectivity/model-availability can be verified before flipping
+     * anything live. ?model= overrides the configured model, so an alternative (e.g. a standard
+     * hosted FinBERT) can be tried without a redeploy per attempt.
+     */
+    private void testSentiment(Context ctx) {
+        try {
+            String token = System.getenv("HUGGINGFACE_API_TOKEN");
+            if (token == null || token.isBlank()) {
+                ctx.status(400).json(Map.of("error", "HUGGINGFACE_API_TOKEN is not set on this machine"));
+                return;
+            }
+            var config = new Config();
+            String model = ctx.queryParamAsClass("model", String.class)
+                .getOrDefault(config.getFinGPTSentimentModel());
+            String text = ctx.queryParamAsClass("text", String.class)
+                .getOrDefault("Apple shares surge after strong earnings beat and raised guidance.");
+            var client = new com.trading.ai.FinGPTClient(token, model, true, 1);
+            var result = client.analyzeSentiment(text, "TEST");
+            ctx.json(Map.of(
+                "model", model,
+                "text", text,
+                "sentimentScore", result.sentimentScore(),
+                "confidence", result.confidence(),
+                "weightedScore", result.weightedScore(),
+                "interpretation", result.interpretation()));
+        } catch (Exception e) {
+            logger.error("sentiment-test failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
     }
 
     /**

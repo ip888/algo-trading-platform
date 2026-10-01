@@ -34,6 +34,38 @@ public final class BacktestController {
         app.get("/api/backtest/check-market-history", this::checkMarketHistory);
         app.get("/api/backtest/momentum-diagnose", this::diagnoseMomentum);
         app.get("/api/backtest/scalp-walkforward", this::runScalpWalkForward);
+        app.get("/api/backtest/raw-bars", this::getRawBars);
+    }
+
+    /**
+     * Diagnostic-only, read-only: returns the actual OHLCV bars for a symbol/timeframe, so an
+     * entry-condition post-mortem (RSI, volume ratio, trend as of a specific past entry time) can
+     * be computed outside the JVM instead of needing a dedicated endpoint per indicator. Added
+     * 2026-10-01 to investigate why "reconciliation" (hard native-stop) exits were the worst-
+     * performing exit bucket since Sep 21 (24% WR, avg loss $0.74 vs avg win $0.34).
+     */
+    private void getRawBars(Context ctx) {
+        try {
+            String symbol = ctx.queryParam("symbol");
+            if (symbol == null || symbol.isBlank()) {
+                ctx.status(400).json(Map.of("error", "symbol is required"));
+                return;
+            }
+            String timeframe = ctx.queryParamAsClass("timeframe", String.class).getOrDefault("15Min");
+            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(500);
+            var config = new Config();
+            var client = new AlpacaClient(config);
+            var bars = client.getBars(symbol, timeframe, Math.min(limit, 5000));
+            var out = new ArrayList<Map<String, Object>>();
+            for (var b : bars) {
+                out.add(Map.of("t", b.timestamp().toString(), "o", b.open(), "h", b.high(),
+                    "l", b.low(), "c", b.close(), "v", b.volume()));
+            }
+            ctx.json(Map.of("symbol", symbol, "timeframe", timeframe, "count", out.size(), "bars", out));
+        } catch (Exception e) {
+            logger.error("raw-bars failed", e);
+            ctx.status(500).json(Map.of("error", e.getMessage()));
+        }
     }
 
     /**

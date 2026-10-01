@@ -1822,6 +1822,17 @@ public class Config {
     public int getScalpVolatilityStopLookbackBars() {
         return getIntProperty("SCALP_VOLATILITY_STOP_LOOKBACK_BARS", 20);
     }
+    // ---- Scalp noise filter (2026-10-01) ----
+    // Alternative to the widen-the-stop approach above, which backtested worse (dilutes whatever
+    // quick-capture edge scalp has at least as much as it removes noise-driven stop-outs).
+    // Declines the trade outright when the symbol's own median 15-min bar range already leaves
+    // the flat stop with less than SCALP_NOISE_FILTER_MIN_RATIO x breathing room.
+    public boolean isScalpNoiseFilterEnabled() {
+        return getBooleanProperty("SCALP_NOISE_FILTER_ENABLED", false);
+    }
+    public double getScalpNoiseFilterMinRatio() {
+        return getDoubleProperty("SCALP_NOISE_FILTER_MIN_RATIO", 1.3);
+    }
     public int getScalpMaxDailyTrades() {
         return getIntProperty("SCALP_MAX_DAILY_TRADES", 4);
     }

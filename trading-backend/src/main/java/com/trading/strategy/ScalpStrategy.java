@@ -107,6 +107,26 @@ public class ScalpStrategy {
             return new TradingSignal.Hold("Scalp: insufficient 15-min history");
         }
 
+        // Noise filter (2026-10-01): skip the symbol entirely when its own typical 15-min bar
+        // range already swallows the flat stop — widening the stop to compensate (tried first)
+        // backtested WORSE (dilutes whatever quick-capture edge scalp has at least as much as it
+        // removes noise-stops; see ScalpStrategy's effectiveStopAndTarget and the 2026-10-01
+        // decision log entry). This instead declines the trade outright on a structurally
+        // mismatched symbol, rather than taking it on worse terms.
+        if (config.isScalpNoiseFilterEnabled()) {
+            Double medianRangePct = medianBarRangePct(bars, config.getScalpVolatilityStopLookbackBars());
+            if (medianRangePct != null && medianRangePct > 0) {
+                double stopToNoiseRatio = config.getScalpStopLossPercent() / medianRangePct;
+                if (stopToNoiseRatio < config.getScalpNoiseFilterMinRatio()) {
+                    String reason = String.format(
+                        "Scalp: %s too noisy for the stop (stop/medianRange=%.2fx < %.2fx min, median 15m range=%.2f%%)",
+                        symbol, stopToNoiseRatio, config.getScalpNoiseFilterMinRatio(), medianRangePct);
+                    logger.info(reason);
+                    return new TradingSignal.Hold(reason);
+                }
+            }
+        }
+
         LocalDate today = nowSupplier.get().toLocalDate();
         List<Bar> todayBars = bars.stream()
             .filter(b -> b.timestamp().atZone(ET).toLocalDate().equals(today))
@@ -293,21 +313,10 @@ public class ScalpStrategy {
         if (!config.isScalpVolatilityAwareStopEnabled()) {
             return new double[]{flatSl, flatTp};
         }
-        int lookback = config.getScalpVolatilityStopLookbackBars();
-        if (bars.size() < lookback + 1) {
+        Double medianRangePct = medianBarRangePct(bars, config.getScalpVolatilityStopLookbackBars());
+        if (medianRangePct == null) {
             return new double[]{flatSl, flatTp};
         }
-        var recent = bars.subList(bars.size() - lookback, bars.size());
-        double[] ranges = recent.stream()
-            .filter(b -> b.close() > 0)
-            .mapToDouble(b -> (b.high() - b.low()) / b.close() * 100.0)
-            .sorted().toArray();
-        if (ranges.length == 0) {
-            return new double[]{flatSl, flatTp};
-        }
-        double medianRangePct = ranges.length % 2 == 1
-            ? ranges[ranges.length / 2]
-            : (ranges[ranges.length / 2 - 1] + ranges[ranges.length / 2]) / 2.0;
         double floorSl = medianRangePct * config.getScalpVolatilityStopMultiplier();
         if (floorSl <= flatSl) {
             return new double[]{flatSl, flatTp}; // this symbol's noise already fits inside the flat stop
@@ -320,6 +329,28 @@ public class ScalpStrategy {
             String.format("%.2f", medianRangePct), config.getScalpVolatilityStopMultiplier(),
             String.format("%.2f", flatTp), String.format("%.2f", widenedTp));
         return new double[]{widenedSl, widenedTp};
+    }
+
+    /**
+     * Median (high-low)/close percent range over the last {@code lookback} bars. Shared by
+     * {@link #effectiveStopAndTarget} and the noise filter above. Null (fails safe to "do
+     * nothing" for both callers) when there isn't enough history.
+     */
+    Double medianBarRangePct(List<Bar> bars, int lookback) {
+        if (bars.size() < lookback + 1) {
+            return null;
+        }
+        var recent = bars.subList(bars.size() - lookback, bars.size());
+        double[] ranges = recent.stream()
+            .filter(b -> b.close() > 0)
+            .mapToDouble(b -> (b.high() - b.low()) / b.close() * 100.0)
+            .sorted().toArray();
+        if (ranges.length == 0) {
+            return null;
+        }
+        return ranges.length % 2 == 1
+            ? ranges[ranges.length / 2]
+            : (ranges[ranges.length / 2 - 1] + ranges[ranges.length / 2]) / 2.0;
     }
 
     private boolean isOnCooldown(String symbol) {

@@ -88,6 +88,8 @@ class ScalpStrategyTest {
         ScalpStrategy.clearCooldown("SPY");
         ScalpStrategy.clearCooldown("QQQ");
         ScalpStrategy.clearCooldown("NVDA");
+        ScalpStrategy.clearCooldown("META");
+        ScalpStrategy.clearCooldown("OIH");
     }
 
     /** Returns a controlled strategy with a fixed morning clock. */
@@ -465,12 +467,14 @@ class ScalpStrategyTest {
 
     // ── effectiveStopAndTarget (volatility-aware scalp stop, 2026-10-01) ───────────────────────
 
-    private static List<Bar> barsWithRange(double rangePct, int n, double price) {
+    /** Bars ending just before `now`, each with the given high-low range; last bar closes UP. */
+    private List<Bar> barsWithRange(double rangePct, int n, double price) {
         var bars = new ArrayList<Bar>();
-        var t = Instant.parse("2026-10-01T14:00:00Z");
+        double half = price * rangePct / 100.0 / 2;
         for (int i = 0; i < n; i++) {
-            double half = price * rangePct / 100.0 / 2;
-            bars.add(new Bar(t.plusSeconds(i * 900L), price, price + half, price - half, price, 1000L));
+            Instant ts = fixedNow.minusMinutes((long) (n - i) * 15).toInstant();
+            double close = (i == n - 1) ? price + half * 0.1 : price; // tiny up-close on the last bar
+            bars.add(new Bar(ts, price, price + half, price - half, close, 1000L));
         }
         return bars;
     }
@@ -517,5 +521,65 @@ class ScalpStrategyTest {
         var s = new ScalpStrategy(mockClient, mockConfig);
         var slTp = s.effectiveStopAndTarget("META", barsWithRange(5.0, 5, 750.0)); // only 5 bars, need 20+
         assertArrayEquals(new double[]{0.35, 0.70}, slTp, 1e-9);
+    }
+
+    // ── scalp noise filter (2026-10-01) ─────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("noise filter flag off: a too-noisy symbol is NOT skipped by the filter")
+    void noiseFilter_flagOff_doesNotSkip() throws Exception {
+        when(mockConfig.isScalpNoiseFilterEnabled()).thenReturn(false);
+        var s = controlled();
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(barsWithRange(1.0, 100, 750.0));
+        var signal = s.evaluate("META", 750.0, 0);
+        assertInstanceOf(TradingSignal.ScalpBuy.class, signal, "filter is off, so the normal entry logic decides");
+    }
+
+    @Test
+    @DisplayName("noise filter flag on: a symbol whose noise already exceeds the stop is declined")
+    void noiseFilter_declinesNoisySymbol() throws Exception {
+        when(mockConfig.isScalpNoiseFilterEnabled()).thenReturn(true);
+        when(mockConfig.getScalpNoiseFilterMinRatio()).thenReturn(1.3);
+        when(mockConfig.getScalpVolatilityStopLookbackBars()).thenReturn(20);
+        var s = controlled();
+        // stop=0.35%, median range=0.50% -> ratio 0.35/0.50=0.70x < 1.3x min -> declined
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(barsWithRange(0.50, 100, 750.0));
+        var signal = s.evaluate("META", 750.0, 0);
+        assertInstanceOf(TradingSignal.Hold.class, signal);
+        assertTrue(((TradingSignal.Hold) signal).reason().contains("too noisy"), signal.toString());
+    }
+
+    @Test
+    @DisplayName("noise filter flag on: a calm symbol with enough stop breathing room is unaffected")
+    void noiseFilter_allowsCalmSymbol() throws Exception {
+        when(mockConfig.isScalpNoiseFilterEnabled()).thenReturn(true);
+        when(mockConfig.getScalpNoiseFilterMinRatio()).thenReturn(1.3);
+        when(mockConfig.getScalpVolatilityStopLookbackBars()).thenReturn(20);
+        var s = controlled();
+        // stop=0.35%, median range=0.10% -> ratio 0.35/0.10=3.5x >= 1.3x min -> allowed through
+        when(mockClient.getBars(any(), any(), anyInt())).thenReturn(barsWithRange(0.10, 100, 750.0));
+        var signal = s.evaluate("OIH", 750.0, 0);
+        assertInstanceOf(TradingSignal.ScalpBuy.class, signal);
+    }
+
+    @Test
+    @DisplayName("medianBarRangePct returns null (fails safe) with insufficient history")
+    void medianBarRangePct_insufficientHistory_returnsNull() {
+        var s = new ScalpStrategy(mockClient, mockConfig);
+        assertNull(s.medianBarRangePct(barsWithRange(1.0, 5, 100.0), 20));
+    }
+
+    @Test
+    @DisplayName("medianBarRangePct computes the median, not the mean, of the recent bar ranges")
+    void medianBarRangePct_computesMedian() {
+        var s = new ScalpStrategy(mockClient, mockConfig);
+        var bars = new ArrayList<Bar>();
+        var t = Instant.parse("2026-10-01T14:00:00Z");
+        double[] rangesPct = {0.10, 0.10, 0.10, 0.10, 2.00}; // one outlier shouldn't move the median much
+        for (int i = 0; i < rangesPct.length; i++) {
+            double half = 100.0 * rangesPct[i] / 100.0 / 2;
+            bars.add(new Bar(t.plusSeconds(i * 900L), 100.0, 100.0 + half, 100.0 - half, 100.0, 1000L));
+        }
+        assertEquals(0.10, s.medianBarRangePct(bars, 4), 0.001);
     }
 }

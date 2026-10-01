@@ -92,7 +92,10 @@ public class FinGPTClient {
      * Call HuggingFace Inference API for sentiment analysis.
      */
     private SentimentResult callHuggingFaceAPI(String text) throws IOException {
-        String url = "https://api-inference.huggingface.co/models/" + sentimentModel;
+        // HuggingFace retired api-inference.huggingface.co in favor of this router endpoint
+        // (confirmed 2026-10-01: the old host no longer resolves in DNS at all). Same request/
+        // response contract for the hf-inference provider, just a different host.
+        String url = "https://router.huggingface.co/hf-inference/models/" + sentimentModel;
         
         // Prepare request body
         String jsonBody = objectMapper.writeValueAsString(

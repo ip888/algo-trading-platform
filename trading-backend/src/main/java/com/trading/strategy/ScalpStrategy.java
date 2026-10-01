@@ -160,8 +160,8 @@ public class ScalpStrategy {
                 "Scalp: RSI %.1f in window [%.0f–%.0f], above VWAP $%.2f, vol %.1f× avg [%d/%d today]",
                 rsi, rsiBuyMin, rsiBuyMax, vwap, volumeRatio, count, config.getScalpMaxDailyTrades());
             logger.info("{}: SCALP BUY — {}", symbol, reason);
-            return new TradingSignal.ScalpBuy(reason,
-                config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent());
+            double[] slTp = effectiveStopAndTarget(symbol, bars);
+            return new TradingSignal.ScalpBuy(reason, slTp[0], slTp[1]);
         }
 
         // --- VWAP reclaim entry ---
@@ -179,8 +179,8 @@ public class ScalpStrategy {
                     "Scalp VWAP reclaim: $%.2f crossed above VWAP $%.2f, RSI=%.1f, vol=%.1f× [%d/%d today]",
                     currentPrice, vwap, rsi, volumeRatio, count, config.getScalpMaxDailyTrades());
                 logger.info("{}: SCALP BUY (VWAP reclaim) — {}", symbol, reason);
-                return new TradingSignal.ScalpBuy(reason,
-                    config.getScalpStopLossPercent(), config.getScalpTakeProfitPercent());
+                double[] slTp = effectiveStopAndTarget(symbol, bars);
+                return new TradingSignal.ScalpBuy(reason, slTp[0], slTp[1]);
             }
         }
 
@@ -276,6 +276,52 @@ public class ScalpStrategy {
      * scalp entry for the rest of any backtest run. Confirmed empirically: identical backtest
      * requests returned different scalp trade counts run-to-run purely from real-time drift.
      */
+    /**
+     * Floors the stop/target at a multiple of the symbol's own recent median 15-min bar range,
+     * instead of always using the flat config percentages. See Config's Javadoc comment on
+     * SCALP_VOLATILITY_AWARE_STOP_ENABLED for why: the flat stop sits inside ordinary noise for
+     * most scalp-eligible symbols. No-op (returns the flat config values unchanged) when the
+     * feature flag is off, when there isn't enough bar history, or when the symbol's own noise is
+     * already narrower than the flat stop (the common case for calm names — don't widen what
+     * doesn't need it).
+     * @return [stopLossPercent, takeProfitPercent]
+     */
+    /** Package-visible (not private) so tests can exercise it directly. */
+    double[] effectiveStopAndTarget(String symbol, List<Bar> bars) {
+        double flatSl = config.getScalpStopLossPercent();
+        double flatTp = config.getScalpTakeProfitPercent();
+        if (!config.isScalpVolatilityAwareStopEnabled()) {
+            return new double[]{flatSl, flatTp};
+        }
+        int lookback = config.getScalpVolatilityStopLookbackBars();
+        if (bars.size() < lookback + 1) {
+            return new double[]{flatSl, flatTp};
+        }
+        var recent = bars.subList(bars.size() - lookback, bars.size());
+        double[] ranges = recent.stream()
+            .filter(b -> b.close() > 0)
+            .mapToDouble(b -> (b.high() - b.low()) / b.close() * 100.0)
+            .sorted().toArray();
+        if (ranges.length == 0) {
+            return new double[]{flatSl, flatTp};
+        }
+        double medianRangePct = ranges.length % 2 == 1
+            ? ranges[ranges.length / 2]
+            : (ranges[ranges.length / 2 - 1] + ranges[ranges.length / 2]) / 2.0;
+        double floorSl = medianRangePct * config.getScalpVolatilityStopMultiplier();
+        if (floorSl <= flatSl) {
+            return new double[]{flatSl, flatTp}; // this symbol's noise already fits inside the flat stop
+        }
+        double rrRatio = flatTp / flatSl;
+        double widenedSl = floorSl;
+        double widenedTp = floorSl * rrRatio;
+        logger.info("Scalp {}: widened stop {}% -> {}% (median 15m bar range {}%, {}x floor) [TP {}% -> {}%]",
+            symbol, String.format("%.2f", flatSl), String.format("%.2f", widenedSl),
+            String.format("%.2f", medianRangePct), config.getScalpVolatilityStopMultiplier(),
+            String.format("%.2f", flatTp), String.format("%.2f", widenedTp));
+        return new double[]{widenedSl, widenedTp};
+    }
+
     private boolean isOnCooldown(String symbol) {
         return cooldownMinutesLeft(symbol) > 0.0;
     }

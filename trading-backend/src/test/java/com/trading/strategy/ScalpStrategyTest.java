@@ -462,4 +462,60 @@ class ScalpStrategyTest {
         s.setNowSupplier(() -> fixedNow.withHour(14).withMinute(30));
         assertTrue(s.isInScalpWindow());
     }
+
+    // ── effectiveStopAndTarget (volatility-aware scalp stop, 2026-10-01) ───────────────────────
+
+    private static List<Bar> barsWithRange(double rangePct, int n, double price) {
+        var bars = new ArrayList<Bar>();
+        var t = Instant.parse("2026-10-01T14:00:00Z");
+        for (int i = 0; i < n; i++) {
+            double half = price * rangePct / 100.0 / 2;
+            bars.add(new Bar(t.plusSeconds(i * 900L), price, price + half, price - half, price, 1000L));
+        }
+        return bars;
+    }
+
+    @Test
+    @DisplayName("flag off: returns the flat config SL/TP unchanged, no matter how wide the bars are")
+    void volAwareStop_flagOff_returnsFlatValues() {
+        when(mockConfig.isScalpVolatilityAwareStopEnabled()).thenReturn(false);
+        var s = new ScalpStrategy(mockClient, mockConfig);
+        var slTp = s.effectiveStopAndTarget("META", barsWithRange(2.0, 25, 750.0));
+        assertArrayEquals(new double[]{0.35, 0.70}, slTp, 1e-9);
+    }
+
+    @Test
+    @DisplayName("flag on, symbol noisier than the flat stop: widens SL and TP, preserving the R:R ratio")
+    void volAwareStop_widensForNoisySymbol() {
+        when(mockConfig.isScalpVolatilityAwareStopEnabled()).thenReturn(true);
+        when(mockConfig.getScalpVolatilityStopMultiplier()).thenReturn(1.4);
+        when(mockConfig.getScalpVolatilityStopLookbackBars()).thenReturn(20);
+        var s = new ScalpStrategy(mockClient, mockConfig);
+        // median bar range 0.50% * 1.4 = 0.70% > flat 0.35% stop -> widens
+        var slTp = s.effectiveStopAndTarget("META", barsWithRange(0.50, 25, 750.0));
+        assertEquals(0.70, slTp[0], 0.01);
+        assertEquals(2.0, slTp[1] / slTp[0], 0.01, "R:R ratio (0.70/0.35=2.0) must be preserved");
+    }
+
+    @Test
+    @DisplayName("flag on, symbol calmer than the flat stop: leaves the flat SL/TP unchanged")
+    void volAwareStop_leavesCalmSymbolAlone() {
+        when(mockConfig.isScalpVolatilityAwareStopEnabled()).thenReturn(true);
+        when(mockConfig.getScalpVolatilityStopMultiplier()).thenReturn(1.4);
+        when(mockConfig.getScalpVolatilityStopLookbackBars()).thenReturn(20);
+        var s = new ScalpStrategy(mockClient, mockConfig);
+        // median bar range 0.05% * 1.4 = 0.07% << flat 0.35% stop -> unchanged
+        var slTp = s.effectiveStopAndTarget("OIH", barsWithRange(0.05, 25, 400.0));
+        assertArrayEquals(new double[]{0.35, 0.70}, slTp, 1e-9);
+    }
+
+    @Test
+    @DisplayName("flag on, not enough bar history: fails safe to the flat SL/TP")
+    void volAwareStop_insufficientHistory_failsSafe() {
+        when(mockConfig.isScalpVolatilityAwareStopEnabled()).thenReturn(true);
+        when(mockConfig.getScalpVolatilityStopLookbackBars()).thenReturn(20);
+        var s = new ScalpStrategy(mockClient, mockConfig);
+        var slTp = s.effectiveStopAndTarget("META", barsWithRange(5.0, 5, 750.0)); // only 5 bars, need 20+
+        assertArrayEquals(new double[]{0.35, 0.70}, slTp, 1e-9);
+    }
 }

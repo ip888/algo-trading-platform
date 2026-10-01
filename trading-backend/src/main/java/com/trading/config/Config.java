@@ -1806,6 +1806,22 @@ public class Config {
     public double getScalpTakeProfitPercent() {
         return getDoubleProperty("SCALP_TAKE_PROFIT_PERCENT", 0.70);
     }
+    // ---- Volatility-aware scalp stop (2026-10-01) ----
+    // The flat SCALP_STOP_LOSS_PERCENT sits INSIDE a single normal 15-min bar's own noise for most
+    // scalp-eligible symbols (confirmed from real bar data: META/AMD/TSLA/URA/NVDA/XOP/MSFT/AAPL/XLE
+    // all had a stop-to-median-bar-range ratio <= 1.03x) — the stop gets clipped by ordinary chop,
+    // not a wrong directional call. When enabled, the stop (and TP, same R:R) floors at
+    // SCALP_VOLATILITY_STOP_MULTIPLIER x the symbol's own recent median 15-min bar range instead of
+    // a one-size-fits-all percent.
+    public boolean isScalpVolatilityAwareStopEnabled() {
+        return getBooleanProperty("SCALP_VOLATILITY_AWARE_STOP_ENABLED", false);
+    }
+    public double getScalpVolatilityStopMultiplier() {
+        return getDoubleProperty("SCALP_VOLATILITY_STOP_MULTIPLIER", 1.4);
+    }
+    public int getScalpVolatilityStopLookbackBars() {
+        return getIntProperty("SCALP_VOLATILITY_STOP_LOOKBACK_BARS", 20);
+    }
     public int getScalpMaxDailyTrades() {
         return getIntProperty("SCALP_MAX_DAILY_TRADES", 4);
     }

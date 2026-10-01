@@ -1822,6 +1822,15 @@ public class Config {
     public int getScalpVolatilityStopLookbackBars() {
         return getIntProperty("SCALP_VOLATILITY_STOP_LOOKBACK_BARS", 20);
     }
+    // ---- MTF Direct Buy confidence threshold (2026-10-01) ----
+    // Was hardcoded 0.7 in StrategyManager; made configurable so it can be swept on the gated
+    // backtest harness (MTF Direct Buy's own losses since Sep 21 are dominated by time_decay —
+    // low-conviction entries that just drift flat for an hour — not wrong-direction stop-outs,
+    // unlike scalp's noise problem; raising the confidence bar is the candidate fix for THAT).
+    public double getMtfDirectBuyConfidenceThreshold() {
+        return getDoubleProperty("MTF_DIRECT_BUY_CONFIDENCE_THRESHOLD", 0.70);
+    }
+
     // ---- Scalp noise filter (2026-10-01) ----
     // Alternative to the widen-the-stop approach above, which backtested worse (dilutes whatever
     // quick-capture edge scalp has at least as much as it removes noise-driven stop-outs).

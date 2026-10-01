@@ -150,7 +150,8 @@ public final class StrategyManager {
                 }
 
                 // Use multi-timeframe recommendation if confidence is high
-                if (mtfAnalysis.confidence() > 0.7) {
+                double mtfDirectBuyThreshold = config != null ? config.getMtfDirectBuyConfidenceThreshold() : 0.70;
+                if (mtfAnalysis.confidence() > mtfDirectBuyThreshold) {
                     // SELL and HOLD are always authoritative — exit or wait immediately.
                     if (mtfAnalysis.recommendation() != MultiTimeframeAnalyzer.SignalType.BUY) {
                         return switch (mtfAnalysis.recommendation()) {

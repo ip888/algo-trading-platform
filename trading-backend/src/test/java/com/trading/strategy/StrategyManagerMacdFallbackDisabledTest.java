@@ -46,6 +46,7 @@ class StrategyManagerMacdFallbackDisabledTest {
                 return null;
             }));
         when(cfg.isWeakBullMacdFallbackDisabled()).thenReturn(disabled);
+        when(cfg.getMtfDirectBuyConfidenceThreshold()).thenReturn(0.70);
         when(client.getMarketHistory(anyString(), anyInt())).thenReturn(uptrend());
         // aligned, confidence <=0.7 => MTF does not short-circuit, regime routing (WEAK_BULL case) runs
         when(mtf.analyze("SPY")).thenReturn(new MultiTimeframeAnalysis("SPY", List.of(), true,

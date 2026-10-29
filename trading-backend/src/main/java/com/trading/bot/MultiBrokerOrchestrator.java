@@ -180,6 +180,12 @@ public final class MultiBrokerOrchestrator {
         com.trading.ops.DailyCloseJob.register(dailyClose);
         dailyClose.start();
 
+        // Weekly self-validation: re-runs the real gated harness against the live symbol
+        // universe/config on a schedule, flags (never disables) rolling expectancy decay.
+        var weeklyValidation = new com.trading.ops.WeeklyValidationJob(database, config, "alpaca");
+        com.trading.ops.WeeklyValidationJob.register(weeklyValidation);
+        weeklyValidation.start();
+
         // ── Safety autopilot (dead-man's-switch + manual panic-stop) ──────────────────
         // This used to be wired only inside TradingBot.runMultiProfileMode(), a code path
         // that never executes once BROKERS is set (this class is the actual entry point then)

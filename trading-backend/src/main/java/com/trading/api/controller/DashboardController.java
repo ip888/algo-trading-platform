@@ -100,6 +100,19 @@ public final class DashboardController {
             if (json == null) { ctx.status(404).json(Map.of("error", "no digest for " + date)); return; }
             ctx.contentType("application/json").result(json);
         });
+        app.get("/api/validation/weekly", ctx -> {
+            var job = com.trading.ops.WeeklyValidationJob.instance();
+            if (job == null) { ctx.status(503).json(Map.of("error", "weekly validation job not running")); return; }
+            String json = job.loadLatest();
+            if (json == null) { ctx.status(404).json(Map.of("error", "no weekly validation run yet")); return; }
+            ctx.contentType("application/json").result(json);
+        });
+        // Re-run (idempotent) on demand -- also resets the 7-day schedule from this point.
+        app.post("/api/validation/weekly/run", ctx -> {
+            var job = com.trading.ops.WeeklyValidationJob.instance();
+            if (job == null) { ctx.status(503).json(Map.of("error", "weekly validation job not running")); return; }
+            ctx.json(job.runNow());
+        });
         app.get("/api/digest/history", ctx -> {
             var job = com.trading.ops.DailyCloseJob.instance();
             if (job == null) { ctx.status(503).json(Map.of("error", "digest job not running")); return; }

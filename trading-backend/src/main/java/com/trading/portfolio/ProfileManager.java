@@ -709,8 +709,15 @@ public class ProfileManager implements Runnable {
             riskGate.setMaxDrawdownHaltActive(false);
         }
 
-        // Determine symbols to process (target + active positions not in target)
-        Set<String> symbolsToProcess = new HashSet<>(targetSymbols);
+        // Determine symbols to process (target + active positions not in target).
+        // LinkedHashSet, not HashSet (2026-10-29 modernization item 3, scoped down from a full
+        // signal-ranking rewrite -- see that commit's message for why): a plain HashSet iterates
+        // in JVM hash-bucket order, which has nothing to do with signal quality and isn't even
+        // reproducible run-to-run. This at least makes the order deterministic and equal to
+        // targetSymbols' own order (which MAIN_BULLISH_SYMBOLS/MOMENTUM_ASSETS in config.properties
+        // already control), so which candidate gets a limited position slot when several fire in
+        // the same cycle is no longer arbitrary.
+        Set<String> symbolsToProcess = new LinkedHashSet<>(targetSymbols);
         var activeSymbols = portfolio.getActiveStoredSymbols();
 
         for (String activeSymbol : activeSymbols) {

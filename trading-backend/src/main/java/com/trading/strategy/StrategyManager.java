@@ -37,6 +37,13 @@ public final class StrategyManager {
     private final OpeningRangeBreakoutStrategy orbStrategy;
     private MarketRegime currentRegime = MarketRegime.RANGE_BOUND;
     private String activeStrategy = "None";
+    // 2026-10-29 modernization (item 3): a real confidence number where one naturally exists
+    // (currently only MTF Direct Buy's own mtfAnalysis.confidence()), neutral (0.5) everywhere
+    // else. Lets a limited position slot go to the highest-confidence candidate firing in the
+    // same cycle instead of whichever symbol a HashSet happens to iterate first -- without
+    // inventing a confidence number for strategies (ORB, Momentum, MACD paths) that don't have
+    // one, which would just be adding an untested parameter dressed up as a signal.
+    private double lastSignalConfidence = 0.5;
     private double latestVix = 20.0;
 
     // WEAK_BULL Momentum-vs-MACD deference (see the WEAK_BULL case below): bounds how long a
@@ -97,6 +104,7 @@ public final class StrategyManager {
      */
     public TradingSignal evaluate(String symbol, double currentPrice, double positionQty,
                                  MarketRegime regime) {
+        lastSignalConfidence = 0.5; // reset every call -- see the field's own comment
         try {
             // ── Opening Range Breakout (morning power hour: 10:00–11:30am ET) ──
             // ORB identifies structural price levels (first 30-min supply/demand balance)
@@ -224,6 +232,7 @@ public final class StrategyManager {
                             return mtfBlockSignal;
                         }
                         activeStrategy = "MTF Direct Buy";
+                        lastSignalConfidence = mtfAnalysis.confidence();
                         return new TradingSignal.Buy("Multi-timeframe BUY signal");
                     }
                 }
@@ -583,6 +592,15 @@ public final class StrategyManager {
             regime, activeStrategy, signal.toAction());
 
         return signal;
+    }
+
+    /**
+     * Confidence (0.0-1.0) of the most recent evaluate() call's returned signal, when one
+     * naturally exists; a neutral 0.5 otherwise. See the field's own comment for why this isn't
+     * invented for strategies that don't have a natural confidence number.
+     */
+    public double getLastSignalConfidence() {
+        return lastSignalConfidence;
     }
 
     public String getActiveStrategy() {

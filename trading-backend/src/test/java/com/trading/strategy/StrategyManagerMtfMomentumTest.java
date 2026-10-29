@@ -299,6 +299,41 @@ class StrategyManagerMtfMomentumTest {
                     "Non-momentum asset MTF BUY should be returned directly, reason: " + buy.reason());
             }
             // If volume check blocks it, HOLD is acceptable too — but not a deferred strategy signal
+            if (signal instanceof TradingSignal.Buy buy && buy.reason().contains("Multi-timeframe BUY")) {
+                assertEquals(0.85, manager.getLastSignalConfidence(), 0.001,
+                    "MTF Direct Buy must expose the real MTF confidence, not the neutral default");
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("getLastSignalConfidence — 2026-10-29 modernization item 3")
+    class SignalConfidence {
+
+        @Test
+        @DisplayName("defaults to neutral 0.5 when no signal exposes a real confidence (e.g. a plain HOLD)")
+        void defaultsToNeutralOnHold() throws Exception {
+            when(mockClient.getMarketHistory(anyString(), anyInt())).thenReturn(downtrendingBars());
+            when(mockMtf.analyze("NVDA")).thenReturn(mtfHold("NVDA"));
+
+            manager.evaluate("NVDA", 151.5, 0.0, MarketRegime.WEAK_BULL);
+
+            assertEquals(0.5, manager.getLastSignalConfidence(), 0.001);
+        }
+
+        @Test
+        @DisplayName("resets to neutral on the next call, not sticky from a prior symbol's MTF confidence")
+        void resetsEachCall() throws Exception {
+            when(mockClient.getMarketHistory(eq("SPY"), anyInt())).thenReturn(uptrendingBars());
+            when(mockMtf.analyze("SPY")).thenReturn(mtfBuy("SPY", 0.93));
+            manager.evaluate("SPY", 149.5, 0.0, MarketRegime.WEAK_BULL);
+
+            when(mockClient.getMarketHistory(eq("NVDA"), anyInt())).thenReturn(downtrendingBars());
+            when(mockMtf.analyze("NVDA")).thenReturn(mtfHold("NVDA"));
+            manager.evaluate("NVDA", 151.5, 0.0, MarketRegime.WEAK_BULL);
+
+            assertEquals(0.5, manager.getLastSignalConfidence(), 0.001,
+                "NVDA's HOLD must not inherit SPY's leftover 0.93 confidence from the previous call");
         }
     }
 }

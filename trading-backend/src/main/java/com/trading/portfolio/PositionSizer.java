@@ -408,6 +408,29 @@ final class PositionSizer {
             }
         }
 
+        // ========== RISK-PARITY SIZING (Oct 2026 modernization, independent of ATR_SIZING) ==========
+        // Normalizes position size to a constant dollar risk per trade using whatever stop is
+        // ALREADY in force above (VIX-scaled or scalp) -- unlike the ATR-sizing override, this
+        // never depends on ATR_STOPS_ENABLED, so it can't reopen the known wide-ATR-stop problem.
+        if (config.isRiskParitySizingEnabled() && stopLoss > 0.0 && stopLoss < currentPrice) {
+            try {
+                AdvancedPositionSizer riskSizer = new AdvancedPositionSizer(config, database);
+                riskSizer.setAdaptiveManager(adaptiveManager);
+                double riskParitySize = riskSizer.calculateAtrPositionSize(symbol, availableCapital, currentPrice, stopLoss);
+                if (riskParitySize > 0) {
+                    double prev = positionSize;
+                    positionSize = Math.min(positionSize, riskParitySize);
+                    logger.info("{} {}: risk-parity sizing: {} -> {} shares (risk={}%, stop={}%)",
+                        profilePrefix, symbol,
+                        String.format("%.3f", prev), String.format("%.3f", positionSize),
+                        String.format("%.2f", config.getAtrSizingRiskPercent() * 100.0),
+                        String.format("%.2f", (currentPrice - stopLoss) / currentPrice * 100.0));
+                }
+            } catch (Exception e) {
+                logger.debug("{} Risk-parity sizing failed for {}: {}", profilePrefix, symbol, e.getMessage());
+            }
+        }
+
         // ========== HARD NOTIONAL CAP (belt-and-suspenders) ==========
         // Belt-and-suspenders: every sizing path above should already respect the tier max,
         // but this catches any edge case where Kelly / adaptive / ATR sizing computes a value

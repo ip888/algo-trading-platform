@@ -1663,6 +1663,18 @@ public class Config {
         return getDoubleProperty("ATR_SIZING_RISK_PERCENT", 0.01); // 1% of equity per trade
     }
 
+    // Risk-parity sizing (2026-10-29): same constant-$-risk formula as ATR sizing above
+    // (shares = equity x riskPct / (entry - stop)), but independent of ATR_STOPS_ENABLED /
+    // ATR_SIZING_ENABLED -- those stay exactly as a prior session deliberately set them
+    // (ATR stops were found to be 3x wider than intended at VIX~11, see config.properties'
+    // own history). This uses whatever stop is ALREADY in force (the VIX-scaled or scalp
+    // stop, unchanged) and only normalizes position SIZE so every trade risks a similar
+    // dollar amount regardless of how wide that trade's own stop happens to be -- the
+    // "volatility-targeted sizing" gap flagged in the Oct 2026 modernization review.
+    public boolean isRiskParitySizingEnabled() {
+        return getBooleanProperty("RISK_PARITY_SIZING_ENABLED", false);
+    }
+
     // Correlation cap
     public boolean isCorrelationCapEnabled() {
         return getBooleanProperty("CORRELATION_CAP_ENABLED", true);

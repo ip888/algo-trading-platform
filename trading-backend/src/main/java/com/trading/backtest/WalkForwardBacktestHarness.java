@@ -389,6 +389,15 @@ public final class WalkForwardBacktestHarness {
         double shares = positionSizer.calculatePositionSize(
             symbol, equity, price, volatility, stopLossPct / 100.0, regime.regime().name());
 
+        // Mirrors PositionSizer's risk-parity sizing override (2026-10-29 modernization item) --
+        // same constant-$-risk formula, same config flag, independent of ATR_STOPS/ATR_SIZING.
+        if (config.isRiskParitySizingEnabled() && stopLoss > 0.0 && stopLoss < price) {
+            double riskParitySize = positionSizer.calculateAtrPositionSize(symbol, equity, price, stopLoss);
+            if (riskParitySize > 0) {
+                shares = Math.min(shares, riskParitySize);
+            }
+        }
+
         // Same belt-and-suspenders hard notional cap ProfileManager applies live.
         var tierParams = CapitalTierManager.getParameters(equity);
         double tierMaxNotional = equity * tierParams.maxPositionPercent();

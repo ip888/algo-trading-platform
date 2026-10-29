@@ -121,8 +121,8 @@ public final class BacktestController {
             int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(19);
             double capital = ctx.queryParamAsClass("capital", Double.class).getOrDefault(1180.0);
             int maxPositions = ctx.queryParamAsClass("maxPositions", Integer.class).getOrDefault(4);
-            if (days < 1 || days > 60) {
-                ctx.status(400).json(Map.of("error", "days must be 1-60"));
+            if (days < 1 || days > 180) {
+                ctx.status(400).json(Map.of("error", "days must be 1-180"));
                 return;
             }
 
@@ -338,8 +338,8 @@ public final class BacktestController {
             int days = ctx.queryParamAsClass("days", Integer.class).getOrDefault(10);
             double capital = ctx.queryParamAsClass("capital", Double.class).getOrDefault(1180.0);
             int maxPositions = ctx.queryParamAsClass("maxPositions", Integer.class).getOrDefault(4);
-            if (days < 1 || days > 60) {
-                ctx.status(400).json(Map.of("error", "days must be 1-60"));
+            if (days < 1 || days > 180) {
+                ctx.status(400).json(Map.of("error", "days must be 1-180"));
                 return;
             }
 

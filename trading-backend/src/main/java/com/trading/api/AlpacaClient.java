@@ -528,20 +528,39 @@ public final class AlpacaClient implements BrokerClient {
         // old sort=asc, getBars(symbol, "1Day", limit) silently returned only the OLDEST
         // `limit` bars whenever the true trading-day count in [start, now) exceeded `limit`
         // (e.g. PositionSizer's ATR calc, getMarketHistory's identical bug fixed the same way).
-        String url = String.format("https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s&sort=desc",
-                symbol, timeframe, limit,
-                java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8));
-
-        var response = sendRequest(url, "GET");
-        var root = objectMapper.readTree(response);
-
+        // PAGINATION (2026-10-29): a single request is capped at 10,000 bars by Alpaca itself,
+        // regardless of plan tier -- that cap, not the feed, was the real reason backtests
+        // couldn't see more than ~25 days of 1-min history (10,000 / 390 bars-per-day). Alpaca's
+        // own `next_page_token` lets one logical request span many HTTP calls; this follows it
+        // until either `limit` bars are collected or the feed runs out of history, capped at
+        // MAX_PAGES as a sane ceiling against a runaway loop (50,000 bars is already far more
+        // than any strategy here uses in one evaluation).
+        final int MAX_PAGES = 5;
         var bars = new ArrayList<Bar>();
-
-        var barsArray = root.get("bars");
-        if (barsArray != null && barsArray.isArray()) {
-            for (var barNode : barsArray) {
-                bars.add(objectMapper.treeToValue(barNode, Bar.class));
+        String pageToken = null;
+        for (int page = 0; page < MAX_PAGES && bars.size() < limit; page++) {
+            int pageLimit = Math.min(10_000, limit - bars.size());
+            var urlBuilder = new StringBuilder(String.format(
+                "https://data.alpaca.markets/v2/stocks/%s/bars?timeframe=%s&feed=iex&limit=%d&start=%s&sort=desc",
+                symbol, timeframe, pageLimit,
+                java.net.URLEncoder.encode(startStr, java.nio.charset.StandardCharsets.UTF_8)));
+            if (pageToken != null) {
+                urlBuilder.append("&page_token=").append(java.net.URLEncoder.encode(pageToken, java.nio.charset.StandardCharsets.UTF_8));
             }
+            var response = sendRequest(urlBuilder.toString(), "GET");
+            var root = objectMapper.readTree(response);
+
+            var barsArray = root.get("bars");
+            int countThisPage = 0;
+            if (barsArray != null && barsArray.isArray()) {
+                for (var barNode : barsArray) {
+                    bars.add(objectMapper.treeToValue(barNode, Bar.class));
+                    countThisPage++;
+                }
+            }
+            var tokenNode = root.get("next_page_token");
+            pageToken = (tokenNode != null && !tokenNode.isNull()) ? tokenNode.asText() : null;
+            if (pageToken == null || countThisPage == 0) break; // no more history available
         }
 
         // Bars were fetched newest-first; reverse to oldest-first for indicator calculations.

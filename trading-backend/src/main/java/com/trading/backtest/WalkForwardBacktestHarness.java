@@ -198,15 +198,19 @@ public final class WalkForwardBacktestHarness {
         allSymbols.addAll(SECTOR_ETFS);
 
         // Bars per calendar day at each timeframe (6.5h regular session), with a safety margin.
-        // Alpaca's bars API hard-caps `limit` at 10000 regardless of timeframe — 1Min bars hit
-        // that ceiling around 25 calendar days, so very long windows silently get whatever recent
-        // history fits under 10000 for 1Min while the coarser timeframes scale further.
         int days = Math.max(minCalendarDays, 1);
-        int dailyLimit = Math.min(10_000, Math.max(400, days + 60));
-        int oneMinLimit = Math.min(10_000, Math.max(800, days * 390));
-        int fiveMinLimit = Math.min(10_000, Math.max(1560, days * 78));
-        int fifteenMinLimit = Math.min(10_000, Math.max(780, days * 26));
-        int oneHourLimit = Math.min(10_000, Math.max(280, days * 7));
+        // Cap raised from 10,000 to 50,000 (2026-10-29): AlpacaClient.getBars now paginates past
+        // Alpaca's own 10,000-bars-per-request ceiling (up to 5 pages), so the real limit on how
+        // far back a backtest can see is no longer an artificial one here -- 1-min bars still run
+        // out first (50,000 / 390 =~ 128 days); 15Min/1Hour/daily reach much further, so a window
+        // longer than ~128 days gracefully loses only intrabar stop/TP precision for its oldest
+        // part (scanIntrabarExit already falls back to the 15-min step when no 1-min bars exist —
+        // see its own comment), not regime/entry signal fidelity.
+        int dailyLimit = Math.min(50_000, Math.max(400, days + 60));
+        int oneMinLimit = Math.min(50_000, Math.max(800, days * 390));
+        int fiveMinLimit = Math.min(50_000, Math.max(1560, days * 78));
+        int fifteenMinLimit = Math.min(50_000, Math.max(780, days * 26));
+        int oneHourLimit = Math.min(50_000, Math.max(280, days * 7));
 
         for (String symbol : allSymbols) {
             replayClient.loadBars(symbol, "1Day", cache.getOrFetch(liveClient, symbol, "1Day", dailyLimit));

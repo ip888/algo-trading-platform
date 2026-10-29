@@ -91,7 +91,11 @@ public final class BacktestController {
             int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(500);
             var config = new Config();
             var client = new AlpacaClient(config);
-            var bars = client.getBars(symbol, timeframe, Math.min(limit, 5000));
+            // 50,000 matches AlpacaClient.getBars' own pagination ceiling (MAX_PAGES=5 x 10,000/page).
+            // Previously hardcoded to 5000, a stale leftover from before the 2026-10-29 pagination
+            // fix that silently made every raw-bars diagnostic call look capped at exactly 5000 bars
+            // regardless of how deep AlpacaClient could actually page.
+            var bars = client.getBars(symbol, timeframe, Math.min(limit, 50_000));
             var out = new ArrayList<Map<String, Object>>();
             for (var b : bars) {
                 out.add(Map.of("t", b.timestamp().toString(), "o", b.open(), "h", b.high(),

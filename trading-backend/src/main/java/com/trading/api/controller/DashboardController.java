@@ -158,6 +158,7 @@ public final class DashboardController {
         app.post("/api/emergency/panic", this::handlePanic);
         app.post("/api/emergency/reset", this::handleReset);
         app.get("/api/emergency/status", this::getEmergencyStatus);
+        app.post("/api/emergency/test-email", this::handleTestEmail);
         app.get("/api/heartbeat", this::getHeartbeat);
 
         app.post("/api/trading/pause", this::handleTradingPause);
@@ -912,6 +913,21 @@ public final class DashboardController {
         ctx.json(result);
     }
     
+    /**
+     * Diagnostic-only: sends one real test email through the configured EmailNotifier, so the
+     * EMAIL_ADDRESS/EMAIL_PASSWORD pipeline can be verified without waiting for (or faking) an
+     * actual emergency. Takes no trading action and never throws (EmailNotifier no-ops silently
+     * if credentials aren't configured) -- the response just echoes what was attempted.
+     */
+    private void handleTestEmail(Context ctx) {
+        com.trading.bot.TradingBot.sendCriticalAlert(
+            "Trading bot: test alert",
+            "This is a test of the CRITICAL-alert email pipeline — if you received this, it's "
+                + "working. No trading action was taken.");
+        ctx.json(Map.of("status", "attempted",
+            "note", "no-op silently if EMAIL_ADDRESS/EMAIL_PASSWORD aren't set — check your inbox"));
+    }
+
     private void getEmergencyStatus(Context ctx) {
         boolean triggered = com.trading.bot.TradingBot.isEmergencyTriggered();
         // Only reachable via the manual panic button now (see HeartbeatMonitor's 2026-11-05

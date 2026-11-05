@@ -157,6 +157,22 @@ public final class TradingBot {
         return heartbeatPaused.get();
     }
 
+    // 2026-11-05: CRITICAL-level events (emergency trigger, recurring heartbeat failure) only
+    // ever reached a websocket broadcast or the next day's digest -- both require someone to
+    // already be looking. Email is the one channel that reaches the operator without that.
+    private static com.trading.notifications.EmailNotifier emailNotifier;
+
+    public static void installEmailAlerter(com.trading.notifications.EmailNotifier notifier) {
+        emailNotifier = notifier;
+    }
+
+    /** No-ops silently if email isn't configured (see EmailNotifier) -- never throws into a caller. */
+    public static void sendCriticalAlert(String subject, String body) {
+        if (emailNotifier != null) {
+            emailNotifier.sendEmail(subject, body);
+        }
+    }
+
     public static Map<String, Long> getHeartbeatDetails() {
         if (heartbeatMonitor != null) {
             return heartbeatMonitor.getDetails();

@@ -197,6 +197,13 @@ public final class MultiBrokerOrchestrator {
         // which matches this bot's Alpaca-only deployment.
         var emergencyProtocol = new com.trading.protection.EmergencyProtocol(alpacaResilient);
         var heartbeatMonitor = new com.trading.protection.HeartbeatMonitor();
+
+        // Email alerting for CRITICAL events (emergency trigger, recurring heartbeat failure) --
+        // no-ops silently until EMAIL_ADDRESS/EMAIL_PASSWORD (a Gmail address + App Password) are
+        // set as Fly secrets. Sends to itself -- this is the operator's own alert inbox.
+        TradingBot.installEmailAlerter(new com.trading.notifications.EmailNotifier(
+            config.getEmailAddress(), config.getEmailPassword(),
+            config.getEmailSmtpHost(), config.getEmailSmtpPort()));
         heartbeatMonitor.registerComponent("Main Loop", java.time.Duration.ofSeconds(300));
         heartbeatMonitor.registerComponent("API Connection", java.time.Duration.ofSeconds(300));
         for (BrokerEntry entry : entries) {

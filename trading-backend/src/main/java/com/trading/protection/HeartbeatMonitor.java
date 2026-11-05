@@ -121,6 +121,12 @@ public class HeartbeatMonitor {
             com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
                 "🚨 New entries left paused — recurring heartbeat failures today, needs manual "
                     + "review", "CRITICAL");
+            com.trading.bot.TradingBot.sendCriticalAlert(
+                "Trading bot: new entries paused (recurring heartbeat failures)",
+                "Heartbeat failures have recurred more than " + MAX_AUTO_RESUMES_PER_DAY
+                    + " times today. New entries remain paused for manual review -- existing "
+                    + "positions and exits are unaffected. Check /api/heartbeat, and resume with "
+                    + "POST /api/trading/resume once reviewed.");
             return;
         }
 

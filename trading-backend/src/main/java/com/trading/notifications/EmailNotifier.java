@@ -9,8 +9,14 @@ import javax.mail.internet.MimeMessage;
 import java.util.Properties;
 
 /**
- * Email notification service using SMTP.
- * Requires EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST, EMAIL_SMTP_PORT in config.properties.
+ * Email notification service using SMTP (Gmail by default).
+ *
+ * <p>Credentials are secrets, not settings -- construct this from
+ * {@code Config.getAlertEmailAddress()}/{@code getAlertEmailAppPassword()} (env vars /
+ * Fly secrets), never from config.properties. {@code emailAddress} must be a Gmail address with
+ * an App Password (requires 2FA on that Google account) -- a normal account password will not
+ * authenticate. Sends to itself: this is for the operator's own alert inbox, not a general
+ * notification fan-out.
  */
 public final class EmailNotifier {
     private static final Logger logger = LoggerFactory.getLogger(EmailNotifier.class);

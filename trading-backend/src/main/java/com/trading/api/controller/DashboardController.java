@@ -892,7 +892,12 @@ public final class DashboardController {
         // Broadcast to all connected clients
         com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
             "🚨 EMERGENCY PROTOCOL ACTIVATED: " + reason, "CRITICAL");
-        
+        com.trading.bot.TradingBot.sendCriticalAlert(
+            "Trading bot: EMERGENCY STOP triggered",
+            "Manual panic button triggered. Reason: " + reason + "\n\n"
+                + "All orders cancelled and all positions flattened. Review via "
+                + "/api/emergency/status; reset with POST /api/emergency/reset once reviewed.");
+
         ctx.json(result);
     }
     

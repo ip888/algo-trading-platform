@@ -849,6 +849,12 @@ public class Config {
         return getBooleanProperty("WEAK_BULL_MTF_TREND_ENTRY_DISABLED", false);
     }
 
+    /** When true, StrategyManager's direct "MTF Direct Buy" path (any regime) falls through to
+     *  evaluateWithHistory() instead of buying immediately on high MTF confidence alone. */
+    public boolean isMtfDirectBuyDisabled() {
+        return getBooleanProperty("MTF_DIRECT_BUY_DISABLED", false);
+    }
+
     // ---- Rolling-expectancy symbol gate (replaces the permanent all-time win-rate ban) ----
     public int getWinRateGateWindowDays() { return getIntProperty("WINRATE_GATE_WINDOW_DAYS", 30); }
     public int getWinRateGateWindowTrades() { return getIntProperty("WINRATE_GATE_WINDOW_TRADES", 12); }

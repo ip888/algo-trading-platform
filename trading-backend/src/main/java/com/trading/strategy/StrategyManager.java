@@ -174,6 +174,7 @@ public final class StrategyManager {
                     // Momentum assets AND inverse ETFs defer to evaluateWithHistory for full validation.
                     // Inverse ETFs need the MACD-0.20 bypass in evaluateWithHistory — letting them
                     // return Buy directly here would skip that gate entirely.
+                    boolean mtfDirectBuyDisabled = config != null && config.isMtfDirectBuyDisabled();
                     if (!isMeanReversion && (momentumAssets.contains(symbol) || inverseEtfAssets.contains(symbol))) {
                         if (momentumAssets.contains(symbol)) {
                             highMtfBuy = true;
@@ -183,6 +184,14 @@ public final class StrategyManager {
                             logger.info("{}: MTF BUY ({}%) deferred to inverse ETF evaluation",
                                 symbol, (int)(mtfAnalysis.confidence() * 100));
                         }
+                        // fall through to evaluateWithHistory() below
+                    } else if (mtfDirectBuyDisabled) {
+                        // 2026-11-05: disabled on fresh evidence -- consistently the largest and
+                        // most negative bucket (180d net -14 to -17, ~285-298 trades) across two
+                        // independent gated-harness checks a week apart, while SCALP/ORB were
+                        // consistently positive over the same windows. Defer to the regime
+                        // strategy (evaluateWithHistory) instead of buying directly.
+                        logger.info("{}: MTF Direct Buy disabled — deferring to regime strategy", symbol);
                         // fall through to evaluateWithHistory() below
                     } else {
                         // Non-momentum assets and range-bound: use MTF BUY directly after quality gates.

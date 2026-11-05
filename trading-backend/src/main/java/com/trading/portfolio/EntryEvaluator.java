@@ -545,17 +545,23 @@ final class EntryEvaluator {
         }
 
         // ========== POSITION LIMIT CHECK ==========
-        // Check position limit BEFORE calculating position size or running AI
-        if (portfolio.getActivePositionCount() >= config.getMaxPositionsAtOnce()) {
-            logger.warn("{} ⚠️ Max positions reached ({}/{}), skipping new entry for {}",
+        // Check position limit BEFORE calculating position size or running AI.
+        // effectiveMaxPositions is getMaxPositionsAtOnce() unless VIX_POSITION_SCALING_ENABLED
+        // and VIX is high, in which case it's reduced (never raised) -- see Config.getEffectiveMaxPositions.
+        int effectiveMaxPositions = config.getEffectiveMaxPositions(currentVix);
+        if (portfolio.getActivePositionCount() >= effectiveMaxPositions) {
+            logger.warn("{} ⚠️ Max positions reached ({}/{}{}), skipping new entry for {}",
                 profilePrefix,
                 portfolio.getActivePositionCount(),
-                config.getMaxPositionsAtOnce(),
+                effectiveMaxPositions,
+                effectiveMaxPositions < config.getMaxPositionsAtOnce()
+                    ? String.format(", VIX-reduced from %d at VIX=%.1f", config.getMaxPositionsAtOnce(), currentVix)
+                    : "",
                 symbol);
 
             TradingWebSocketHandler.broadcastActivity(
                 String.format("[%s] ⚠️ SKIPPED: %s (max %d positions reached)",
-                    profile.name(), symbol, config.getMaxPositionsAtOnce()),
+                    profile.name(), symbol, effectiveMaxPositions),
                 "WARN"
             );
             return new Blocked("max positions reached");

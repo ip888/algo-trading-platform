@@ -1231,8 +1231,43 @@ public class Config {
     public int getMaxPositionsAtOnce() {
         return getIntProperty("MAX_POSITIONS_AT_ONCE", 5);
     }
-    
-    
+
+    // 2026-11-05: VIX-aware position-count scaling (catalog item, built for same-day readiness).
+    // Scale-DOWN only by design -- never raises the cap above MAX_POSITIONS_AT_ONCE, only reduces
+    // it during high volatility. getMaxPositionsAtOnce() stays the single source of truth for the
+    // normal-conditions cap; this only ever tightens it. OFF by default pending validation --
+    // see decision_log.md for why this wasn't flipped on without a clean backtest first.
+    public boolean isVixPositionScalingEnabled() {
+        return getBooleanProperty("VIX_POSITION_SCALING_ENABLED", false);
+    }
+
+    /** VIX level at/above which the position cap is reduced. Matches ProfileManager's existing
+     *  HIGH_VOLATILITY regime-override threshold (VIX > 25) for consistency with that signal. */
+    public double getVixPositionScalingHighThreshold() {
+        return getDoubleProperty("VIX_POSITION_SCALING_HIGH_THRESHOLD", 25.0);
+    }
+
+    /** Max concurrent positions once VIX reaches the threshold above. */
+    public int getVixPositionScalingHighVixMaxPositions() {
+        return getIntProperty("VIX_POSITION_SCALING_HIGH_VIX_MAX_POSITIONS", 2);
+    }
+
+    /** Effective position cap for the given VIX level, using getMaxPositionsAtOnce() as the base. */
+    public int getEffectiveMaxPositions(double currentVix) {
+        return getEffectiveMaxPositions(getMaxPositionsAtOnce(), currentVix);
+    }
+
+    /** Effective position cap given an explicit base (e.g. the harness's own maxPositions
+     *  parameter, which can differ from getMaxPositionsAtOnce() via a backtest override) --
+     *  unchanged unless VIX scaling is enabled and VIX is at/above the high threshold, in which
+     *  case it's reduced (never raised) to the high-VIX cap. */
+    public int getEffectiveMaxPositions(int basePositions, double currentVix) {
+        if (isVixPositionScalingEnabled() && currentVix >= getVixPositionScalingHighThreshold()) {
+            return Math.min(basePositions, getVixPositionScalingHighVixMaxPositions());
+        }
+        return basePositions;
+    }
+
     public int getMaxTradesPerDay() {
         return getIntProperty("MAX_TRADES_PER_DAY", 8);
     }

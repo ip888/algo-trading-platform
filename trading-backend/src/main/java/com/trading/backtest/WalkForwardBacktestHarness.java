@@ -325,11 +325,13 @@ public final class WalkForwardBacktestHarness {
                 }
             }
 
-            // Consider new entries if under the position cap.
-            if (!pastEod && !haltAllEntries && openPositions.size() < maxPositions) {
+            // Consider new entries if under the position cap. effectiveMaxPositions mirrors
+            // EntryEvaluator's live VIX-scaling (never raises the cap, only reduces it at high VIX).
+            int effectiveMaxPositions = config.getEffectiveMaxPositions(maxPositions, regimeAnalysis.vix());
+            if (!pastEod && !haltAllEntries && openPositions.size() < effectiveMaxPositions) {
                 for (String symbol : tradedSymbols) {
                     if (openPositions.containsKey(symbol)) continue;
-                    if (openPositions.size() >= maxPositions) break;
+                    if (openPositions.size() >= effectiveMaxPositions) break;
                     double price = latestClose(symbol, t);
                     if (Double.isNaN(price)) continue;
                     tryEnter(symbol, price, regimeAnalysis, t);

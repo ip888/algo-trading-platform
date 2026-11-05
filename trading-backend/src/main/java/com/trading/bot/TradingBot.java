@@ -112,6 +112,16 @@ public final class TradingBot {
         return emergencyProtocol != null && emergencyProtocol.isTriggered();
     }
 
+    /** Reason for the most recent emergency trigger (this process), or null if none yet / not installed. */
+    public static String getLastEmergencyTriggerReason() {
+        return emergencyProtocol != null ? emergencyProtocol.getLastTriggerReason() : null;
+    }
+
+    /** Epoch millis of the most recent emergency trigger (this process), or 0 if none yet / not installed. */
+    public static long getLastEmergencyTriggerTime() {
+        return emergencyProtocol != null ? emergencyProtocol.getLastTriggerTime() : 0;
+    }
+
     private static final java.util.concurrent.atomic.AtomicBoolean tradingPaused =
         new java.util.concurrent.atomic.AtomicBoolean(false);
 
@@ -129,6 +139,22 @@ public final class TradingBot {
 
     public static boolean isTradingPaused() {
         return tradingPaused.get();
+    }
+
+    // Separate from tradingPaused above on purpose: HeartbeatMonitor auto-pauses/auto-resumes
+    // this one on its own, and a dashboard operator's deliberate pause must never be silently
+    // undone by that auto-resume (nor the reverse -- an auto-pause must never block a deliberate
+    // dashboard resume). ProfileManager checks both independently before allowing new entries.
+    private static final java.util.concurrent.atomic.AtomicBoolean heartbeatPaused =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** Soft-pauses/resumes new entries from a heartbeat failure — never touches open positions. */
+    public static void setHeartbeatPaused(boolean paused) {
+        heartbeatPaused.set(paused);
+    }
+
+    public static boolean isHeartbeatPaused() {
+        return heartbeatPaused.get();
     }
 
     public static Map<String, Long> getHeartbeatDetails() {

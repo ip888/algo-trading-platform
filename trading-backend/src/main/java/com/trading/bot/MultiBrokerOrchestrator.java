@@ -196,7 +196,7 @@ public final class MultiBrokerOrchestrator {
         // Emergency flatten-all is Alpaca-only by design (EmergencyProtocol's own doc comment),
         // which matches this bot's Alpaca-only deployment.
         var emergencyProtocol = new com.trading.protection.EmergencyProtocol(alpacaResilient);
-        var heartbeatMonitor = new com.trading.protection.HeartbeatMonitor(emergencyProtocol);
+        var heartbeatMonitor = new com.trading.protection.HeartbeatMonitor();
         heartbeatMonitor.registerComponent("Main Loop", java.time.Duration.ofSeconds(300));
         heartbeatMonitor.registerComponent("API Connection", java.time.Duration.ofSeconds(300));
         for (BrokerEntry entry : entries) {

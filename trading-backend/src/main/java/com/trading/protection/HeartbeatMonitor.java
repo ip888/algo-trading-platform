@@ -11,18 +11,34 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Monitors the health of various system components by tracking "heartbeat" timestamps.
- * If any component fails to report in within its specified timeout, the system is flagged as unhealthy.
+ * If any component fails to report in within its specified timeout, new entries are soft-paused
+ * until it recovers.
+ *
+ * <p>2026-11-05: found live that a heartbeat miss used to auto-invoke {@link EmergencyProtocol} —
+ * the SAME path as the manual panic button, which cancels every order and force-liquidates every
+ * open position at market price. That is wildly disproportionate to a single transient blip (one
+ * missed heartbeat from one component), and because the resulting trigger had no auto-recovery, a
+ * one-time blip on 2026-10-31 silently halted all new entries for ~5 days until a human found and
+ * reset it. Per explicit user decision: a heartbeat failure now only soft-pauses new entries via
+ * {@link com.trading.bot.TradingBot#setHeartbeatPaused} — existing positions and exits are
+ * completely unaffected, and it auto-resumes the moment health recovers. The full flatten-all
+ * {@link EmergencyProtocol} is reachable only through the manual panic button (a human decision),
+ * never automatically from here.
  */
 public class HeartbeatMonitor {
     private static final Logger logger = LoggerFactory.getLogger(HeartbeatMonitor.class);
-    
+
+    // Caps how many times per day this will auto-pause-then-auto-resume before it instead leaves
+    // new entries paused and escalates to a louder alert -- a failure that keeps recurring is a
+    // real problem worth a human look, not something to keep silently smoothing over.
+    private static final int MAX_AUTO_RESUMES_PER_DAY = 3;
+
     private final Map<String, ComponentStatus> components = new ConcurrentHashMap<>();
     private final AtomicBoolean isSystemHealthy = new AtomicBoolean(true);
-    private final EmergencyProtocol emergencyProtocol;
 
-    public HeartbeatMonitor(EmergencyProtocol emergencyProtocol) {
-        this.emergencyProtocol = emergencyProtocol;
-    }
+    private final java.util.concurrent.atomic.AtomicInteger autoResumesToday =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+    private volatile java.time.LocalDate autoResumeDate = java.time.LocalDate.now();
 
     /**
      * Register a component to be monitored.
@@ -67,15 +83,53 @@ public class HeartbeatMonitor {
         }
 
         if (!allHealthy && isSystemHealthy.get()) {
-            // Transition from Healthy -> Unhealthy
-            logger.error("SYSTEM FAILURE DETECTED: initiating Emergency Protocol");
+            // Transition from Healthy -> Unhealthy: soft-pause new entries only. Existing
+            // positions and exits are untouched -- nothing here ever flattens a position.
+            logger.error("SYSTEM FAILURE DETECTED: soft-pausing new entries (heartbeat failure)");
             isSystemHealthy.set(false);
-            emergencyProtocol.trigger("Heartbeat Failure");
+            com.trading.bot.TradingBot.setHeartbeatPaused(true);
+            com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
+                "⚠️ New entries soft-paused — heartbeat failure detected. Existing positions and "
+                    + "exits are unaffected; this clears automatically once health recovers.", "WARN");
         } else if (allHealthy && !isSystemHealthy.get()) {
-            // Transition from Unhealthy -> Healthy (Manual reset usually required, but logging recovery here)
+            // Transition from Unhealthy -> Healthy
             logger.info("System health recovered");
             isSystemHealthy.set(true);
+            autoResumeEntries();
         }
+    }
+
+    /**
+     * Auto-resumes new entries once health has recovered, up to {@link #MAX_AUTO_RESUMES_PER_DAY}
+     * times per calendar day — a failure that keeps recurring leaves new entries paused and
+     * escalates to a louder alert instead of being silently smoothed over every time.
+     */
+    private void autoResumeEntries() {
+        if (!com.trading.bot.TradingBot.isHeartbeatPaused()) return;
+
+        java.time.LocalDate today = java.time.LocalDate.now();
+        if (!today.equals(autoResumeDate)) {
+            autoResumeDate = today;
+            autoResumesToday.set(0);
+        }
+
+        if (autoResumesToday.incrementAndGet() > MAX_AUTO_RESUMES_PER_DAY) {
+            logger.error("Health recovered but new entries NOT auto-resumed — already hit the "
+                + "{}-per-day auto-resume limit. This looks like a RECURRING failure, not a "
+                + "one-off blip — needs manual review (POST /api/trading/resume once reviewed).",
+                MAX_AUTO_RESUMES_PER_DAY);
+            com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
+                "🚨 New entries left paused — recurring heartbeat failures today, needs manual "
+                    + "review", "CRITICAL");
+            return;
+        }
+
+        logger.warn("Health recovered — auto-resuming new entries (auto-resume {}/{} today)",
+            autoResumesToday.get(), MAX_AUTO_RESUMES_PER_DAY);
+        com.trading.bot.TradingBot.setHeartbeatPaused(false);
+        com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
+            "✅ New entries auto-resumed — health recovered (auto-resume "
+                + autoResumesToday.get() + "/" + MAX_AUTO_RESUMES_PER_DAY + " today)", "INFO");
     }
 
     public boolean isHealthy() {

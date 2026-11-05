@@ -60,18 +60,27 @@ class WeeklyValidationJobTest {
     @Test
     @DisplayName("does not re-run within 7 days of the last run")
     void doesNotRerunWithinInterval() {
-        db.saveBotState("weekly_validation_last_run", Instant.now().minusSeconds(3600).toString());
+        // Anchored to the fake `afterClose` used for the scheduling decision, not the real wall
+        // clock -- tick()'s interval check compares lastRun against the nowEt it's given, so
+        // seeding lastRun off Instant.now() silently breaks once the real date drifts away from
+        // 2026-10-29 (found 2026-11-05, see rerunsAfterInterval below for the failing case).
         var afterClose = ZonedDateTime.of(LocalDate.of(2026, 10, 29), java.time.LocalTime.of(18, 0), ET);
+        db.saveBotState("weekly_validation_last_run", afterClose.toInstant().minusSeconds(3600).toString());
         job.tick(afterClose);
         var stamp = db.loadBotState("weekly_validation_last_run");
-        assertTrue(Instant.parse(stamp).isBefore(Instant.now().minusSeconds(3000)), "must not have re-stamped (no new run)");
+        assertTrue(Instant.parse(stamp).isBefore(afterClose.toInstant().minusSeconds(3000)), "must not have re-stamped (no new run)");
     }
 
     @Test
     @DisplayName("runs again once 7+ days have passed since the last run")
     void rerunsAfterInterval() {
-        db.saveBotState("weekly_validation_last_run", Instant.now().minus(java.time.Duration.ofDays(8)).toString());
+        // Same fix as above: lastRun must be anchored to `afterClose`, not real Instant.now() --
+        // seeding it 8 real-world days back only exceeds RUN_INTERVAL relative to the fake nowEt
+        // while the real clock is still close to 2026-10-29. runNow() itself stamps the real
+        // wall clock on completion (by design, for an accurate record), so the re-stamp assertion
+        // below correctly stays anchored to the real Instant.now().
         var afterClose = ZonedDateTime.of(LocalDate.of(2026, 10, 29), java.time.LocalTime.of(18, 0), ET);
+        db.saveBotState("weekly_validation_last_run", afterClose.toInstant().minus(java.time.Duration.ofDays(8)).toString());
         job.tick(afterClose);
         var stamp = db.loadBotState("weekly_validation_last_run");
         assertTrue(Instant.parse(stamp).isAfter(Instant.now().minusSeconds(60)), "must have re-stamped (new run attempted)");

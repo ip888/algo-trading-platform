@@ -629,6 +629,10 @@ public class ProfileManager implements Runnable {
             logger.info("{} TRADING PAUSED — skipping new entries this cycle", profilePrefix);
             return;
         }
+        if (com.trading.bot.TradingBot.isHeartbeatPaused()) {
+            logger.info("{} HEARTBEAT SOFT-PAUSE — skipping new entries this cycle (exits still run normally)", profilePrefix);
+            return;
+        }
 
         // ========== EQUITY-CURVE CIRCUIT BREAKER (Tier 3.10) ==========
         // Per-broker session breaker: trips on N consecutive losses or session drawdown.

@@ -909,18 +909,26 @@ public final class DashboardController {
     
     private void getEmergencyStatus(Context ctx) {
         boolean triggered = com.trading.bot.TradingBot.isEmergencyTriggered();
+        // Only reachable via the manual panic button now (see HeartbeatMonitor's 2026-11-05
+        // doc comment) -- lastTriggerReason/Time exist on EmergencyProtocol but were never
+        // exposed here before, so a past trigger was only diagnosable by reading source.
+        String reason = com.trading.bot.TradingBot.getLastEmergencyTriggerReason();
         ctx.json(Map.of(
             "triggered", triggered,
-            "status", triggered ? "EMERGENCY_ACTIVE" : "NORMAL"
+            "status", triggered ? "EMERGENCY_ACTIVE" : "NORMAL",
+            "lastTriggerReason", reason == null ? "" : reason,
+            "lastTriggerTime", com.trading.bot.TradingBot.getLastEmergencyTriggerTime()
         ));
     }
-    
+
     private void getHeartbeat(Context ctx) {
         var details = com.trading.bot.TradingBot.getHeartbeatDetails();
         boolean isHealthy = com.trading.bot.TradingBot.isSystemHealthy();
+        boolean heartbeatPaused = com.trading.bot.TradingBot.isHeartbeatPaused();
         ctx.json(Map.of(
             "status", isHealthy ? "ok" : "critical",
-            "components", details
+            "components", details,
+            "newEntriesSoftPaused", heartbeatPaused
         ));
     }
 

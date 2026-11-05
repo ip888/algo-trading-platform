@@ -175,12 +175,17 @@ public class EmergencyProtocol {
     public boolean isTriggered() {
         return triggered.get();
     }
-    
+
     public Map<String, Object> getLastExecutionResult() {
         return lastExecutionResult;
     }
-    
+
     public long getLastTriggerTime() {
         return lastTriggerTime;
+    }
+
+    /** Reason passed to the most recent {@link #trigger}, or null if never triggered this process. */
+    public String getLastTriggerReason() {
+        return lastTriggerReason;
     }
 }

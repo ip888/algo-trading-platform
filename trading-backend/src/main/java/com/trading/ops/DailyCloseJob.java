@@ -199,6 +199,18 @@ public final class DailyCloseJob {
             if (openPositions > 0) {
                 alerts.add(openPositions + " position(s) still open after the close (EOD flatten should have closed them)");
             }
+            // 2026-11-05: a stuck emergency stop / heartbeat soft-pause previously went completely
+            // unnoticed for days (nothing alerted, dashboard-only visibility). Surface both here so
+            // even a day nobody has the dashboard open still gets flagged in the persisted digest.
+            if (com.trading.bot.TradingBot.isEmergencyTriggered()) {
+                alerts.add("EMERGENCY STOP is currently ACTIVE (reason: "
+                    + com.trading.bot.TradingBot.getLastEmergencyTriggerReason()
+                    + ") — positions were flattened and new entries are halted until a manual /api/emergency/reset");
+            }
+            if (com.trading.bot.TradingBot.isHeartbeatPaused()) {
+                alerts.add("New entries are currently soft-paused by a heartbeat failure — "
+                    + "existing positions/exits are unaffected; this should auto-clear once health recovers");
+            }
             digest.put("alerts", alerts);
 
             String json = MAPPER.writeValueAsString(digest);

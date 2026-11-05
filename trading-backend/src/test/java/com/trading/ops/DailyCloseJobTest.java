@@ -29,6 +29,7 @@ class DailyCloseJobTest {
 
     private TradeDatabase db;
     private BrokerClient client;
+    private Config cfg;
     private DailyCloseJob job;
 
     @BeforeEach
@@ -36,7 +37,7 @@ class DailyCloseJobTest {
         new File(DB).delete();
         db = new TradeDatabase(DB);
         client = mock(BrokerClient.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
-        var cfg = mock(Config.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
+        cfg = mock(Config.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
         when(cfg.getDigestGapAlertUsd()).thenReturn(1.0);
         when(client.getPositions()).thenReturn(List.of());
         job = new DailyCloseJob(db, client, cfg, "alpaca");
@@ -136,6 +137,32 @@ class DailyCloseJobTest {
         var d = job.runFor(DAY);
 
         assertTrue(((List<?>) d.get("notes")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("zero trades AND zero blocked attempts on a non-blackout day raises an alert")
+    void unexpectedSilence_alerts() throws Exception {
+        when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));
+        account(1000.0, 1000.0); // flat day, no trades, no blocked entries, no open positions
+
+        var d = job.runFor(DAY);
+
+        var alerts = (List<?>) d.get("alerts");
+        assertEquals(1, alerts.size());
+        assertTrue(alerts.get(0).toString().contains("evaluation loop may not have run"));
+    }
+
+    @Test
+    @DisplayName("zero trades AND zero blocked attempts on a scheduled blackout day raises no alert")
+    void unexpectedSilence_exemptOnBlackoutDay() throws Exception {
+        when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));
+        when(cfg.isEconomicCalendarBlackoutEnabled()).thenReturn(true);
+        when(cfg.getEconomicBlackoutDates()).thenReturn(java.util.Set.of(DAY));
+        account(1000.0, 1000.0);
+
+        var d = job.runFor(DAY);
+
+        assertTrue(((List<?>) d.get("alerts")).isEmpty(), "a deliberate blackout day is not itself a problem");
     }
 
     @Test

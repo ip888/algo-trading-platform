@@ -211,6 +211,22 @@ public final class DailyCloseJob {
                 alerts.add("New entries are currently soft-paused by a heartbeat failure — "
                     + "existing positions/exits are unaffected; this should auto-clear once health recovers");
             }
+            // 2026-11-05: generalizes the above two -- catches ANY future cause of unexpected
+            // silence, not just this specific mechanism. Zero trades AND zero blocked-entry
+            // attempts (gates didn't even fire) on a day that wasn't a deliberate blackout is the
+            // strongest signal something is structurally broken (e.g. the evaluation loop itself
+            // never ran) -- distinct from "gates correctly blocked everything", which is already
+            // explained via `notes` above and is not itself alarming (see the 2026-09-30 breadth-
+            // filter incident, a correct block mistaken for a bug before `notes` existed).
+            boolean isBlackoutDay = config.isEconomicCalendarBlackoutEnabled()
+                && config.getEconomicBlackoutDates().contains(date);
+            // openPositions == 0 excludes the "still open after close" case above -- that already
+            // has its own alert, and a lingering position is itself evidence the loop did run.
+            if (trades.isEmpty() && blocked.isEmpty() && openPositions == 0 && !isBlackoutDay) {
+                alerts.add("Zero trades AND zero blocked-entry attempts today (not a scheduled "
+                    + "blackout date) — the evaluation loop may not have run at all. Check "
+                    + "/api/heartbeat and /api/emergency/status.");
+            }
             digest.put("alerts", alerts);
 
             String json = MAPPER.writeValueAsString(digest);
@@ -229,6 +245,10 @@ public final class DailyCloseJob {
             for (String a : alerts) {
                 logger.error("[DIGEST_ALERT] {} — {}", date, a);
                 TradingWebSocketHandler.broadcastActivity("🚨 DAILY DIGEST ALERT " + date + ": " + a, "ERROR");
+                // 2026-11-05: these previously only reached the websocket/log — same blind spot
+                // as the emergency protocol this whole alerting pass started from.
+                com.trading.bot.TradingBot.sendCriticalAlert(
+                    "Trading bot: daily digest alert (" + date + ")", a);
             }
         } catch (Exception e) {
             logger.error("Daily digest for {} failed: {}", date, e.getMessage(), e);

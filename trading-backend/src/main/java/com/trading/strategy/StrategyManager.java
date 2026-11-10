@@ -231,7 +231,9 @@ public final class StrategyManager {
                             // Scalp evaluates intraday conditions independently of regime/MTF.
                             if (scalpStrategy != null && positionQty == 0
                                     && regime != MarketRegime.STRONG_BEAR
-                                    && regime != MarketRegime.HIGH_VOLATILITY) {
+                                    && regime != MarketRegime.HIGH_VOLATILITY
+                                    && !(config != null && config.isScalpRangeBoundDisabled()
+                                         && regime == MarketRegime.RANGE_BOUND)) {
                                 var scalpSignal = scalpStrategy.evaluate(symbol, currentPrice, positionQty);
                                 if (scalpSignal instanceof TradingSignal.ScalpBuy) {
                                     activeStrategy = "Scalp (15-min)";
@@ -304,7 +306,9 @@ public final class StrategyManager {
                     && positionQty == 0
                     && !(signal instanceof TradingSignal.Sell)
                     && regime != MarketRegime.STRONG_BEAR
-                    && regime != MarketRegime.HIGH_VOLATILITY) {
+                    && regime != MarketRegime.HIGH_VOLATILITY
+                    && !(config != null && config.isScalpRangeBoundDisabled()
+                         && regime == MarketRegime.RANGE_BOUND)) {
                 var scalpSignal = scalpStrategy.evaluate(symbol, currentPrice, positionQty);
                 if (scalpSignal instanceof TradingSignal.ScalpBuy) {
                     activeStrategy = "Scalp (15-min)";

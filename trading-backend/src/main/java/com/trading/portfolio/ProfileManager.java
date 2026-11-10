@@ -1169,7 +1169,9 @@ public class ProfileManager implements Runnable {
     private void runScalpPriorityScan(Set<String> alreadyProcessed, double equity, double buyingPower,
                                       MarketRegime regime, double currentVix, String profilePrefix) {
         if (regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.STRONG_BEAR
-                || regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.HIGH_VOLATILITY) {
+                || regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.HIGH_VOLATILITY
+                || (config.isScalpRangeBoundDisabled()
+                    && regime == com.trading.analysis.MarketRegimeDetector.MarketRegime.RANGE_BOUND)) {
             return;
         }
         int maxPositions = config.getMaxPositionsAtOnce();

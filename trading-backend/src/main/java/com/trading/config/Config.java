@@ -1859,6 +1859,15 @@ public class Config {
     public double getScalpTakeProfitPercent() {
         return getDoubleProperty("SCALP_TAKE_PROFIT_PERCENT", 0.70);
     }
+    // 2026-11-10: scalp's RSI/VWAP/volume entry is a momentum-continuation signal, which is
+    // structurally the wrong kind of signal for a non-trending market -- confirmed across scalp's
+    // entire live history (Aug/Oct/Nov, 3 separate calendar clusters): WEAK_BULL 42.6% WR/+$1.79
+    // (68 trades), STRONG_BULL 60% WR/+$1.29 (5 trades), RANGE_BOUND 21.4% WR/-$4.82 (14 trades).
+    // The Oct 1 disable and the Nov 10 "huge loss" investigation both trace to RANGE_BOUND
+    // clusters specifically, not a general scalp problem. See decision_log.md for the full analysis.
+    public boolean isScalpRangeBoundDisabled() {
+        return getBooleanProperty("SCALP_RANGE_BOUND_DISABLED", false);
+    }
     // ---- Volatility-aware scalp stop (2026-10-01) ----
     // The flat SCALP_STOP_LOSS_PERCENT sits INSIDE a single normal 15-min bar's own noise for most
     // scalp-eligible symbols (confirmed from real bar data: META/AMD/TSLA/URA/NVDA/XOP/MSFT/AAPL/XLE

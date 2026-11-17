@@ -130,6 +130,23 @@ public class TradeDatabase {
         runMigration("CREATE INDEX IF NOT EXISTS idx_blocked_ts ON blocked_entries(ts)",
             "Schema migration: Added idx_blocked_ts index");
 
+        // system_events: 2026-11-17 -- a day (Nov 16) with near-zero trading activity could not be
+        // diagnosed after the fact because HeartbeatMonitor's pause/resume state was in-memory
+        // only, and Fly's log buffer holds roughly the last 40 minutes. This persists exactly the
+        // kind of event that currently only reaches a websocket broadcast or a log line --
+        // heartbeat pause/resume, and anything else worth being able to look back on later.
+        // 30-day TTL, same as blocked_entries.
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS system_events (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts       TEXT    NOT NULL DEFAULT (datetime('now')),
+                category TEXT    NOT NULL,
+                detail   TEXT
+            )""",
+            "Schema migration: Added system_events table");
+        runMigration("CREATE INDEX IF NOT EXISTS idx_system_events_ts ON system_events(ts)",
+            "Schema migration: Added idx_system_events_ts index");
+
         // daily_summary: one row per trading day — permanent record, never pruned.
         runMigration("""
             CREATE TABLE IF NOT EXISTS daily_summary (
@@ -1587,6 +1604,49 @@ public class TradeDatabase {
         return out;
     }
 
+    // ── system_events ────────────────────────────────────────────────────────
+
+    /** Persist a system-level event (heartbeat pause/resume, etc.) for post-session diagnosis. Non-fatal — never throws. */
+    public void saveSystemEvent(String category, String detail) {
+        String sql = "INSERT INTO system_events (category, detail) VALUES (?, ?)";
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, category);
+            ps.setString(2, detail);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warn("saveSystemEvent failed for {}: {}", category, e.getMessage());
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Recent system events (newest first) -- "what happened to the bot's own health today?". */
+    public java.util.List<java.util.Map<String, Object>> getSystemEvents(int days, int limit) {
+        String sql = "SELECT ts, category, detail FROM system_events " +
+                     "WHERE ts >= datetime('now', ?) ORDER BY id DESC LIMIT ?";
+        var out = new java.util.ArrayList<java.util.Map<String, Object>>();
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement(sql)) {
+            ps.setString(1, "-" + Math.max(1, days) + " days");
+            ps.setInt(2, Math.max(1, Math.min(limit, 5000)));
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    var row = new java.util.LinkedHashMap<String, Object>();
+                    row.put("ts", rs.getString("ts"));
+                    row.put("category", rs.getString("category"));
+                    row.put("detail", rs.getString("detail"));
+                    out.add(row);
+                }
+            }
+        } catch (SQLException e) {
+            logger.warn("getSystemEvents failed: {}", e.getMessage());
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        return out;
+    }
+
     // ── fill reconciliation / rolling symbol stats ───────────────────────────
 
     /** A closed trade row, as needed by the daily fill reconciler and digest. */
@@ -1718,9 +1778,11 @@ public class TradeDatabase {
                 "DELETE FROM blocked_entries WHERE ts < datetime('now', '-30 days')");
             int regimeDeleted = stmt.executeUpdate(
                 "DELETE FROM regime_log WHERE ts < datetime('now', '-60 days')");
-            if (blockedDeleted > 0 || regimeDeleted > 0) {
-                logger.info("Pruned {} blocked_entries and {} regime_log rows older than TTL",
-                    blockedDeleted, regimeDeleted);
+            int systemEventsDeleted = stmt.executeUpdate(
+                "DELETE FROM system_events WHERE ts < datetime('now', '-30 days')");
+            if (blockedDeleted > 0 || regimeDeleted > 0 || systemEventsDeleted > 0) {
+                logger.info("Pruned {} blocked_entries, {} regime_log, {} system_events rows older than TTL",
+                    blockedDeleted, regimeDeleted, systemEventsDeleted);
             }
         } catch (SQLException e) {
             logger.warn("pruneOldObservabilityData failed (non-fatal): {}", e.getMessage());

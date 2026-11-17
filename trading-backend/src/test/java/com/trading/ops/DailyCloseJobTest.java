@@ -153,6 +153,23 @@ class DailyCloseJobTest {
     }
 
     @Test
+    @DisplayName("zero trades AND a near-zero (but not literally zero) blocked count still alerts")
+    void unexpectedSilence_alertsEvenWithAFewBlocks() throws Exception {
+        // Reproduces the exact 2026-11-16 miss: 1 blocked entry all day slipped past the original
+        // blocked.isEmpty() check. A handful of blocks is just as strong a silence signal as zero --
+        // a healthy day's gates fire dozens of times from normal operation alone.
+        when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));
+        account(1000.0, 1000.0);
+        db.saveBlockedEntry("AAPL", "MAIN", "opening-window block: first 45min", 357.19, "RANGE_BOUND", 10.96);
+
+        var d = job.runFor(DAY);
+
+        var alerts = (List<?>) d.get("alerts");
+        assertEquals(1, alerts.size());
+        assertTrue(alerts.get(0).toString().contains("1 blocked-entry attempt"));
+    }
+
+    @Test
     @DisplayName("zero trades AND zero blocked attempts on a scheduled blackout day raises no alert")
     void unexpectedSilence_exemptOnBlackoutDay() throws Exception {
         when(client.getOrderHistory(null, 500)).thenReturn(M.readTree("[]"));

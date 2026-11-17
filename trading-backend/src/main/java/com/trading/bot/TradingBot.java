@@ -173,6 +173,23 @@ public final class TradingBot {
         }
     }
 
+    // 2026-11-17: a day (Nov 16) with near-zero trading activity could not be diagnosed after the
+    // fact -- HeartbeatMonitor's pause/resume state is in-memory only, and Fly's log buffer holds
+    // roughly the last 40 minutes. This persists events (TradeDatabase.system_events) that
+    // currently only reach a websocket broadcast or a log line, so they survive past the buffer.
+    private static com.trading.persistence.TradeDatabase systemEventDatabase;
+
+    public static void installEventLogger(com.trading.persistence.TradeDatabase database) {
+        systemEventDatabase = database;
+    }
+
+    /** No-ops silently if no database is installed -- never throws into a caller. */
+    public static void logSystemEvent(String category, String detail) {
+        if (systemEventDatabase != null) {
+            systemEventDatabase.saveSystemEvent(category, detail);
+        }
+    }
+
     public static Map<String, Long> getHeartbeatDetails() {
         if (heartbeatMonitor != null) {
             return heartbeatMonitor.getDetails();

@@ -90,7 +90,12 @@ public final class DashboardController {
         app.get("/api/blocked-entries", ctx -> ctx.json(database.getBlockedEntries(
             ctx.queryParamAsClass("days", Integer.class).getOrDefault(1),
             ctx.queryParamAsClass("limit", Integer.class).getOrDefault(1000))));
-        
+        // 2026-11-17: persisted heartbeat pause/resume (and future system-level) events -- added
+        // after a quiet day (Nov 16) proved undiagnosable once Fly's ~40min log buffer rotated past it.
+        app.get("/api/system/events", ctx -> ctx.json(database.getSystemEvents(
+            ctx.queryParamAsClass("days", Integer.class).getOrDefault(7),
+            ctx.queryParamAsClass("limit", Integer.class).getOrDefault(500))));
+
         app.get("/api/reconciliation/daily", this::getDailyReconciliation);
         app.get("/api/digest/daily", ctx -> {
             var job = com.trading.ops.DailyCloseJob.instance();

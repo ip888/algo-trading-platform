@@ -68,17 +68,19 @@ public class HeartbeatMonitor {
     public void checkHealth() {
         Instant now = Instant.now();
         boolean allHealthy = true;
+        var failingComponents = new java.util.ArrayList<String>();
 
         for (var entry : components.entrySet()) {
             String name = entry.getKey();
             ComponentStatus status = entry.getValue();
-            
+
             Duration timeSinceLastBeat = Duration.between(status.lastBeat, now);
-            
+
             if (timeSinceLastBeat.compareTo(status.timeout) > 0) {
                 logger.error("CRITICAL: Component '{}' requires attention! Last beat: {}s ago (Timeout: {}s)",
                     name, timeSinceLastBeat.toSeconds(), status.timeout.toSeconds());
                 allHealthy = false;
+                failingComponents.add(name + " (" + timeSinceLastBeat.toSeconds() + "s stale)");
             }
         }
 
@@ -88,6 +90,8 @@ public class HeartbeatMonitor {
             logger.error("SYSTEM FAILURE DETECTED: soft-pausing new entries (heartbeat failure)");
             isSystemHealthy.set(false);
             com.trading.bot.TradingBot.setHeartbeatPaused(true);
+            com.trading.bot.TradingBot.logSystemEvent("heartbeat_pause",
+                "soft-paused new entries -- " + String.join(", ", failingComponents));
             com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
                 "⚠️ New entries soft-paused — heartbeat failure detected. Existing positions and "
                     + "exits are unaffected; this clears automatically once health recovers.", "WARN");
@@ -121,6 +125,8 @@ public class HeartbeatMonitor {
             com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
                 "🚨 New entries left paused — recurring heartbeat failures today, needs manual "
                     + "review", "CRITICAL");
+            com.trading.bot.TradingBot.logSystemEvent("heartbeat_resume_blocked",
+                "exceeded " + MAX_AUTO_RESUMES_PER_DAY + " auto-resumes today -- left paused for manual review");
             com.trading.bot.TradingBot.sendCriticalAlert(
                 "Trading bot: new entries paused (recurring heartbeat failures)",
                 "Heartbeat failures have recurred more than " + MAX_AUTO_RESUMES_PER_DAY
@@ -133,6 +139,8 @@ public class HeartbeatMonitor {
         logger.warn("Health recovered — auto-resuming new entries (auto-resume {}/{} today)",
             autoResumesToday.get(), MAX_AUTO_RESUMES_PER_DAY);
         com.trading.bot.TradingBot.setHeartbeatPaused(false);
+        com.trading.bot.TradingBot.logSystemEvent("heartbeat_resume",
+            "auto-resumed new entries (auto-resume " + autoResumesToday.get() + "/" + MAX_AUTO_RESUMES_PER_DAY + " today)");
         com.trading.websocket.TradingWebSocketHandler.broadcastActivity(
             "✅ New entries auto-resumed — health recovered (auto-resume "
                 + autoResumesToday.get() + "/" + MAX_AUTO_RESUMES_PER_DAY + " today)", "INFO");

@@ -1,13 +1,16 @@
 package com.trading.protection;
 
 import com.trading.bot.TradingBot;
+import com.trading.persistence.TradeDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.time.Duration;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -23,9 +26,15 @@ class HeartbeatMonitorTest {
 
     private HeartbeatMonitor monitor;
 
+    private static final String DB = "test-heartbeat-events.db";
+    private TradeDatabase db;
+
     @BeforeEach
     void setUp() {
         TradingBot.setHeartbeatPaused(false);
+        new File(DB).delete();
+        db = new TradeDatabase(DB);
+        TradingBot.installEventLogger(db);
         monitor = new HeartbeatMonitor();
         monitor.registerComponent("Test", Duration.ofMillis(50));
     }
@@ -33,6 +42,8 @@ class HeartbeatMonitorTest {
     @AfterEach
     void tearDown() {
         TradingBot.setHeartbeatPaused(false);
+        db.close();
+        new File(DB).delete();
     }
 
     @Test
@@ -46,6 +57,19 @@ class HeartbeatMonitorTest {
     }
 
     @Test
+    @DisplayName("missed heartbeat persists a heartbeat_pause system event naming the stale component")
+    void missedHeartbeatPersistsEvent() throws InterruptedException {
+        Thread.sleep(80);
+        monitor.checkHealth();
+
+        var events = db.getSystemEvents(7, 100);
+        assertEquals(1, events.size());
+        assertEquals("heartbeat_pause", events.get(0).get("category"));
+        assertTrue(events.get(0).get("detail").toString().contains("Test"),
+            "detail should name the stale component");
+    }
+
+    @Test
     @DisplayName("recovery auto-resumes new entries")
     void recoveryAutoResumes() throws InterruptedException {
         Thread.sleep(80);
@@ -56,6 +80,20 @@ class HeartbeatMonitorTest {
         monitor.checkHealth();
         assertFalse(TradingBot.isHeartbeatPaused());
         assertTrue(monitor.isHealthy());
+    }
+
+    @Test
+    @DisplayName("recovery persists a heartbeat_resume event after the heartbeat_pause event")
+    void recoveryPersistsEvent() throws InterruptedException {
+        Thread.sleep(80);
+        monitor.checkHealth();
+        monitor.beat("Test");
+        monitor.checkHealth();
+
+        var events = db.getSystemEvents(7, 100); // newest first
+        assertEquals(2, events.size());
+        assertEquals("heartbeat_resume", events.get(0).get("category"));
+        assertEquals("heartbeat_pause", events.get(1).get("category"));
     }
 
     @Test
@@ -82,5 +120,9 @@ class HeartbeatMonitorTest {
         // After exceeding MAX_AUTO_RESUMES_PER_DAY (3), the last recovery should NOT auto-resume.
         assertTrue(TradingBot.isHeartbeatPaused(),
             "a failure recurring more than the daily cap should stay paused for manual review");
+
+        var events = db.getSystemEvents(7, 100); // newest first
+        assertEquals("heartbeat_resume_blocked", events.get(0).get("category"),
+            "the 4th recovery attempt should be logged as blocked, not resumed");
     }
 }

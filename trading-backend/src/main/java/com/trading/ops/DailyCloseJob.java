@@ -212,20 +212,30 @@ public final class DailyCloseJob {
                     + "existing positions/exits are unaffected; this should auto-clear once health recovers");
             }
             // 2026-11-05: generalizes the above two -- catches ANY future cause of unexpected
-            // silence, not just this specific mechanism. Zero trades AND zero blocked-entry
-            // attempts (gates didn't even fire) on a day that wasn't a deliberate blackout is the
+            // silence, not just this specific mechanism. Zero trades AND near-zero blocked-entry
+            // attempts (gates barely fired) on a day that wasn't a deliberate blackout is the
             // strongest signal something is structurally broken (e.g. the evaluation loop itself
-            // never ran) -- distinct from "gates correctly blocked everything", which is already
+            // barely ran) -- distinct from "gates correctly blocked everything", which is already
             // explained via `notes` above and is not itself alarming (see the 2026-09-30 breadth-
             // filter incident, a correct block mistaken for a bug before `notes` existed).
+            //
+            // 2026-11-17: loosened from "zero blocked entries" to "fewer than MIN_DAILY_BLOCKS" --
+            // Nov 16 had exactly 1 blocked entry all day (vs 42-73 on every normal recent day) and
+            // this alert never fired because 1 isn't literally zero. A healthy day's gates (entry
+            // stagger, cooldowns, price-improvement, etc.) fire dozens of times from normal
+            // operation alone, independent of whether any trade actually happens -- so a handful
+            // is just as strong a silence signal as exactly zero.
+            final int MIN_DAILY_BLOCKS = 5;
+            int totalBlocked = blocked.values().stream().mapToInt(Integer::intValue).sum();
             boolean isBlackoutDay = config.isEconomicCalendarBlackoutEnabled()
                 && config.getEconomicBlackoutDates().contains(date);
             // openPositions == 0 excludes the "still open after close" case above -- that already
             // has its own alert, and a lingering position is itself evidence the loop did run.
-            if (trades.isEmpty() && blocked.isEmpty() && openPositions == 0 && !isBlackoutDay) {
-                alerts.add("Zero trades AND zero blocked-entry attempts today (not a scheduled "
-                    + "blackout date) — the evaluation loop may not have run at all. Check "
-                    + "/api/heartbeat and /api/emergency/status.");
+            if (trades.isEmpty() && totalBlocked < MIN_DAILY_BLOCKS && openPositions == 0 && !isBlackoutDay) {
+                alerts.add(String.format("Zero trades AND only %d blocked-entry attempt%s today "
+                    + "(not a scheduled blackout date) — the evaluation loop may not have run "
+                    + "normally. Check /api/heartbeat, /api/emergency/status, and /api/system/events.",
+                    totalBlocked, totalBlocked == 1 ? "" : "s"));
             }
             digest.put("alerts", alerts);
 

@@ -204,6 +204,10 @@ public final class MultiBrokerOrchestrator {
         TradingBot.installEmailAlerter(new com.trading.notifications.EmailNotifier(
             config.getEmailAddress(), config.getEmailPassword(),
             config.getEmailSmtpHost(), config.getEmailSmtpPort()));
+        // Persists heartbeat pause/resume events so a quiet day (Nov 16 2026: near-zero blocked-
+        // entries, no deploy, no restart, no VIX spike -- see decision_log.md) can be diagnosed
+        // after the fact instead of only being visible in Fly's ~40-minute log buffer.
+        TradingBot.installEventLogger(database);
         heartbeatMonitor.registerComponent("Main Loop", java.time.Duration.ofSeconds(300));
         heartbeatMonitor.registerComponent("API Connection", java.time.Duration.ofSeconds(300));
         for (BrokerEntry entry : entries) {

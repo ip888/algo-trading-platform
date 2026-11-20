@@ -861,6 +861,16 @@ public class Config {
     public int getWinRateGateMinTrades() { return getIntProperty("WINRATE_GATE_MIN_TRADES", 6); }
     public double getWinRateGateMaxWinRate() { return getDoubleProperty("WINRATE_GATE_MAX_WIN_RATE", 0.35); }
 
+    // 2026-11-20: pure-expectancy criterion, independent of win rate. The check above requires
+    // BOTH winRate < MAX_WIN_RATE(0.35) AND avgReturnPct < 0 -- structurally unable to catch a
+    // symbol that wins MORE than 35% of the time but still loses money on average. Confirmed live
+    // (Nov 19 WEAK_BULL regime breakdown, 176 non-scalp trades): XLV 56% WR but net -$2.29/25
+    // trades (avg -0.0251%), XLE 50% WR but net -$1.48/20 trades (avg -0.0306%) -- both comfortably
+    // above the win-rate floor, so the existing gate never even considers them. OFF by default
+    // pending backtest validation -- see decision_log.md, Nov 20 2026 entry.
+    public boolean isExpectancyGateEnabled() { return getBooleanProperty("WINRATE_GATE_EXPECTANCY_ENABLED", false); }
+    public double getExpectancyGateMinAvgReturnPct() { return getDoubleProperty("WINRATE_GATE_MIN_AVG_RETURN_PCT", -0.05); }
+
     // ---- Event-day (earnings-gap) entry gate for single stocks ----
     /** Default true; a mocked Config returns false so unit tests are unaffected. */
     public boolean isEventDayGateEnabled() { return getBooleanProperty("EVENT_DAY_GATE_ENABLED", true); }

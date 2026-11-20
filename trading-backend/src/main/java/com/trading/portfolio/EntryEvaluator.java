@@ -718,18 +718,25 @@ final class EntryEvaluator {
             String regimeName = regime.name();
             var w = database.getRecentSymbolStats(symbol, regimeName,
                 config.getWinRateGateWindowDays(), config.getWinRateGateWindowTrades());
-            if (w != null && w.trades() >= config.getWinRateGateMinTrades()
-                    && w.winRate() < config.getWinRateGateMaxWinRate() && w.avgReturnPct() < 0) {
-                logger.warn("{} {}: ❌ EXPECTANCY GATE — {}% win rate, {}% avg return over last {} {} trades ({}d window), blocking entry",
-                    profilePrefix, symbol,
-                    String.format("%.0f", w.winRate() * 100), String.format("%.2f", w.avgReturnPct()),
-                    w.trades(), regimeName, config.getWinRateGateWindowDays());
-                TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ⚠️ %s blocked — losing in %s (%.0f%% wins, %.2f%% avg over %d trades)",
-                        profile.name(), symbol, regimeName, w.winRate() * 100, w.avgReturnPct(), w.trades()),
-                    "WARNING"
-                );
-                return new Blocked("low win rate in " + regimeName);
+            if (w != null && w.trades() >= config.getWinRateGateMinTrades()) {
+                boolean lowWinRateBlock = w.winRate() < config.getWinRateGateMaxWinRate() && w.avgReturnPct() < 0;
+                // Pure-expectancy criterion (2026-11-20) -- catches a symbol with a FINE win rate
+                // that still loses money on average, which lowWinRateBlock structurally cannot.
+                boolean expectancyBlock = config.isExpectancyGateEnabled()
+                    && w.avgReturnPct() < config.getExpectancyGateMinAvgReturnPct();
+                if (lowWinRateBlock || expectancyBlock) {
+                    String reason = lowWinRateBlock ? "low win rate in " + regimeName : "negative expectancy in " + regimeName;
+                    logger.warn("{} {}: ❌ EXPECTANCY GATE ({}) — {}% win rate, {}% avg return over last {} {} trades ({}d window), blocking entry",
+                        profilePrefix, symbol, lowWinRateBlock ? "low win rate" : "pure expectancy",
+                        String.format("%.0f", w.winRate() * 100), String.format("%.2f", w.avgReturnPct()),
+                        w.trades(), regimeName, config.getWinRateGateWindowDays());
+                    TradingWebSocketHandler.broadcastActivity(
+                        String.format("[%s] ⚠️ %s blocked — losing in %s (%.0f%% wins, %.2f%% avg over %d trades)",
+                            profile.name(), symbol, regimeName, w.winRate() * 100, w.avgReturnPct(), w.trades()),
+                        "WARNING"
+                    );
+                    return new Blocked(reason);
+                }
             }
         }
 

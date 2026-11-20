@@ -532,9 +532,13 @@ public final class WalkForwardBacktestHarness {
         String regimeName = regime.regime().name();
         var w = database.getRecentSymbolStats(symbol, regimeName,
             config.getWinRateGateWindowDays(), config.getWinRateGateWindowTrades());
-        if (w != null && w.trades() >= config.getWinRateGateMinTrades()
-                && w.winRate() < config.getWinRateGateMaxWinRate() && w.avgReturnPct() < 0) {
-            return "low win rate in " + regimeName;
+        if (w != null && w.trades() >= config.getWinRateGateMinTrades()) {
+            boolean lowWinRateBlock = w.winRate() < config.getWinRateGateMaxWinRate() && w.avgReturnPct() < 0;
+            // Pure-expectancy criterion (2026-11-20) -- mirrors EntryEvaluator's own addition.
+            boolean expectancyBlock = config.isExpectancyGateEnabled()
+                && w.avgReturnPct() < config.getExpectancyGateMinAvgReturnPct();
+            if (lowWinRateBlock) return "low win rate in " + regimeName;
+            if (expectancyBlock) return "negative expectancy in " + regimeName;
         }
 
         // Price-based event-day gate (2026-09-25 live addition) — single stocks only.

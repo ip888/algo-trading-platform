@@ -127,13 +127,24 @@ public final class TradingBot {
 
     public static boolean pauseTrading() {
         boolean changed = tradingPaused.compareAndSet(false, true);
-        if (changed) logger.warn("⏸ TRADING PAUSED by dashboard request");
+        if (changed) {
+            logger.warn("⏸ TRADING PAUSED by dashboard request");
+            // 2026-11-19: this guard sits ahead of the heartbeat-pause check in ProfileManager's
+            // entry gate and previously had NO persisted trace at all (only this log line, which
+            // Fly's ~40min buffer loses) -- a day with zero trades AND zero blocked-entries but a
+            // perfectly healthy heartbeat (ruled out via system_events) could otherwise never be
+            // distinguished from exactly this state. See decision_log.md, Nov 19 2026 entry.
+            logSystemEvent("trading_paused", "paused via /api/trading/pause");
+        }
         return changed;
     }
 
     public static boolean resumeTrading() {
         boolean changed = tradingPaused.compareAndSet(true, false);
-        if (changed) logger.info("▶ TRADING RESUMED by dashboard request");
+        if (changed) {
+            logger.info("▶ TRADING RESUMED by dashboard request");
+            logSystemEvent("trading_resumed", "resumed via /api/trading/resume");
+        }
         return changed;
     }
 

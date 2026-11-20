@@ -160,6 +160,12 @@ public class ProfileManager implements Runnable {
     // Resets to null whenever regime turns non-bearish.
     private java.time.Instant bearishRegimeMarketStart = null;
 
+    // 2026-11-19: track transitions only (not every cycle while still tripped) so persisting
+    // these doesn't spam system_events every ~20s for the duration of a halt -- mirrors
+    // HeartbeatMonitor's pause/resume symmetry. See decision_log.md, Nov 19 2026 entry.
+    private boolean lastCircuitBreakerTripped = false;
+    private boolean lastPortfolioStopLossHalted = false;
+
     public ProfileManager(
             TradingProfile profile,
             double capital,
@@ -650,7 +656,16 @@ public class ProfileManager implements Runnable {
                         String.format("[%s] 🚨 CIRCUIT BREAKER %s — entries halted (resets next session)",
                             profile.name(), cb.tripReason()),
                         "ERROR");
+                    if (!lastCircuitBreakerTripped) {
+                        com.trading.bot.TradingBot.logSystemEvent("circuit_breaker_tripped",
+                            String.format("%s (consec losses=%d, dd=%.2f%%)", cb.tripReason(),
+                                cb.getConsecutiveLosses(), cb.getSessionDrawdownPct() * 100.0));
+                        lastCircuitBreakerTripped = true;
+                    }
                     return;
+                } else if (lastCircuitBreakerTripped) {
+                    com.trading.bot.TradingBot.logSystemEvent("circuit_breaker_reset", "new session, entries resumed");
+                    lastCircuitBreakerTripped = false;
                 }
             }
         }
@@ -669,10 +684,18 @@ public class ProfileManager implements Runnable {
                 String.format("[%s] PORTFOLIO STOP LOSS HIT - New entries halted", profile.name()),
                 "ERROR"
             );
+            if (!lastPortfolioStopLossHalted) {
+                com.trading.bot.TradingBot.logSystemEvent("portfolio_stop_loss_halted", risk.getSummary());
+                lastPortfolioStopLossHalted = true;
+            }
 
             return; // Skip new entries only
         } else {
             riskGate.setPortfolioStopLossHaltActive(false);
+            if (lastPortfolioStopLossHalted) {
+                com.trading.bot.TradingBot.logSystemEvent("portfolio_stop_loss_cleared", "equity recovered above the halt threshold");
+                lastPortfolioStopLossHalted = false;
+            }
         }
 
         // ========== CLEANUP EXCESS POSITIONS ==========

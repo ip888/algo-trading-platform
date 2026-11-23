@@ -48,10 +48,28 @@ class DurableSellReconciliationTest {
                 client.placeOrder("SPY", 2.0, "sell", "market", "day", null));
             // Full fill must NOT unlock immediately: other exit code may still
             // hold a stale in-memory position and attempt a second SELL.
-            assertNotNull(db.getBrokerExitIntent("alpaca", "SPY"));
+            assertEquals("CONSUMED", db.getBrokerExitIntent("alpaca", "SPY").state());
+            assertThrows(IllegalStateException.class, () ->
+                client.placeOrder("SPY", 2.0, "sell", "market", "day", null));
         }
         verify(broker, times(1)).placeOrderTracked(eq("SPY"), eq(2.0), eq("sell"),
             eq("market"), eq("day"), isNull(), anyString());
+    }
+
+    @Test
+    void partialPositionExitIsBlockedBeforeSubmitting(@TempDir Path dir) {
+        try (var db = new TradeDatabase(dir.resolve("partial-position.db").toString())) {
+            BrokerClient broker = mock(BrokerClient.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
+            when(broker.getPositions()).thenReturn(java.util.List.of(
+                new com.trading.api.model.Position("SPY", 10.0, 5000.0, 500.0, 0.0)));
+            var client = new ResilientBrokerClient(broker, new SimpleMeterRegistry());
+            client.enableDurableSellSafety(db, "alpaca");
+            assertThrows(IllegalStateException.class, () ->
+                client.placeOrder("SPY", 5.0, "sell", "market", "day", null));
+            verify(broker, never()).placeOrderTracked(anyString(), anyDouble(), anyString(),
+                anyString(), anyString(), any(), anyString());
+            assertNull(db.getBrokerExitIntent("alpaca", "SPY"));
+        }
     }
 
     @Test

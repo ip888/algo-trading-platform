@@ -95,9 +95,13 @@ public class ResilientBrokerClient {
             double brokerQty = brokerPositions.stream()
                 .filter(p -> symbol.equalsIgnoreCase(p.symbol()))
                 .mapToDouble(Position::quantity).sum();
-            if (!Double.isFinite(qty) || qty <= 0 || brokerQty + 0.0000001 < qty) {
-                throw new IllegalStateException("SELL blocked: requested " + qty
-                    + " but broker holds only " + brokerQty + " of " + symbol);
+            if (!Double.isFinite(qty) || qty <= 0 || !Double.isFinite(brokerQty)
+                    || Math.abs(brokerQty - qty) > 0.0000001) {
+                // P0 containment: auto partial exits need a dedicated durable
+                // quantity-aware lifecycle. Until then, do not split a position
+                // across multiple overlapping SELL intents.
+                throw new IllegalStateException("SELL blocked: only full-position exits are enabled; requested "
+                    + qty + ", broker holds " + brokerQty + " of " + symbol);
             }
             String id = "atp_sell_" + java.util.UUID.randomUUID().toString().replace("-", "");
             if (db.claimBrokerExitIntent(broker, symbol, id, qty)) {
@@ -117,6 +121,9 @@ public class ResilientBrokerClient {
             }
         }
         if (intent == null) throw new IllegalStateException("SELL order intent state is unknown");
+        if ("CONSUMED".equals(intent.state())) {
+            throw new IllegalStateException("Previous SELL was already confirmed and processed; await portfolio reconciliation");
+        }
         // Never issue a second POST while the previous order is unresolved.
         var order = getOrderByClientOrderId(intent.clientOrderId());
         String status = order.path("status").asText("");
@@ -128,10 +135,12 @@ public class ResilientBrokerClient {
         }
         if ("filled".equals(status) && Double.isFinite(filled)
                 && filled + 0.0000001 >= intent.quantity()) {
-            // Do NOT release on an execution acknowledgement. Another exit path
-            // may run before the portfolio/DB has observed that fill and send a
-            // duplicate SELL. Keep the durable lock until the entry gate observes
-            // both confirmed terminal fill and a FLAT broker account.
+            // A broker fill may satisfy exactly ONE caller. Do not release the
+            // lock until a later broker-flat reconciliation; otherwise another
+            // exit path can accidentally reuse this historical execution.
+            if (!db.consumeBrokerExitFill(broker, symbol, intent.clientOrderId())) {
+                throw new IllegalStateException("SELL execution has already been consumed");
+            }
             return;
         }
         if (("canceled".equals(status) || "rejected".equals(status) || "expired".equals(status))

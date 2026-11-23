@@ -55,6 +55,22 @@ public interface BrokerClient {
                                          double takeProfitPrice, double stopLossPrice,
                                          Double stopLossLimitPrice, Double limitPrice);
 
+    /**
+     * Submission with caller-persisted idempotency identifier.
+     * Implementations that cannot honor client_order_id must reject, not silently
+     * downgrade to the unsafe legacy order method.
+     */
+    default BracketOrderResult placeBracketOrderTracked(String symbol, double qty, String side,
+            double takeProfitPrice, double stopLossPrice, Double stopLossLimitPrice,
+            Double limitPrice, String clientOrderId) {
+        throw new UnsupportedOperationException("Tracked broker orders are not supported");
+    }
+
+    /** Exact lookup for crash recovery. Fail on unknown API state; 404 is not proof of rejection. */
+    default JsonNode getOrderByClientOrderId(String clientOrderId) {
+        throw new UnsupportedOperationException("Broker order-id reconciliation is not supported");
+    }
+
     String placeBracketOrder(String symbol, double qty, String side,
                              double takeProfitPrice, double stopLossPrice,
                              Double stopLossLimitPrice) throws Exception;

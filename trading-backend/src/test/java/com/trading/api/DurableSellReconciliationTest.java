@@ -46,7 +46,9 @@ class DurableSellReconciliationTest {
                 """));
             assertDoesNotThrow(() ->
                 client.placeOrder("SPY", 2.0, "sell", "market", "day", null));
-            assertNull(db.getBrokerExitIntent("alpaca", "SPY"));
+            // Full fill must NOT unlock immediately: other exit code may still
+            // hold a stale in-memory position and attempt a second SELL.
+            assertNotNull(db.getBrokerExitIntent("alpaca", "SPY"));
         }
         verify(broker, times(1)).placeOrderTracked(eq("SPY"), eq(2.0), eq("sell"),
             eq("market"), eq("day"), isNull(), anyString());

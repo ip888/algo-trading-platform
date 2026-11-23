@@ -120,6 +120,44 @@ final class EntryEvaluator {
         }
     }
 
+    /**
+     * An entry is complete when the entire filled quantity was subsequently sold.
+     * This complements zero-fill cancellation and allows trading again after a full
+     * broker-confirmed round trip, without releasing intent on mere order acceptance.
+     * Retain the intent if history is incomplete, malformed, or partially sold.
+     */
+    static boolean canReleaseSettledIntent(com.fasterxml.jackson.databind.JsonNode buy,
+                                           com.fasterxml.jackson.databind.JsonNode history) {
+        if (buy == null || !buy.isObject() || history == null || !history.isArray()) return false;
+        if (!"buy".equalsIgnoreCase(buy.path("side").asText(""))) return false;
+        double filled;
+        Instant buyFilledAt;
+        try {
+            filled = Double.parseDouble(buy.path("filled_qty").asText("NaN"));
+            buyFilledAt = Instant.parse(buy.path("filled_at").asText(""));
+        } catch (NumberFormatException | java.time.format.DateTimeParseException e) {
+            return false;
+        }
+        if (!Double.isFinite(filled) || filled <= 0) return false;
+        double sold = 0.0;
+        for (var order : history) {
+            if (!"sell".equalsIgnoreCase(order.path("side").asText("")) ||
+                !buy.path("symbol").asText("").equalsIgnoreCase(order.path("symbol").asText(""))) continue;
+            if (!"filled".equals(order.path("status").asText(""))) continue;
+            try {
+                Instant soldAt = Instant.parse(order.path("filled_at").asText(""));
+                if (!soldAt.isBefore(buyFilledAt)) {
+                    double qty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+                    if (!Double.isFinite(qty) || qty <= 0) return false;
+                    sold += qty;
+                }
+            } catch (NumberFormatException | java.time.format.DateTimeParseException e) {
+                return false;
+            }
+        }
+        return sold >= filled - 0.0000001;
+    }
+
     EntryEvaluator(TradingProfile profile, Config config, TradeDatabase database,
                    ResilientBrokerClient client, PortfolioManager portfolio, RiskGate riskGate,
                    PDTProtection pdtProtection, MarketHoursFilter marketHoursFilter,
@@ -644,15 +682,18 @@ final class EntryEvaluator {
             var intent = database.getBrokerEntryIntent("alpaca", symbol);
             if (intent != null) {
                 var order = client.getOrderByClientOrderId(intent.clientOrderId());
-                if (!canReleaseNoFillIntent(order)) {
-                    return new Blocked("unresolved broker entry intent " + intent.clientOrderId());
-                }
                 var brokerPositions = client.getPositions();
                 var openOrders = client.getOpenOrders(symbol);
                 if (brokerPositions == null || openOrders == null || !openOrders.isArray()
                     || !openOrders.isEmpty() || brokerPositions.stream()
                         .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() != 0.0)) {
                     return new Blocked("cannot safely clear broker entry intent");
+                }
+                if (!canReleaseNoFillIntent(order)) {
+                    var orderHistory = client.getOrderHistory(symbol, 50);
+                    if (!canReleaseSettledIntent(order, orderHistory)) {
+                        return new Blocked("unresolved broker entry intent " + intent.clientOrderId());
+                    }
                 }
                 database.releaseBrokerEntryIntent(intent.broker(), symbol, intent.clientOrderId());
             }

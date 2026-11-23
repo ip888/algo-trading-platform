@@ -356,7 +356,9 @@ class ProfileManagerSellOrderTest {
 
         // Open orders exist that need cancelling before the market-sell
         ArrayNode orders = createOpenOrdersNode("order-sl-001");
-        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders, emptyOrdersNode());
+        // Risk-exit scan checks protection before cancellation; the following
+        // cancellation lookup must still see the order until DELETE is issued.
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders, orders, emptyOrdersNode());
 
         invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 

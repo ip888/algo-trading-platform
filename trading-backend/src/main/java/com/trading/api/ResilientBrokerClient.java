@@ -56,6 +56,36 @@ public class ResilientBrokerClient {
     private com.trading.persistence.TradeDatabase durableOrderDatabase;
     private String durableOrderBroker;
 
+    public boolean hasDurableSellSafety() {
+        return durableOrderDatabase != null;
+    }
+
+    /**
+     * Authoritative average execution price for the durable SELL intent.
+     * Missing/invalid broker fill details are UNKNOWN, never a quote fallback.
+     */
+    public double getConfirmedSellFillPrice(String symbol) {
+        var db = durableOrderDatabase;
+        if (db == null) throw new IllegalStateException("Durable SELL accounting not configured");
+        var intent = db.getBrokerExitIntent(durableOrderBroker, symbol);
+        if (intent == null) throw new IllegalStateException("No tracked SELL intent for " + symbol);
+        var order = getOrderByClientOrderId(intent.clientOrderId());
+        if (order == null || !"filled".equals(order.path("status").asText(""))) {
+            throw new IllegalStateException("Broker SELL not fully filled for " + symbol);
+        }
+        try {
+            double qty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+            double price = Double.parseDouble(order.path("filled_avg_price").asText("NaN"));
+            if (!Double.isFinite(qty) || qty + 0.0000001 < intent.quantity()
+                || !Double.isFinite(price) || price <= 0.0) {
+                throw new IllegalStateException("Incomplete broker SELL fill for " + symbol);
+            }
+            return price;
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("Malformed broker SELL fill for " + symbol, e);
+        }
+    }
+
     public void enableDurableSellSafety(com.trading.persistence.TradeDatabase database, String broker) {
         this.durableOrderDatabase = java.util.Objects.requireNonNull(database);
         this.durableOrderBroker = java.util.Objects.requireNonNull(broker);

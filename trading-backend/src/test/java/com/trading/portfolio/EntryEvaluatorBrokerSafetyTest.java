@@ -80,6 +80,21 @@ class EntryEvaluatorBrokerSafetyTest {
     }
 
     @Test
+    void filledExitOnlyReleasesAfterExactQuantityConfirmation() throws Exception {
+        var filled = JSON.readTree("""
+            {"status":"filled","filled_qty":"2"}
+            """);
+        assertTrue(EntryEvaluator.canReleaseFilledExitIntent(filled, 2.0));
+        assertFalse(EntryEvaluator.canReleaseFilledExitIntent(filled, 2.5));
+        assertFalse(EntryEvaluator.canReleaseFilledExitIntent(JSON.readTree("""
+            {"status":"partially_filled","filled_qty":"2"}
+            """), 2.0));
+        assertFalse(EntryEvaluator.canReleaseFilledExitIntent(JSON.readTree("""
+            {"status":"filled","filled_qty":"garbage"}
+            """), 1.0));
+    }
+
+    @Test
     void malformedOrderHistoryMustFailClosed() throws Exception {
         assertThrows(IllegalArgumentException.class,
             () -> EntryEvaluator.hasRecentBuy(JSON.readTree("{}"), "SPY", NOW, Duration.ofMinutes(30)));

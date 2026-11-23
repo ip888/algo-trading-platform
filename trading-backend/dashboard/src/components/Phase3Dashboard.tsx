@@ -168,13 +168,13 @@ export default function Phase3Dashboard() {
     return () => ws.close();
   }, []);
 
-  const updateFeatureActivity = (name: string, status: 'active' | 'idle' | 'triggered') => {
-    setFeatures(prev => prev.map(f => 
-      f.name === name 
+  function updateFeatureActivity(name: string, status: 'active' | 'idle' | 'triggered') {
+    setFeatures(prev => prev.map(f =>
+      f.name === name
         ? { ...f, status, lastActivity: new Date().toLocaleTimeString() }
         : f
     ));
-  };
+  }
 
   const getStatusColor = (status: string) => {
     switch (status) {

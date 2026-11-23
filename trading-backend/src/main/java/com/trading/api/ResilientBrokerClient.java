@@ -116,7 +116,10 @@ public class ResilientBrokerClient {
         }
         if ("filled".equals(status) && Double.isFinite(filled)
                 && filled + 0.0000001 >= intent.quantity()) {
-            db.releaseBrokerExitIntent(broker, symbol, intent.clientOrderId());
+            // Do NOT release on an execution acknowledgement. Another exit path
+            // may run before the portfolio/DB has observed that fill and send a
+            // duplicate SELL. Keep the durable lock until the entry gate observes
+            // both confirmed terminal fill and a FLAT broker account.
             return;
         }
         if (("canceled".equals(status) || "rejected".equals(status) || "expired".equals(status))

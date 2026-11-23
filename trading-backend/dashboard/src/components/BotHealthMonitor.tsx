@@ -1,12 +1,18 @@
 import { useTradingStore } from '../store/tradingStore';
+import { useEffect, useState } from 'react';
 
 export const BotHealthMonitor = () => {
   const { systemStatus, lastUpdate, connected } = useTradingStore();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 10000);
+    return () => window.clearInterval(interval);
+  }, []);
   
   // Calculate time since last update
   const getTimeSinceUpdate = () => {
     if (!lastUpdate) return 'Never';
-    const seconds = Math.floor((Date.now() - lastUpdate) / 1000);
+    const seconds = Math.floor((now - lastUpdate) / 1000);
     if (seconds < 60) return `${seconds}s ago`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ago`;
@@ -19,7 +25,7 @@ export const BotHealthMonitor = () => {
     if (!connected) return { status: 'Disconnected', color: 'error', icon: '❌' };
     if (!lastUpdate) return { status: 'Starting...', color: 'warning', icon: '⏳' };
     
-    const secondsSinceUpdate = (Date.now() - lastUpdate) / 1000;
+    const secondsSinceUpdate = (now - lastUpdate) / 1000;
     if (secondsSinceUpdate > 60) return { status: 'Stale', color: 'warning', icon: '⚠️' };
     
     return { status: 'Healthy', color: 'success', icon: '✅' };

@@ -160,16 +160,7 @@ final class ExitEvaluator {
 
     /** Only terminal no-fill cancellation permits a replacement SELL. */
     static boolean isTerminalCancelWithoutFill(com.fasterxml.jackson.databind.JsonNode order) {
-        if (order == null || !order.isObject()) return false;
-        String status = order.path("status").asText("");
-        if (!("canceled".equals(status) || "expired".equals(status) || "rejected".equals(status))) {
-            return false;
-        }
-        try {
-            return Double.parseDouble(order.path("filled_qty").asText("NaN")) == 0.0;
-        } catch (NumberFormatException e) {
-            return false;
-        }
+        return com.trading.api.ResilientBrokerClient.isConfirmedNoFillCancellation(order);
     }
 
     /**

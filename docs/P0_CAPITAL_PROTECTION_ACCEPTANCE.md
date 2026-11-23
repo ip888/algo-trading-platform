@@ -14,7 +14,7 @@
 6. Cancel-before-replace checks each prior order's terminal canceled/expired/rejected status **and zero filled quantity**, not just disappearance from the open-order list.
 7. Protection checks inspect **active SELL stop quantity** against broker-held shares. Missing/invalid broker responses fail closed for new entries.
 8. Fractional LIVE buys are blocked until a separate fill-driven, broker-protected fractional execution lifecycle is implemented and verified.
-9. Reconciliation refuses to resurrect stale DB-only positions absent at Alpaca, and broker risk API failure is not reported as zero portfolio exposure.
+9. Reconciliation refuses to resurrect stale DB-only positions absent at Alpaca **or fabricate a CANCELLED/$0 result** when the corresponding broker fill is not established. Broker risk API and portfolio-correlation calculation failures do not masquerade as safe/zero exposure.
 10. Manual dashboard close and emergency/panic exits use tracked broker execution and cancellation verification. Panic snapshots **all** open orders, including unfilled BUYs, before global cancellation. Unconfirmed results trigger operator alerts.
 11. CI uses **dummy** credentials and an invalid localhost broker endpoint; no live order, Fly deployment or live credential access occurs.
 

@@ -1,0 +1,61 @@
+package com.trading.portfolio;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import java.time.Duration;
+import java.time.Instant;
+import static org.junit.jupiter.api.Assertions.*;
+
+class EntryEvaluatorBrokerSafetyTest {
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Instant NOW = Instant.parse("2026-11-23T16:00:00Z");
+
+    @Test
+    void recentAcceptedBuyBlocksReentryAfterRestart() throws Exception {
+        var orders = JSON.readTree("""
+            [{"symbol":"SPY","side":"buy","status":"filled",
+              "submitted_at":"2026-11-23T15:55:00Z"}]
+            """);
+        assertTrue(EntryEvaluator.hasRecentBuy(orders, "SPY", NOW, Duration.ofMinutes(30)));
+    }
+
+    @Test
+    void unknownSubmissionTimeBlocksReentry() throws Exception {
+        var orders = JSON.readTree("""
+            [{"symbol":"SPY","side":"buy","status":"new"}]
+            """);
+        assertTrue(EntryEvaluator.hasRecentBuy(orders, "SPY", NOW, Duration.ofMinutes(30)));
+    }
+
+    @Test
+    void oldBuyOutsideWindowDoesNotBlockForever() throws Exception {
+        var orders = JSON.readTree("""
+            [{"symbol":"SPY","side":"buy","status":"filled",
+              "submitted_at":"2026-11-23T14:00:00Z"}]
+            """);
+        assertFalse(EntryEvaluator.hasRecentBuy(orders, "SPY", NOW, Duration.ofMinutes(30)));
+    }
+
+    @Test
+    void otherSymbolsAndSellsDoNotBlockBuy() throws Exception {
+        var orders = JSON.readTree("""
+            [{"symbol":"QQQ","side":"buy","submitted_at":"2026-11-23T15:59:00Z"},
+             {"symbol":"SPY","side":"sell","submitted_at":"2026-11-23T15:59:00Z"}]
+            """);
+        assertFalse(EntryEvaluator.hasRecentBuy(orders, "SPY", NOW, Duration.ofMinutes(30)));
+    }
+
+    @Test
+    void malformedOrderHistoryMustFailClosed() throws Exception {
+        assertThrows(IllegalArgumentException.class,
+            () -> EntryEvaluator.hasRecentBuy(JSON.readTree("{}"), "SPY", NOW, Duration.ofMinutes(30)));
+    }
+
+    @Test
+    void invalidTimestampMustFailClosed() throws Exception {
+        var orders = JSON.readTree("""
+            [{"symbol":"SPY","side":"buy","submitted_at":"malformed"}]
+            """);
+        assertTrue(EntryEvaluator.hasRecentBuy(orders, "SPY", NOW, Duration.ofMinutes(30)));
+    }
+}

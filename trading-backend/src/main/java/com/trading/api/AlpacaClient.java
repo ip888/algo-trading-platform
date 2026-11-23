@@ -210,8 +210,10 @@ public final class AlpacaClient implements BrokerClient {
             var response = sendRequest(url, "GET");
             return objectMapper.readTree(response);
         } catch (Exception e) {
+            // Unknown history is not equivalent to an empty history. New-entry
+            // reconciliation must fail closed when the broker cannot be queried.
             logger.error("Failed to get order history", e);
-            return objectMapper.createArrayNode();
+            throw new IllegalStateException("Broker order history unavailable", e);
         }
     }
 

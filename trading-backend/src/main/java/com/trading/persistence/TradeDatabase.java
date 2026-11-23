@@ -200,6 +200,13 @@ public class TradeDatabase implements AutoCloseable {
                 PRIMARY KEY (broker, symbol)
             )""", "P0: restart-safe broker sell intents");
 
+        runMigration("ALTER TABLE broker_entry_intents ADD COLUMN intended_qty REAL",
+            "P0: persist intended entry quantity");
+        runMigration("ALTER TABLE broker_entry_intents ADD COLUMN intended_stop REAL",
+            "P0: persist original broker stop level");
+        runMigration("ALTER TABLE broker_entry_intents ADD COLUMN intended_take_profit REAL",
+            "P0: persist original broker take-profit level");
+
         // Prune old observability data on startup so the volume doesn't grow unbounded.
         pruneOldObservabilityData();
 
@@ -1344,17 +1351,27 @@ public class TradeDatabase implements AutoCloseable {
 
     // P0: persisted, fail-closed order intents. Never treat a failed DB write as
     // permission to submit a broker order. One active intent per broker+symbol.
-    public record BrokerEntryIntent(String broker, String symbol, String clientOrderId, String state) {}
+    public record BrokerEntryIntent(String broker, String symbol, String clientOrderId,
+                                    String state, double intendedQty, double stopLoss, double takeProfit) {}
 
     public boolean claimBrokerEntryIntent(String broker, String symbol, String clientOrderId) {
+        return claimBrokerEntryIntent(broker, symbol, clientOrderId, 0, 0, 0);
+    }
+
+    public boolean claimBrokerEntryIntent(String broker, String symbol, String clientOrderId,
+                                          double quantity, double stopLoss, double takeProfit) {
         long stamp = lock.writeLock();
         try (var ps = connection.prepareStatement("""
-            INSERT OR IGNORE INTO broker_entry_intents(broker, symbol, client_order_id, state)
-            VALUES (?, ?, ?, 'SUBMITTING')
+            INSERT OR IGNORE INTO broker_entry_intents(
+                broker, symbol, client_order_id, state, intended_qty, intended_stop, intended_take_profit)
+            VALUES (?, ?, ?, 'SUBMITTING', ?, ?, ?)
             """)) {
             ps.setString(1, broker);
             ps.setString(2, symbol);
             ps.setString(3, clientOrderId);
+            ps.setDouble(4, quantity);
+            ps.setDouble(5, stopLoss);
+            ps.setDouble(6, takeProfit);
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw new IllegalStateException("Cannot persist broker entry intent; no order may be sent", e);
@@ -1366,14 +1383,15 @@ public class TradeDatabase implements AutoCloseable {
     public BrokerEntryIntent getBrokerEntryIntent(String broker, String symbol) {
         long stamp = lock.readLock();
         try (var ps = connection.prepareStatement("""
-            SELECT client_order_id, state FROM broker_entry_intents
+            SELECT client_order_id, state, intended_qty, intended_stop, intended_take_profit FROM broker_entry_intents
             WHERE broker = ? AND symbol = ?
             """)) {
             ps.setString(1, broker);
             ps.setString(2, symbol);
             try (var rs = ps.executeQuery()) {
                 return rs.next() ? new BrokerEntryIntent(
-                    broker, symbol, rs.getString(1), rs.getString(2)) : null;
+                    broker, symbol, rs.getString(1), rs.getString(2),
+                    rs.getDouble(3), rs.getDouble(4), rs.getDouble(5)) : null;
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Cannot verify broker entry intent", e);

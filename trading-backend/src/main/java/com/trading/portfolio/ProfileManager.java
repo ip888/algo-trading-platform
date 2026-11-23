@@ -1730,6 +1730,9 @@ public class ProfileManager implements Runnable {
             var openDbTrades = database.getOpenTradeRecords(brokerName);
             int restored = 0;
             for (var trade : openDbTrades) {
+                // Never resurrect a pending/phantom DB position unless Alpaca
+                // actually reports filled shares. An accepted limit order is not a fill.
+                if (!brokerSymbols.contains(trade.symbol())) continue;
                 if (portfolio.getPosition(trade.symbol()).isEmpty()) {
                     var position = new com.trading.risk.TradePosition(
                         trade.symbol(), trade.entryPrice(), trade.quantity(),

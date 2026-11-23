@@ -46,6 +46,7 @@ class DurableSellReconciliationTest {
                 """));
             assertDoesNotThrow(() ->
                 client.placeOrder("SPY", 2.0, "sell", "market", "day", null));
+            assertEquals(490.00, client.getConfirmedSellFillPrice("SPY"), 0.001);
             // Full fill must NOT unlock immediately: other exit code may still
             // hold a stale in-memory position and attempt a second SELL.
             assertEquals("CONSUMED", db.getBrokerExitIntent("alpaca", "SPY").state());
@@ -69,6 +70,22 @@ class DurableSellReconciliationTest {
             verify(broker, never()).placeOrderTracked(anyString(), anyDouble(), anyString(),
                 anyString(), anyString(), any(), anyString());
             assertNull(db.getBrokerExitIntent("alpaca", "SPY"));
+        }
+    }
+
+    @Test
+    void filledSellMissingAveragePriceCannotBeBooked(@TempDir Path dir) throws Exception {
+        try (var db = new TradeDatabase(dir.resolve("missingprice.db").toString())) {
+            assertTrue(db.claimBrokerExitIntent("alpaca", "SPY", "atp_sell_no_price", 2.0));
+            BrokerClient broker = mock(BrokerClient.class,
+                withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
+            when(broker.getOrderByClientOrderId("atp_sell_no_price"))
+                .thenReturn(JSON.readTree("""
+                    {"status":"filled","filled_qty":"2","filled_avg_price":null}
+                    """));
+            var client = new ResilientBrokerClient(broker, new SimpleMeterRegistry());
+            client.enableDurableSellSafety(db, "alpaca");
+            assertThrows(IllegalStateException.class, () -> client.getConfirmedSellFillPrice("SPY"));
         }
     }
 

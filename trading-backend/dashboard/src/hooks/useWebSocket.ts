@@ -111,5 +111,6 @@ export const useWebSocket = (url: string) => {
     };
   }, [connect]);
   
-  return wsRef.current;
+  // Return the ref rather than reading mutable .current during render.
+  return wsRef;
 };

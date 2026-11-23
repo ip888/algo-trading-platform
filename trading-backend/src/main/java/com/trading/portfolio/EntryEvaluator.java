@@ -683,7 +683,11 @@ final class EntryEvaluator {
                     }
                 }
             } catch (Exception e) {
-                logger.debug("{} Correlation cap check failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                // The concentration risk cap must not silently disappear when
+                // historical market data / correlation calculation is unavailable.
+                logger.error("{} Correlation exposure is UNKNOWN for {}; blocking new BUY",
+                    profilePrefix, symbol, e);
+                return new Blocked("portfolio correlation risk unavailable");
             }
         }
 

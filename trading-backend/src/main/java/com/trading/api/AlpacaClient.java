@@ -119,8 +119,12 @@ public final class AlpacaClient implements BrokerClient {
             var position = objectMapper.readValue(response, Position.class);
             return Optional.of(position);
         } catch (Exception e) {
-            logger.debug("No position found for {}", symbol);
-            return Optional.empty();
+            // Only an explicit Alpaca 404 means the symbol is not held.
+            // Timeouts, 5xx, authentication errors and malformed JSON are UNKNOWN.
+            if (e.getMessage() != null && e.getMessage().startsWith("API Request failed: 404 -")) {
+                return Optional.empty();
+            }
+            throw new IllegalStateException("Cannot verify broker position " + symbol, e);
         }
     }
 
@@ -129,6 +133,9 @@ public final class AlpacaClient implements BrokerClient {
         var response = sendRequest(config.baseUrl() + "/v2/positions", "GET");
         var root = objectMapper.readTree(response);
         
+        if (root == null || !root.isArray()) {
+            throw new IllegalStateException("Malformed broker positions response");
+        }
         var positions = new ArrayList<Position>();
         if (root.isArray()) {
             for (var node : root) {

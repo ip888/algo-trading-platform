@@ -163,8 +163,10 @@ public final class AlpacaClient implements BrokerClient {
             var url = config.baseUrl() + "/v2/orders?status=open&symbols=" + symbol;
             return objectMapper.readTree(sendRequest(url, "GET"));
         } catch (Exception e) {
+            // Never interpret an API outage as "no open orders": callers may otherwise
+            // submit duplicate entries or cancel/recreate active protective orders.
             logger.error("Failed to get open orders for {}", symbol, e);
-            return objectMapper.createArrayNode();
+            throw new IllegalStateException("Cannot establish open-order state for " + symbol, e);
         }
     }
     
@@ -644,6 +646,7 @@ public final class AlpacaClient implements BrokerClient {
             case "GET" -> builder.GET().build();
             case "POST" -> builder.POST(HttpRequest.BodyPublishers.ofString(body != null ? body : "{}")).build();
             case "DELETE" -> builder.DELETE().build();
+            case "PATCH" -> builder.method("PATCH", HttpRequest.BodyPublishers.ofString(body != null ? body : "{}")).build();
             default -> throw new IllegalArgumentException(String.format("Unsupported HTTP method: %s", method));
         };
 

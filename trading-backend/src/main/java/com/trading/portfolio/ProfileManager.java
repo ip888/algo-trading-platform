@@ -1367,9 +1367,16 @@ public class ProfileManager implements Runnable {
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
             Double entryLimitPrice = orderDecision.limitPrice();
 
-            // Place bracket order and check if server-side protection was applied
-            var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
-                takeProfit, stopLoss, null, entryLimitPrice);
+            // Durable intent must be committed BEFORE the network request. On timeout
+            // retain this exact identifier and require broker reconciliation.
+            String clientOrderId = "atp_" + java.util.UUID.randomUUID().toString().replace("-", "");
+            if (!database.claimBrokerEntryIntent(brokerName, symbol, clientOrderId)) {
+                logger.error("{} {}: unresolved broker entry intent exists; refusing additional BUY",
+                    profilePrefix, symbol);
+                return;
+            }
+            var bracketResult = client.placeBracketOrderTracked(symbol, positionSize, "buy",
+                takeProfit, stopLoss, null, entryLimitPrice, clientOrderId);
 
             if (bracketSubmissionUnconfirmed(bracketResult)) {
                 // An API timeout/error does not prove the broker rejected this order.
@@ -1383,7 +1390,9 @@ public class ProfileManager implements Runnable {
                         profile.name(), symbol),
                     "ERROR");
                 return;
-            } else if (bracketResult.needsClientSideMonitoring()) {
+            }
+            database.updateBrokerEntryIntent(brokerName, symbol, clientOrderId, "ACKNOWLEDGED");
+            if (bracketResult.needsClientSideMonitoring()) {
                 // Order succeeded but fractional — Alpaca doesn't support bracket orders for fractions.
                 // Place a separate native GTC stop-market order to provide crash-safe protection.
                 // This order persists on Alpaca even if the bot restarts.

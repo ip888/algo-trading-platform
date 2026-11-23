@@ -247,7 +247,7 @@ public final class DashboardController {
                 // A successful DELETE is merely a cancellation request. A stop
                 // might have filled while the cancellation was in flight.
                 var canceled = alpacaClient.getOrderById(id);
-                if (!com.trading.portfolio.ExitEvaluator.isTerminalCancelWithoutFill(canceled)) {
+                if (!com.trading.api.ResilientBrokerClient.isConfirmedNoFillCancellation(canceled)) {
                     ctx.status(409).json(Map.of("error",
                         "Order " + id + " not confirmed canceled without fill; no replacement SELL"));
                     return;

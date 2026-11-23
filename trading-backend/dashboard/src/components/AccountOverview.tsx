@@ -25,7 +25,7 @@ const AccountOverviewComponent = () => {
   }
 
   const isSyncing = !systemStatus;
-  const ad = accountData as any;
+  const ad = accountData as typeof accountData & { sessionStartCapital?: number; capitalTier?: string; tierRiskPerTradePercent?: number; tierMaxPositionPercent?: number; tierMaxPositions?: number; tierMinPositionValue?: number; eodExitEnabled?: boolean };
   const equity = ad.equity || ad.cash || 0;
   const sessionStart: number = ad.sessionStartCapital || 0;
   const sessionPnl = sessionStart > 0 ? equity - sessionStart : 0;

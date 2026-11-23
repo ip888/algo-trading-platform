@@ -57,7 +57,7 @@ class DurableSellReconciliationTest {
     }
 
     @Test
-    void partialPositionExitIsBlockedBeforeSubmitting(@TempDir Path dir) {
+    void partialPositionExitIsBlockedBeforeSubmitting(@TempDir Path dir) throws Exception {
         try (var db = new TradeDatabase(dir.resolve("partial-position.db").toString())) {
             BrokerClient broker = mock(BrokerClient.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
             when(broker.getPositions()).thenReturn(java.util.List.of(

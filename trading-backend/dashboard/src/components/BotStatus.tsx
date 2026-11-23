@@ -4,7 +4,7 @@ import { CONFIG } from '../config';
 
 export const BotStatus = () => {
   const { botStatus, systemStatus } = useTradingStore();
-  const [marketData, setMarketData] = useState<any>(null);
+  const [marketData, setMarketData] = useState<{ currentVIX?: number; isOpen?: boolean } | null>(null);
   
   // Fetch market data from REST API as fallback
   useEffect(() => {

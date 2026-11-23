@@ -193,6 +193,32 @@ public class ResilientBrokerClient {
         });
     }
 
+    /**
+     * Order mutations are not safe to retry automatically: an HTTP timeout does not mean
+     * the broker rejected the order. A second POST can create an additional live order.
+     * Keep rate limiting/circuit breaker, but require explicit broker reconciliation
+     * before the caller decides whether a new order is needed.
+     */
+    private <T> T executeMutation(String operation, Supplier<T> supplier) {
+        var timer = Timer.builder("alpaca.api.call")
+            .tag("operation", operation)
+            .register(meterRegistry);
+        return timer.record(() -> {
+            try {
+                var decorated = RateLimiter.decorateSupplier(rateLimiter,
+                    CircuitBreaker.decorateSupplier(circuitBreaker, supplier));
+                T result = decorated.get();
+                meterRegistry.counter("alpaca.api.success", "operation", operation).increment();
+                return result;
+            } catch (Exception e) {
+                meterRegistry.counter("alpaca.api.failure", "operation", operation,
+                    "error", e.getClass().getSimpleName()).increment();
+                logger.error("Broker mutation {} failed (NOT retried; reconcile before retry)", operation, e);
+                throw e;
+            }
+        });
+    }
+
     // Delegate methods with resilience
 
     public JsonNode getAccount() {
@@ -227,7 +253,7 @@ public class ResilientBrokerClient {
 
     public void placeOrder(String symbol, double qty, String side, String type,
                           String timeInForce, Double limitPrice) {
-        executeResilient("placeOrder", () -> {
+        executeMutation("placeOrder", () -> {
             try {
                 delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
                 return null;
@@ -249,14 +275,14 @@ public class ResilientBrokerClient {
     public BracketOrderResult placeBracketOrder(String symbol, double qty, String side,
                                  double takeProfitPrice, double stopLossPrice,
                                  Double stopLossLimitPrice, Double limitPrice) {
-        return executeResilient("placeBracketOrder", () ->
+        return executeMutation("placeBracketOrder", () ->
             delegate.placeBracketOrder(symbol, qty, side, takeProfitPrice,
                 stopLossPrice, stopLossLimitPrice, limitPrice)
         );
     }
 
     public void cancelAllOrders() {
-        executeResilient("cancelAllOrders", () -> {
+        executeMutation("cancelAllOrders", () -> {
             try {
                 delegate.cancelAllOrders();
                 return null;
@@ -293,7 +319,7 @@ public class ResilientBrokerClient {
     }
 
     public void cancelOrder(String orderId) {
-        executeResilient("cancelOrder", () -> {
+        executeMutation("cancelOrder", () -> {
             delegate.cancelOrder(orderId);
             return null;
         });
@@ -316,7 +342,7 @@ public class ResilientBrokerClient {
      * Goes through the circuit breaker like normal orders.
      */
     public void placeNativeStopOrder(String symbol, double qty, double stopPrice) {
-        executeResilient("placeNativeStopOrder", () -> {
+        executeMutation("placeNativeStopOrder", () -> {
             try {
                 delegate.placeNativeStopOrder(symbol, qty, stopPrice);
                 return null;

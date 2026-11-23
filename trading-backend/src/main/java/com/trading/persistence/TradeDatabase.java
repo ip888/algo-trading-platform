@@ -189,6 +189,17 @@ public class TradeDatabase {
                 PRIMARY KEY (broker, symbol)
             )""", "P0: restart-safe broker entry intents");
 
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS broker_exit_intents (
+                broker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL UNIQUE,
+                quantity REAL NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (broker, symbol)
+            )""", "P0: restart-safe broker sell intents");
+
         // Prune old observability data on startup so the volume doesn't grow unbounded.
         pruneOldObservabilityData();
 
@@ -1405,6 +1416,61 @@ public class TradeDatabase {
             if (ps.executeUpdate() != 1) throw new IllegalStateException("Broker entry intent missing");
         } catch (SQLException e) {
             throw new IllegalStateException("Cannot release broker entry intent", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Durable unfilled SELL submission; never send twice after timeout. */
+    public record BrokerExitIntent(String clientOrderId, double quantity, String state) {}
+
+    public boolean claimBrokerExitIntent(String broker, String symbol, String id, double quantity) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            INSERT OR IGNORE INTO broker_exit_intents(broker,symbol,client_order_id,quantity,state)
+            VALUES (?,?,?,?, 'SUBMITTING')
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, id);
+            ps.setDouble(4, quantity);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot persist SELL intent, refusing broker order", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    public BrokerExitIntent getBrokerExitIntent(String broker, String symbol) {
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement("""
+            SELECT client_order_id, quantity, state FROM broker_exit_intents
+            WHERE broker=? AND symbol=?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            try (var rs = ps.executeQuery()) {
+                return rs.next() ? new BrokerExitIntent(rs.getString(1), rs.getDouble(2), rs.getString(3)) : null;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot retrieve durable SELL intent", e);
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    public void releaseBrokerExitIntent(String broker, String symbol, String id) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            DELETE FROM broker_exit_intents WHERE broker=? AND symbol=? AND client_order_id=?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, id);
+            if (ps.executeUpdate() != 1) throw new IllegalStateException("SELL intent missing");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot release durable SELL intent", e);
         } finally {
             lock.unlockWrite(stamp);
         }

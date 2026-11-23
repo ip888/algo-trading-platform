@@ -85,6 +85,29 @@ final class EntryEvaluator {
         = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long STALE_ENTRY_ORDER_MS = 30 * 60 * 1000L; // 30 minutes
 
+    /**
+     * Conservative replay/settlement-lag guard. Invalid/missing timestamps are treated
+     * as unresolved BUYs, never as proof that another BUY is safe.
+     */
+    static boolean hasRecentBuy(com.fasterxml.jackson.databind.JsonNode orders, String symbol,
+                                Instant now, java.time.Duration window) {
+        if (orders == null || !orders.isArray()) {
+            throw new IllegalArgumentException("Broker order history is not an array");
+        }
+        for (var order : orders) {
+            if (!symbol.equalsIgnoreCase(order.path("symbol").asText("")) ||
+                !"buy".equalsIgnoreCase(order.path("side").asText(""))) continue;
+            String submitted = order.path("submitted_at").asText("");
+            if (submitted.isBlank()) return true;
+            try {
+                if (!Instant.parse(submitted).isBefore(now.minus(window))) return true;
+            } catch (java.time.format.DateTimeParseException e) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     EntryEvaluator(TradingProfile profile, Config config, TradeDatabase database,
                    ResilientBrokerClient client, PortfolioManager portfolio, RiskGate riskGate,
                    PDTProtection pdtProtection, MarketHoursFilter marketHoursFilter,
@@ -631,17 +654,8 @@ final class EntryEvaluator {
             if (recentOrders == null || !recentOrders.isArray()) {
                 return new Blocked("broker order history unavailable");
             }
-            for (var order : recentOrders) {
-                if (!symbol.equalsIgnoreCase(order.path("symbol").asText("")) ||
-                    !"buy".equalsIgnoreCase(order.path("side").asText(""))) continue;
-                String submitted = order.path("submitted_at").asText("");
-                if (submitted.isBlank()) {
-                    return new Blocked("recent BUY has unknown submission timestamp");
-                }
-                var submittedAt = Instant.parse(submitted);
-                if (!submittedAt.isBefore(Instant.now().minus(java.time.Duration.ofMinutes(30)))) {
-                    return new Blocked("recent BUY requires reconciliation before re-entry");
-                }
+            if (hasRecentBuy(recentOrders, symbol, Instant.now(), java.time.Duration.ofMinutes(30))) {
+                return new Blocked("recent BUY requires reconciliation before re-entry");
             }
         } catch (Exception e) {
             logger.error("{} Blocking BUY for {}: broker state cannot be verified", profilePrefix, symbol, e);

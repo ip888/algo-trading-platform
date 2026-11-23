@@ -715,6 +715,20 @@ final class EntryEvaluator {
                 return new Blocked("broker already holds position");
             }
 
+            // Do not add new exposure while existing positions lack verified
+            // broker-native stop coverage. A configured stop price in the database
+            // is not evidence that a protective order exists at Alpaca.
+            for (var held : positions) {
+                if (held.quantity() <= 0.0) continue;
+                var protectiveOrders = client.getOpenOrders(held.symbol());
+                if (!com.trading.monitoring.PositionProtectionAuditor.hasSufficientBrokerStop(
+                        protectiveOrders, held.symbol(), held.quantity())) {
+                    logger.error("{} Blocking new BUY {}: {} quantity {} has no verified broker-side stop",
+                        profilePrefix, symbol, held.symbol(), held.quantity());
+                    return new Blocked("existing position lacks verified broker stop");
+                }
+            }
+
             var pendingOrders = client.getOpenOrders(symbol);
             if (pendingOrders == null || !pendingOrders.isArray()) {
                 return new Blocked("broker open-order response invalid");

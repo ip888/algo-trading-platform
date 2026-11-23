@@ -72,6 +72,11 @@ public interface BrokerClient {
         throw new UnsupportedOperationException("Tracked single-leg orders are not supported");
     }
 
+    /** Exact broker status of a known order ID, used to confirm cancellation. */
+    default JsonNode getOrderById(String orderId) {
+        throw new UnsupportedOperationException("Broker order-id lookup is not supported");
+    }
+
     /** Exact lookup for crash recovery. Fail on unknown API state; 404 is not proof of rejection. */
     default JsonNode getOrderByClientOrderId(String clientOrderId) {
         throw new UnsupportedOperationException("Broker order-id reconciliation is not supported");

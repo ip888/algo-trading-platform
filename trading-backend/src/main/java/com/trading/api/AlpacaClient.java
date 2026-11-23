@@ -362,6 +362,60 @@ public final class AlpacaClient implements BrokerClient {
     }
 
     /**
+     * Submit a whole-share bracket with the caller's durable client order ID.
+     * Never retry here; a timeout may occur after Alpaca accepted the order.
+     */
+    @Override
+    public BracketOrderResult placeBracketOrderTracked(String symbol, double qty, String side,
+            double takeProfitPrice, double stopLossPrice, Double stopLossLimitPrice,
+            Double limitPrice, String clientOrderId) {
+        if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}")) {
+            throw new IllegalArgumentException("Invalid client_order_id");
+        }
+        if (!Double.isFinite(qty) || qty <= 0 || Math.abs(qty - Math.rint(qty)) > 0.0000001) {
+            throw new IllegalArgumentException("Tracked bracket requires positive whole-share quantity");
+        }
+        try {
+            var order = objectMapper.createObjectNode()
+                .put("client_order_id", clientOrderId)
+                .put("symbol", symbol)
+                .put("qty", String.format(java.util.Locale.ROOT, "%.0f", qty))
+                .put("side", side)
+                .put("type", limitPrice == null ? "market" : "limit")
+                .put("time_in_force", "gtc")
+                .put("order_class", "bracket");
+            order.set("take_profit", objectMapper.createObjectNode().put(
+                "limit_price", String.format(java.util.Locale.ROOT, "%.2f", takeProfitPrice)));
+            var stop = objectMapper.createObjectNode().put(
+                "stop_price", String.format(java.util.Locale.ROOT, "%.2f", stopLossPrice));
+            if (stopLossLimitPrice != null) stop.put("limit_price", String.format(java.util.Locale.ROOT, "%.2f", stopLossLimitPrice));
+            order.set("stop_loss", stop);
+            if (limitPrice != null) order.put("limit_price", String.format(java.util.Locale.ROOT, "%.2f", limitPrice));
+            sendRequest(config.baseUrl() + "/v2/orders", "POST", objectMapper.writeValueAsString(order));
+            return BracketOrderResult.withBracket(symbol, qty);
+        } catch (Exception e) {
+            logger.error("Tracked bracket order {} failed or is unconfirmed; broker lookup required", clientOrderId, e);
+            return BracketOrderResult.failed(symbol, qty, "Broker submission not confirmed: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public JsonNode getOrderByClientOrderId(String clientOrderId) {
+        if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}")) {
+            throw new IllegalArgumentException("Invalid client_order_id");
+        }
+        try {
+            String url = config.baseUrl() + "/v2/orders:by_client_order_id?client_order_id="
+                + java.net.URLEncoder.encode(clientOrderId, java.nio.charset.StandardCharsets.UTF_8);
+            return objectMapper.readTree(sendRequest(url, "GET"));
+        } catch (Exception e) {
+            // 404 and network failures are both UNKNOWN here. Never silently
+            // release a durable order intent merely because the lookup failed.
+            throw new IllegalStateException("Cannot reconcile order " + clientOrderId, e);
+        }
+    }
+
+    /**
      * Place a bracket order with automatic take-profit and stop-loss.
      *
      * IMPORTANT: For fractional quantities, Alpaca does NOT support bracket orders.

@@ -1478,6 +1478,28 @@ public class TradeDatabase implements AutoCloseable {
         }
     }
 
+    /**
+     * Mark a confirmed SELL fill as consumed exactly once. A second caller must
+     * never reuse that same broker execution as its own successful SELL.
+     */
+    public boolean consumeBrokerExitFill(String broker, String symbol, String id) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            UPDATE broker_exit_intents SET state = 'CONSUMED'
+            WHERE broker = ? AND symbol = ? AND client_order_id = ?
+              AND state <> 'CONSUMED'
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, id);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot atomically consume confirmed broker SELL fill", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
     public void releaseBrokerExitIntent(String broker, String symbol, String id) {
         long stamp = lock.writeLock();
         try (var ps = connection.prepareStatement("""

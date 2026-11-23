@@ -286,6 +286,34 @@ public final class AlpacaClient implements BrokerClient {
         }
     }
 
+    @Override
+    public void placeOrderTracked(String symbol, double qty, String side, String type,
+                                  String timeInForce, Double limitPrice, String clientOrderId) {
+        if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}") ||
+            !Double.isFinite(qty) || qty <= 0) {
+            throw new IllegalArgumentException("Invalid tracked order id or quantity");
+        }
+        try {
+            var order = objectMapper.createObjectNode()
+                .put("client_order_id", clientOrderId)
+                .put("symbol", symbol)
+                .put("qty", String.format(java.util.Locale.ROOT, "%.9f", qty))
+                .put("side", side)
+                .put("type", type)
+                .put("time_in_force", timeInForce);
+            if (limitPrice != null) {
+                if ("stop".equals(type)) throw new IllegalArgumentException("Stop needs stop_price, not limit_price");
+                order.put("limit_price", String.format(java.util.Locale.ROOT, "%.2f", limitPrice));
+            }
+            if (config.isExtendedHoursEnabled() && "limit".equals(type)) {
+                order.put("extended_hours", true);
+            }
+            sendRequest(config.baseUrl() + "/v2/orders", "POST", objectMapper.writeValueAsString(order));
+        } catch (Exception e) {
+            throw new IllegalStateException("Tracked broker order unconfirmed: " + clientOrderId, e);
+        }
+    }
+
     /**
      * Replace an existing order with updated parameters.
      * Useful for trailing stops or adjusting limit prices.

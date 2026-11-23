@@ -1346,46 +1346,18 @@ public class ProfileManager implements Runnable {
             var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
                 takeProfit, stopLoss, null, entryLimitPrice);
 
-            if (!bracketResult.success()) {
-                // Order failed completely - try simple market order as fallback
-                logger.warn("{} {}: Bracket order failed ({}), trying market order",
-                    profilePrefix, symbol, bracketResult.message());
-
-                try {
-                    client.placeOrder(symbol, positionSize, "buy", "market", "day", null);
-                    broadcastOrderData(symbol, positionSize, "buy", "market", "filled", currentPrice);
-
-                    // Market order succeeded but NO bracket protection
-                    TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] ⚠️ BUY ORDER FILLED (No Protection): %s %.3f shares @ $%.2f",
-                            profile.name(), symbol, positionSize, currentPrice),
-                        "WARN"
-                    );
-
-                    // Record as unprotected position
-                    logger.warn("{} {}: ⚠️ Position has NO server-side SL/TP protection!",
-                        profilePrefix, symbol);
-                } catch (Exception marketOrderError) {
-                    if (marketOrderError.getMessage() != null &&
-                        marketOrderError.getMessage().contains("insufficient buying power")) {
-                        logger.error("{} {}: ❌ Order FAILED - Insufficient buying power",
-                            profilePrefix, symbol);
-
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ❌ BUY ORDER FAILED: %s - Insufficient buying power (Tried: $%.2f, Available: $%.2f)",
-                                profile.name(), symbol, positionSize * currentPrice, buyingPower),
-                            "ERROR"
-                        );
-                        return;
-                    } else {
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ❌ BUY ORDER FAILED: %s - %s",
-                                profile.name(), symbol, marketOrderError.getMessage()),
-                            "ERROR"
-                        );
-                        throw marketOrderError;
-                    }
-                }
+            if (bracketResult == null || !bracketResult.success()) {
+                // An API timeout/error does not prove the broker rejected this order.
+                // A market-order fallback could buy twice and bypass server-side stops.
+                // Do not mutate the internal portfolio: reconcile broker orders/fills first.
+                String failureReason = bracketResult == null ? "null bracket response" : bracketResult.message();
+                logger.error("{} {}: BRACKET SUBMISSION UNCONFIRMED ({}). No fallback BUY; broker reconciliation required before any new entry.",
+                    profilePrefix, symbol, failureReason);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] 🚨 BRACKET ORDER UNCONFIRMED: %s. No fallback order sent; verify broker orders and fills.",
+                        profile.name(), symbol),
+                    "ERROR");
+                return;
             } else if (bracketResult.needsClientSideMonitoring()) {
                 // Order succeeded but fractional — Alpaca doesn't support bracket orders for fractions.
                 // Place a separate native GTC stop-market order to provide crash-safe protection.

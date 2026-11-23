@@ -30,7 +30,6 @@ export const PositionsTable = () => {
   const { positions, setPositions, marketData, connected } = useTradingStore();
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [isLoading, setIsLoading] = useState(true);
-  const [_lastRefresh, setLastRefresh] = useState<number>(Date.now());
 
   // Fetch positions via REST on mount and periodically (fallback for WebSocket)
   useEffect(() => {
@@ -40,7 +39,6 @@ export const PositionsTable = () => {
         if (res.ok) {
           const data = await res.json();
           setPositions(data);
-          setLastRefresh(Date.now());
         }
       } catch (e) {
         console.warn('Failed to fetch positions:', e);
@@ -109,7 +107,7 @@ export const PositionsTable = () => {
             const pnl = pos.unrealized_pl !== undefined ? toNumber(pos.unrealized_pl) : (marketPrice - entryPrice) * quantity;
             const pnlPercent = pos.unrealized_plpc !== undefined ? toNumber(pos.unrealized_plpc) * 100 : (entryPrice > 0 ? ((marketPrice - entryPrice) / entryPrice) * 100 : 0);
             
-            const mobileBroker = (pos as any).broker || 'alpaca';
+            const mobileBroker = (pos as typeof pos & { broker?: string }).broker || 'alpaca';
             const mobileHold = holdInfo(pos.entryTime);
             return (
               <div key={pos.symbol} className="overview-item" style={{ marginBottom: '12px', border: '1px solid var(--border-light)' }}>
@@ -193,7 +191,7 @@ export const PositionsTable = () => {
               const distanceToTP = takeProfit > 0 ? ((takeProfit - marketPrice) / marketPrice * 100).toFixed(2) : null;
               const distanceToSL = stopLoss > 0 ? ((marketPrice - stopLoss) / marketPrice * 100).toFixed(2) : null;
               
-              const broker = (pos as any).broker || 'alpaca';
+              const broker = (pos as typeof pos & { broker?: string }).broker || 'alpaca';
               const hold = holdInfo(pos.entryTime);
               return (
                 <tr key={pos.symbol}>

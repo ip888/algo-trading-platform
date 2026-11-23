@@ -187,8 +187,9 @@ public final class PositionProtectionAuditor {
             if (!symbol.equalsIgnoreCase(order.path("symbol").asText("")) ||
                 !"sell".equalsIgnoreCase(order.path("side").asText(""))) continue;
             String status = order.path("status").asText("");
-            if (!("new".equals(status) || "accepted".equals(status) ||
-                  "partially_filled".equals(status) || "held".equals(status))) continue;
+            // HELD bracket legs are not active protection until the parent
+            // order fills. ACCEPTED may not yet be a working stop either.
+            if (!("new".equals(status) || "partially_filled".equals(status))) continue;
             String type = order.path("type").asText("");
             boolean correctType = stop
                 ? ("stop".equals(type) || "stop_limit".equals(type) || "trailing_stop".equals(type))

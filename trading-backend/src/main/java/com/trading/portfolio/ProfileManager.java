@@ -960,46 +960,27 @@ public class ProfileManager implements Runnable {
                 // Cancel existing orders to free up held shares
                 exitEvaluator.cancelExistingOrders(profilePrefix, symbol);
 
-                // Retry up to 3 times if order fails
-                int maxAttempts = 3;
-                int attempt = 0;
-                boolean success = false;
-                Exception lastError = null;
-                while (attempt < maxAttempts && !success) {
-                    try {
-                        client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                        logger.info("{} ✅ Max loss exit order placed for {} (attempt {}/{})", profilePrefix, symbol, attempt+1, maxAttempts);
-                        // Record trade close
-                        double exitPnl = pos.calculatePnL(currentPrice);
-                        database.closeTrade(symbol, Instant.now(), currentPrice, exitPnl, brokerName, "max_loss");
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]",
-                                profile.name(), symbol, lossPercent, attempt+1),
-                            "WARN"
-                        );
-                        portfolio.setPosition(symbol, Optional.empty());
-                        exitEvaluator.clearPositionTracking(symbol);
-                        exitEvaluator.applyPostExitCooldown(symbol, currentPrice, exitPnl, profilePrefix, "max loss");
-                        success = true;
-                        return;
-                    } catch (Exception e) {
-                        lastError = e;
-                        logger.error("{} Failed to place max loss exit order for {} (attempt {}/{}): {}", profilePrefix, symbol, attempt+1, maxAttempts, e.getMessage());
-                        try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
-                        attempt++;
-                    }
-                }
-                if (!success) {
+                // Never blindly retry an ambiguous sell timeout. The tracked SELL
+                // gateway reconciles its durable client_order_id before returning.
+                try {
+                    client.placeOrder(symbol, qty, "sell", "market", "day", null);
+                    var filled = client.getOrderHistory(symbol, 50);
+                    logger.info("{} Max-loss SELL confirmed at broker for {} (order history entries {})",
+                        profilePrefix, symbol, filled == null ? 0 : filled.size());
+                    // The reconciliation cycle records final broker fill price/P&L.
+                    // Do not close a trade at the last quote or fabricate a fill.
+                    return;
+                } catch (Exception e) {
+                    logger.error("{} MAX LOSS SELL unresolved for {}. Inspect broker order status; no blind retry.",
+                        profilePrefix, symbol, e);
                     TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] CRITICAL: Max loss exit FAILED for %s after %d attempts. Manual intervention required!", 
-                            profile.name(), symbol, maxAttempts),
-                        "ERROR"
-                    );
-                    logger.error("{} CRITICAL: Max loss exit FAILED for {} after {} attempts. Last error: {}", profilePrefix, symbol, maxAttempts, lastError != null ? lastError.getMessage() : "none");
+                        String.format("[%s] CRITICAL: max-loss SELL unconfirmed for %s; broker reconciliation required",
+                            profile.name(), symbol), "ERROR");
+                    return;
                 }
             }
-            
-            // Check 2: Time-Based Exit (if not profitable)
+
+                        // Check 2: Time-Based Exit (if not profitable)
             if (pos.isHoldTimeLimitExceeded(config.getMaxHoldTimeHours())) {
                 double pnl = pos.calculatePnL(currentPrice);
                 

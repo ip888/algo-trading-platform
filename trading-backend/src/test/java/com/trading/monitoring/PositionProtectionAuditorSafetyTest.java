@@ -41,6 +41,20 @@ class PositionProtectionAuditorSafetyTest {
     }
 
     @Test
+    void heldBracketStopDoesNotProtectPartiallyFilledParent() throws Exception {
+        var heldOrders = JSON.readTree("""
+            [{"symbol":"SPY","side":"sell","type":"stop","status":"held",
+              "qty":"3","filled_qty":"0"}]
+            """);
+        assertFalse(PositionProtectionAuditor.hasSufficientBrokerStop(heldOrders, "SPY", 1));
+        var acceptedOrders = JSON.readTree("""
+            [{"symbol":"SPY","side":"sell","type":"stop","status":"accepted",
+              "qty":"3","filled_qty":"0"}]
+            """);
+        assertFalse(PositionProtectionAuditor.hasSufficientBrokerStop(acceptedOrders, "SPY", 1));
+    }
+
+    @Test
     void takeProfitMustBeLimitSellWithSufficientQuantity() throws Exception {
         var orders = JSON.readTree("""
             [{"symbol":"SPY","side":"sell","type":"limit","status":"new","qty":"4"}]

@@ -1243,6 +1243,12 @@ public class ProfileManager implements Runnable {
         }
     }
 
+    /** Temporary P0 guard until fractional fill-driven stop placement is implemented. */
+    static boolean isFractionalQuantity(double quantity) {
+        return !Double.isFinite(quantity) || quantity <= 0.0 ||
+            Math.abs(quantity - Math.rint(quantity)) > 0.0000001;
+    }
+
     /** Fail closed on an unsuccessful or missing bracket acknowledgement. */
     static boolean bracketSubmissionUnconfirmed(com.trading.api.model.BracketOrderResult result) {
         return result == null || !result.success();
@@ -1301,7 +1307,7 @@ public class ProfileManager implements Runnable {
         // had filled, potentially leaving a filled position unprotected. Until
         // fill-driven fractional stop placement is implemented and verified,
         // reject fractional live entries instead of trading without broker stops.
-        if (testSimulator == null && Math.abs(positionSize - Math.rint(positionSize)) > 0.0000001) {
+        if (testSimulator == null && isFractionalQuantity(positionSize)) {
             logger.warn("{} {}: FRACTIONAL LIVE BUY BLOCKED (qty={}). Broker-confirmed protective-stop workflow not implemented.",
                 profilePrefix, symbol, positionSize);
             TradingWebSocketHandler.broadcastActivity(

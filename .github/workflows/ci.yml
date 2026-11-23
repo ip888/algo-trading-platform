@@ -3,8 +3,6 @@ name: CI - Java and Dashboard
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [fix/p0-broker-order-safety-20261123]
   workflow_dispatch:
 
 permissions:

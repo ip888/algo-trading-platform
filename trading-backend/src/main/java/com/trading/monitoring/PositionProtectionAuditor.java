@@ -170,7 +170,7 @@ public final class PositionProtectionAuditor {
         return unprotected;
     }
 
-    static boolean hasSufficientBrokerStop(com.fasterxml.jackson.databind.JsonNode orders,
+    public static boolean hasSufficientBrokerStop(com.fasterxml.jackson.databind.JsonNode orders,
                                            String symbol, double positionQty) {
         return hasCoveringOrder(orders, symbol, positionQty, true);
     }

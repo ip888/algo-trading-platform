@@ -603,44 +603,49 @@ final class EntryEvaluator {
             }
         }
 
-        // ========== PENDING ORDER CHECK ==========
-        // Prevent duplicate orders for the same symbol (fixes order spam issue).
-        // If a pending entry order has been sitting >30 min (e.g. sandbox never fills),
-        // cancel it so the bot can re-evaluate and place a fresh order.
+        // ========== BROKER-AUTHORITATIVE ENTRY SAFETY ==========
+        // Never cancel an open order and buy again in the same cycle. A cancel request
+        // is asynchronous and can race with a fill. Broker reconciliation must establish
+        // terminal state before a replacement submission is considered.
         try {
-            var pendingOrders = client.getOpenOrders(symbol);
-            if (pendingOrders.isArray() && pendingOrders.size() > 0) {
-                long now = System.currentTimeMillis();
-                long firstSeen = pendingEntryTimestamps.computeIfAbsent(symbol, k -> now);
-                long ageMs = now - firstSeen;
+            var positions = client.getPositions();
+            if (positions == null) {
+                return new Blocked("broker positions unavailable");
+            }
+            if (positions.stream().anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() > 0.0)) {
+                return new Blocked("broker already holds position");
+            }
 
-                if (ageMs >= STALE_ENTRY_ORDER_MS) {
-                    logger.warn("{} {} has {} stale pending entry order(s) ({}min old) — cancelling and re-evaluating",
-                        profilePrefix, symbol, pendingOrders.size(), ageMs / 60000);
-                    for (var order : pendingOrders) {
-                        String orderId = order.path("id").asText();
-                        if (!orderId.isBlank()) {
-                            try { client.cancelOrder(orderId); } catch (Exception ce) {
-                                logger.warn("{} Failed to cancel stale entry order {} for {}: {}",
-                                    profilePrefix, orderId, symbol, ce.getMessage());
-                            }
-                        }
-                    }
-                    pendingEntryTimestamps.remove(symbol);
-                    // Fall through to re-evaluate entry this cycle
-                } else {
-                    logger.info("{} {} already has {} pending order(s) ({}min old), skipping new entry",
-                        profilePrefix, symbol, pendingOrders.size(), ageMs / 60000);
-                    return new Blocked("pending order already exists");
+            var pendingOrders = client.getOpenOrders(symbol);
+            if (pendingOrders == null || !pendingOrders.isArray()) {
+                return new Blocked("broker open-order response invalid");
+            }
+            if (!pendingOrders.isEmpty()) {
+                return new Blocked("broker has open order; await terminal status");
+            }
+
+            // Recent accepted orders can be absent from the open-order list while the
+            // position endpoint still lags a fill or cancellation. Block re-entry for a
+            // conservative window, including after process restart.
+            var recentOrders = client.getOrderHistory(symbol, 50);
+            if (recentOrders == null || !recentOrders.isArray()) {
+                return new Blocked("broker order history unavailable");
+            }
+            for (var order : recentOrders) {
+                if (!symbol.equalsIgnoreCase(order.path("symbol").asText("")) ||
+                    !"buy".equalsIgnoreCase(order.path("side").asText(""))) continue;
+                String submitted = order.path("submitted_at").asText("");
+                if (submitted.isBlank()) {
+                    return new Blocked("recent BUY has unknown submission timestamp");
                 }
-            } else {
-                pendingEntryTimestamps.remove(symbol); // order filled/expired — clear tracking
+                var submittedAt = Instant.parse(submitted);
+                if (!submittedAt.isBefore(Instant.now().minus(java.time.Duration.ofMinutes(30)))) {
+                    return new Blocked("recent BUY requires reconciliation before re-entry");
+                }
             }
         } catch (Exception e) {
-            // Broker order state is unknown. Never allow a new BUY based on an
-            // assumed-empty order book when this lookup fails.
-            logger.error("{} Blocking BUY for {}: cannot verify pending broker orders", profilePrefix, symbol, e);
-            return new Blocked("broker order state unavailable");
+            logger.error("{} Blocking BUY for {}: broker state cannot be verified", profilePrefix, symbol, e);
+            return new Blocked("broker state unavailable");
         }
 
         // ========== EVENT-DAY (EARNINGS-GAP) GATE — single stocks ==========

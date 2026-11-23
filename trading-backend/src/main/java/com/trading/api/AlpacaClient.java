@@ -435,6 +435,19 @@ public final class AlpacaClient implements BrokerClient {
     }
 
     @Override
+    public JsonNode getOrderById(String orderId) {
+        if (orderId == null || !orderId.matches("[A-Za-z0-9-]{1,64}")) {
+            throw new IllegalArgumentException("Invalid broker order ID");
+        }
+        try {
+            return objectMapper.readTree(sendRequest(config.baseUrl() + "/v2/orders/"
+                + java.net.URLEncoder.encode(orderId, java.nio.charset.StandardCharsets.UTF_8), "GET"));
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot establish terminal status for order " + orderId, e);
+        }
+    }
+
+    @Override
     public JsonNode getOrderByClientOrderId(String clientOrderId) {
         if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}")) {
             throw new IllegalArgumentException("Invalid client_order_id");

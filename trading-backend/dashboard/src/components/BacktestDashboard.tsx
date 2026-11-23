@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createChart, ColorType, AreaSeries, LineSeries } from 'lightweight-charts';
+import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 import { Play, RefreshCw, ShieldAlert } from 'lucide-react';
 import { CONFIG } from '../config';
 
@@ -28,9 +29,8 @@ export const BacktestDashboard = () => {
   const [error, setError] = useState<string | null>(null);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<any>(null);
-  const strategySeriesRef = useRef<any>(null);
-  const comparisonSeriesRef = useRef<any>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const comparisonSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
   useEffect(() => {
     if (result && chartContainerRef.current) {
@@ -72,7 +72,6 @@ export const BacktestDashboard = () => {
         lineWidth: 2,
         title: 'ALGO PERFORMANCE',
       });
-      strategySeriesRef.current = series;
 
       if (result.equityCurve && Array.isArray(result.equityCurve)) {
           const data = result.equityCurve.map(item => ({
@@ -111,7 +110,7 @@ export const BacktestDashboard = () => {
       window.addEventListener('resize', handleResize);
       return () => window.removeEventListener('resize', handleResize);
     }
-  }, [result]);
+  }, [result, showComparison]);
 
   useEffect(() => {
     if (comparisonSeriesRef.current && result?.comparison) {
@@ -138,9 +137,9 @@ export const BacktestDashboard = () => {
       if (!response.ok) throw new Error('Simulation Service Unavailable. Please ensure the Java Core is running and /api/backtest is reachable.');
       const data = await response.json();
       setResult(data);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setError(err.message || 'An unknown error occurred during simulation');
+      setError(err instanceof Error ? err.message : 'An unknown error occurred during simulation');
     } finally {
       setLoading(false);
     }

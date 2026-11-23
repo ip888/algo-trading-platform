@@ -676,16 +676,22 @@ public class ProfileManager implements Runnable {
             riskGate.setPortfolioStopLossHaltActive(true);
             logger.error("{} 🛑 PORTFOLIO STOP LOSS - Halting new entries (protective exits already checked)", profilePrefix);
 
-            // Assess and log portfolio risk
-            var risk = portfolioRiskManager.assessRisk(client.getDelegate(), accountEquity);
-            logger.error("{} {}", profilePrefix, risk.getSummary());
+            // Risk telemetry errors cannot undo an already triggered loss halt.
+            String riskSummary;
+            try {
+                riskSummary = portfolioRiskManager.assessRisk(client.getDelegate(), accountEquity).getSummary();
+            } catch (Exception riskError) {
+                riskSummary = "BROKER PORTFOLIO RISK UNKNOWN — loss halt remains active";
+                logger.error("{} {}", profilePrefix, riskSummary, riskError);
+            }
+            logger.error("{} {}", profilePrefix, riskSummary);
 
             TradingWebSocketHandler.broadcastActivity(
                 String.format("[%s] PORTFOLIO STOP LOSS HIT - New entries halted", profile.name()),
                 "ERROR"
             );
             if (!lastPortfolioStopLossHalted) {
-                com.trading.bot.TradingBot.logSystemEvent("portfolio_stop_loss_halted", risk.getSummary());
+                com.trading.bot.TradingBot.logSystemEvent("portfolio_stop_loss_halted", riskSummary);
                 lastPortfolioStopLossHalted = true;
             }
 

@@ -140,6 +140,12 @@ final class ExitEvaluator {
                 String orderId = order.path("id").asText("");
                 if (orderId.isBlank()) throw new IllegalStateException("Open order has no broker ID");
                 client.cancelOrder(orderId);
+                // A DELETE response and absence from an open-order listing are
+                // not proof of cancellation: this order may be filling right now.
+                var finalOrder = client.getOrderById(orderId);
+                if (!isTerminalCancelWithoutFill(finalOrder)) {
+                    throw new IllegalStateException("Cancel/fill race or non-terminal order status for " + orderId);
+                }
             }
             var afterCancel = client.getOpenOrders(symbol);
             if (afterCancel == null || !afterCancel.isArray() || !afterCancel.isEmpty()) {
@@ -149,6 +155,20 @@ final class ExitEvaluator {
             logger.error("{} {}: cannot confirm terminal cancellation; replacement SELL blocked",
                 profilePrefix, symbol, e);
             throw new IllegalStateException("Broker order cancellations not confirmed for " + symbol, e);
+        }
+    }
+
+    /** Only terminal no-fill cancellation permits a replacement SELL. */
+    static boolean isTerminalCancelWithoutFill(com.fasterxml.jackson.databind.JsonNode order) {
+        if (order == null || !order.isObject()) return false;
+        String status = order.path("status").asText("");
+        if (!("canceled".equals(status) || "expired".equals(status) || "rejected".equals(status))) {
+            return false;
+        }
+        try {
+            return Double.parseDouble(order.path("filled_qty").asText("NaN")) == 0.0;
+        } catch (NumberFormatException e) {
+            return false;
         }
     }
 

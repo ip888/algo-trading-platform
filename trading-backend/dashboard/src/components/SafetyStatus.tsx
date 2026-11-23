@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { AlertTriangle, ShieldCheck, ShieldAlert, Power, RotateCcw, PauseCircle, PlayCircle } from 'lucide-react';
 import './SafetyStatus.css';
 import { CONFIG } from '../config';
@@ -23,6 +23,26 @@ export const SafetyStatus = () => {
     const [emergencyActive, setEmergencyActive] = useState(false);
     const [panicResult, setPanicResult]     = useState<PanicResult | null>(null);
     const [tradingPaused, setTradingPaused] = useState(false);
+    // Stored only in component memory. Never in localStorage, URLs or logs.
+    const adminToken = useRef<string | null>(null);
+    const adminPost = async (endpoint: string): Promise<Response> => {
+        if (!adminToken.current) {
+            adminToken.current = window.prompt('Enter TRADING_ADMIN_TOKEN for protected trading actions:');
+        }
+        if (!adminToken.current) throw new Error('Admin token required; no trading command was sent');
+        const response = await fetch(`${CONFIG.API_BASE_URL}${endpoint}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${adminToken.current}` },
+        });
+        if (response.status === 401) {
+            adminToken.current = null;
+            throw new Error('Unauthorized. Check TRADING_ADMIN_TOKEN.');
+        }
+        if (!response.ok) {
+            throw new Error(`Trading command refused by server: HTTP ${response.status}`);
+        }
+        return response;
+    };
 
     useEffect(() => {
         const fetchStatus = async () => {
@@ -64,21 +84,21 @@ export const SafetyStatus = () => {
 
     const handlePanic = async () => {
         try {
-            const response = await fetch(`${CONFIG.API_BASE_URL}/api/emergency/panic?reason=manual_ui`, { method: 'POST' });
+            const response = await adminPost('/api/emergency/panic?reason=manual_ui');
             const result: PanicResult = await response.json();
             setPanicResult(result);
             setPanicTriggered(true);
-            setEmergencyActive(true);
+            setEmergencyActive(result.status === 'triggered' || result.status === 'already_triggered');
             setShowConfirm(false);
         } catch (error) {
             console.error('Failed to trigger panic:', error);
-            alert('FAILED TO TRIGGER PANIC: CHECK CONSOLE');
+            alert('PANIC REQUEST NOT CONFIRMED. Verify broker positions and admin token.');
         }
     };
 
     const handleReset = async () => {
         try {
-            await fetch(`${CONFIG.API_BASE_URL}/api/emergency/reset`, { method: 'POST' });
+            await adminPost('/api/emergency/reset');
             setEmergencyActive(false);
             setPanicTriggered(false);
             setPanicResult(null);
@@ -91,7 +111,7 @@ export const SafetyStatus = () => {
     const handlePauseToggle = async () => {
         try {
             const endpoint = tradingPaused ? '/api/trading/resume' : '/api/trading/pause';
-            await fetch(`${CONFIG.API_BASE_URL}${endpoint}`, { method: 'POST' });
+            await adminPost(endpoint);
             setTradingPaused(prev => !prev);
         } catch (error) {
             console.error('Failed to toggle pause:', error);
@@ -186,7 +206,7 @@ export const SafetyStatus = () => {
                             <div className="positions-closed">
                                 <h4>Alpaca Positions:</h4>
                                 {panicResult.alpacaPositions.map((pos, i) => (
-                                    <div key={i} className={`position-item ${pos.status === 'close_ordered' ? 'success' : 'failed'}`}>
+                                    <div key={i} className={`position-item ${pos.status === 'filled' ? 'success' : 'failed'}`}>
                                         {pos.symbol}: {pos.quantity} shares — {pos.status}
                                     </div>
                                 ))}

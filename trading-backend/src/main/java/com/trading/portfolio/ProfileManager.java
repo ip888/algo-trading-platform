@@ -1362,7 +1362,8 @@ public class ProfileManager implements Runnable {
             // retain this exact identifier and require broker reconciliation.
             String clientOrderId = "atp_" + java.util.UUID.randomUUID().toString().replace("-", "");
             submittedClientOrderId = clientOrderId;
-            if (!database.claimBrokerEntryIntent(brokerName, symbol, clientOrderId)) {
+            if (!database.claimBrokerEntryIntent(brokerName, symbol, clientOrderId,
+                    positionSize, stopLoss, takeProfit)) {
                 logger.error("{} {}: unresolved broker entry intent exists; refusing additional BUY",
                     profilePrefix, symbol);
                 return;
@@ -1685,16 +1686,27 @@ public class ProfileManager implements Runnable {
                 String symbol = pos.symbol();
                 if (!database.hasOpenTrade(symbol, brokerName)) {
                     try {
+                        var intent = database.getBrokerEntryIntent(brokerName, symbol);
+                        // Never silently relax an intended stop after restart. Broker
+                        // already has a position: use original persisted SL/TP when
+                        // they are valid, otherwise fall back to conservative defaults
+                        // and mark protection as unverified for risk-gating.
+                        double restoredStop = intent != null && intent.stopLoss() > 0
+                            ? intent.stopLoss()
+                            : pos.avgEntryPrice() * (1.0 - profile.stopLossPercent() / 100.0);
+                        double restoredTarget = intent != null && intent.takeProfit() > 0
+                            ? intent.takeProfit()
+                            : pos.avgEntryPrice() * (1.0 + profile.takeProfitPercent() / 100.0);
                         database.recordTrade(
                             symbol,
-                            "recovered",          // strategy = recovered (synced from Alpaca)
+                            "recovered",
                             profile.name(),
                             brokerName,
                             java.time.Instant.now(),
                             pos.avgEntryPrice(),
                             pos.quantity(),
-                            pos.avgEntryPrice() * (1.0 - profile.stopLossPercent() / 100.0),
-                            pos.avgEntryPrice() * (1.0 + profile.takeProfitPercent() / 100.0)
+                            restoredStop,
+                            restoredTarget
                         );
                         logger.info("{} DB recovery: inserted OPEN trade for {} (qty={}, entry=${})",
                             profilePrefix, symbol,

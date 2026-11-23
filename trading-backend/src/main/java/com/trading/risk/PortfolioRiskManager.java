@@ -88,8 +88,9 @@ public class PortfolioRiskManager {
             );
             
         } catch (Exception e) {
-            logger.error("Failed to assess portfolio risk", e);
-            return new PortfolioRisk(currentEquity, 0, 0, 0, 0, "");
+            // Broker failure must not be reported as zero P&L and zero positions.
+            logger.error("Failed to assess portfolio risk — broker state UNKNOWN", e);
+            throw new IllegalStateException("Portfolio risk is unknown; new entries must remain halted", e);
         }
     }
     

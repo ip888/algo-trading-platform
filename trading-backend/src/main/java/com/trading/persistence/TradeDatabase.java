@@ -178,6 +178,17 @@ public class TradeDatabase {
         runMigration("CREATE INDEX IF NOT EXISTS idx_regime_ts ON regime_log(ts)",
             "Schema migration: Added idx_regime_ts index");
 
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS broker_entry_intents (
+                broker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (broker, symbol)
+            )""", "P0: restart-safe broker entry intents");
+
         // Prune old observability data on startup so the volume doesn't grow unbounded.
         pruneOldObservabilityData();
 
@@ -1318,6 +1329,85 @@ public class TradeDatabase {
             return "\"" + str.replace("\"", "\"\"") + "\"";
         }
         return str;
+    }
+
+    // P0: persisted, fail-closed order intents. Never treat a failed DB write as
+    // permission to submit a broker order. One active intent per broker+symbol.
+    public record BrokerEntryIntent(String broker, String symbol, String clientOrderId, String state) {}
+
+    public boolean claimBrokerEntryIntent(String broker, String symbol, String clientOrderId) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            INSERT OR IGNORE INTO broker_entry_intents(broker, symbol, client_order_id, state)
+            VALUES (?, ?, ?, 'SUBMITTING')
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, clientOrderId);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot persist broker entry intent; no order may be sent", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    public BrokerEntryIntent getBrokerEntryIntent(String broker, String symbol) {
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement("""
+            SELECT client_order_id, state FROM broker_entry_intents
+            WHERE broker = ? AND symbol = ?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            try (var rs = ps.executeQuery()) {
+                return rs.next() ? new BrokerEntryIntent(
+                    broker, symbol, rs.getString(1), rs.getString(2)) : null;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot verify broker entry intent", e);
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    public void updateBrokerEntryIntent(String broker, String symbol, String clientOrderId, String state) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            UPDATE broker_entry_intents SET state = ?, updated_at = datetime('now')
+            WHERE broker = ? AND symbol = ? AND client_order_id = ?
+            """)) {
+            ps.setString(1, state);
+            ps.setString(2, broker);
+            ps.setString(3, symbol);
+            ps.setString(4, clientOrderId);
+            if (ps.executeUpdate() != 1) throw new IllegalStateException("Broker entry intent missing");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot persist broker entry state", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /**
+     * Only release a claimed entry after confirmed no-fill terminal state and
+     * independent broker positions/open-orders checks. Never delete after a timeout.
+     */
+    public void releaseBrokerEntryIntent(String broker, String symbol, String clientOrderId) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            DELETE FROM broker_entry_intents
+            WHERE broker = ? AND symbol = ? AND client_order_id = ?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, clientOrderId);
+            if (ps.executeUpdate() != 1) throw new IllegalStateException("Broker entry intent missing");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot release broker entry intent", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
     }
 
     // ── bot_state persistence ────────────────────────────────────────────────

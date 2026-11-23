@@ -29,6 +29,11 @@ import './App.css';
 function App() {
   const store = useTradingStore();
   const accountData = store.accountData;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   // Scalp status polled from /api/status (30s interval)
   const [scalpStatus, setScalpStatus] = useState<{ count: number; max: number; enabled: boolean } | null>(null);
@@ -39,7 +44,7 @@ function App() {
     const fetchAccountData = async () => {
       try {
         const res = await fetch(`${CONFIG.API_BASE_URL}/api/account`);
-        if (res.ok) store.setAccountData(await res.json());
+        if (res.ok) useTradingStore.getState().setAccountData(await res.json());
       } catch (e) {
         console.warn('Failed to fetch initial account data:', e);
       }
@@ -75,7 +80,7 @@ function App() {
     : (accountData?.cash || accountData?.buyingPower || 0);
 
   // Session start capital set by bot at startup from live Alpaca equity
-  const sessionStartCapital: number = (accountData as any)?.sessionStartCapital || 0;
+  const sessionStartCapital: number = (accountData as (typeof accountData & { sessionStartCapital?: number }))?.sessionStartCapital || 0;
 
   // Session P&L: equity vs what we started the session with
   const sessionPnl = sessionStartCapital > 0
@@ -249,7 +254,7 @@ function App() {
           <span>Virtual Threads: ENABLED</span>
         </div>
         <div className="footer-timestamp">
-          LATENCY: {store.lastUpdate ? `${Math.floor(Date.now() - store.lastUpdate)}ms` : 'N/A'}
+          LATENCY: {store.lastUpdate ? `${Math.floor(now - store.lastUpdate)}ms` : 'N/A'}
         </div>
       </footer>
     </div>

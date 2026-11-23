@@ -281,6 +281,20 @@ public class ResilientBrokerClient {
         );
     }
 
+    /** P0: single-attempt durable-id submission, never automatic retries. */
+    public BracketOrderResult placeBracketOrderTracked(String symbol, double qty, String side,
+            double takeProfitPrice, double stopLossPrice, Double stopLossLimitPrice,
+            Double limitPrice, String clientOrderId) {
+        return executeMutation("placeBracketOrderTracked",
+            () -> delegate.placeBracketOrderTracked(symbol, qty, side,
+                takeProfitPrice, stopLossPrice, stopLossLimitPrice, limitPrice, clientOrderId));
+    }
+
+    public JsonNode getOrderByClientOrderId(String clientOrderId) {
+        return executeResilient("getOrderByClientOrderId",
+            () -> delegate.getOrderByClientOrderId(clientOrderId));
+    }
+
     public void cancelAllOrders() {
         executeMutation("cancelAllOrders", () -> {
             try {

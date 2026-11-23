@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
+import { server } from './mocks/server';
 import { PositionsTable } from '../components/PositionsTable';
 import { useTradingStore } from '../store/tradingStore';
 
@@ -13,17 +15,20 @@ describe('PositionsTable', () => {
     
     // Mock window.innerWidth for desktop
     vi.stubGlobal('innerWidth', 1024);
+    // REST refresh should return the state arranged by this test, not unrelated global mock data.
+    server.use(http.get('*/api/positions', () => HttpResponse.json(useTradingStore.getState().positions)));
   });
 
-  it('shows empty state when no positions', () => {
+  it('shows empty state when no positions', async () => {
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     expect(screen.getByText('🛰 Active Deployment Matrix')).toBeInTheDocument();
-    expect(screen.getByText('Scanning market for entry opportunities...')).toBeInTheDocument();
-    expect(screen.getByText('[ WATCHLIST: QQQ, NVDA, SPY, TSLA ]')).toBeInTheDocument();
+    expect(screen.getByText('No active positions')).toBeInTheDocument();
+    expect(screen.getByText('Positions will appear when trades are executed')).toBeInTheDocument();
   });
 
-  it('renders positions table with correct headers', () => {
+  it('renders positions table with correct headers', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -42,6 +47,7 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     // Check headers
     expect(screen.getByText('Identification')).toBeInTheDocument();
@@ -52,7 +58,7 @@ describe('PositionsTable', () => {
     expect(screen.getByText('Safety Bounds')).toBeInTheDocument();
   });
 
-  it('displays position data correctly', () => {
+  it('displays position data correctly', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -71,12 +77,13 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     // Symbol displayed
     expect(screen.getByText('AAPL')).toBeInTheDocument();
   });
 
-  it('shows positive P&L with correct styling class', () => {
+  it('shows positive P&L with correct styling class', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -95,6 +102,7 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     // Check the P&L cell has positive class and shows the percentage
     const positiveCell = document.querySelector('.positive');
@@ -103,7 +111,7 @@ describe('PositionsTable', () => {
     expect(positiveCell?.textContent).toContain('%');
   });
 
-  it('shows negative P&L with correct styling class', () => {
+  it('shows negative P&L with correct styling class', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -122,13 +130,14 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     // Check negative P&L
     const pnlElements = screen.getAllByText(/-2\.07%/);
     expect(pnlElements.length).toBeGreaterThan(0);
   });
 
-  it('handles multiple positions', () => {
+  it('handles multiple positions', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -163,13 +172,14 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     expect(screen.getByText('AAPL')).toBeInTheDocument();
     expect(screen.getByText('MSFT')).toBeInTheDocument();
     expect(screen.getByText('GOOGL')).toBeInTheDocument();
   });
 
-  it('uses market data price when available', () => {
+  it('uses market data price when available', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -196,11 +206,12 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     expect(screen.getByText('NVDA')).toBeInTheDocument();
   });
 
-  it('handles string quantity and price values (API compatibility)', () => {
+  it('handles string quantity and price values (API compatibility)', async () => {
     useTradingStore.setState({
       positions: [
         {
@@ -217,13 +228,14 @@ describe('PositionsTable', () => {
     });
 
     render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
     
     expect(screen.getByText('SPY')).toBeInTheDocument();
   });
 
   // TP/SL Display Tests
   describe('Stop Loss and Take Profit Display', () => {
-    it('displays SL and TP in Safety Bounds column', () => {
+    it('displays SL and TP in Safety Bounds column', async () => {
       useTradingStore.setState({
         positions: [
           {
@@ -240,13 +252,14 @@ describe('PositionsTable', () => {
       });
 
       render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
       
       // Check SL and TP are displayed in the Safety Bounds column
       expect(screen.getByText(/SL: \$149\.25/)).toBeInTheDocument();
       expect(screen.getByText(/TP: \$151\.1/)).toBeInTheDocument();  // 151.125 rounds to 151.12 or 151.13
     });
 
-    it('displays SL and TP correctly for each position', () => {
+    it('displays SL and TP correctly for each position', async () => {
       useTradingStore.setState({
         positions: [
           {
@@ -272,6 +285,7 @@ describe('PositionsTable', () => {
       });
 
       render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
       
       // Check AAPL SL/TP
       expect(screen.getByText(/SL: \$147\.00/)).toBeInTheDocument();
@@ -282,7 +296,7 @@ describe('PositionsTable', () => {
       expect(screen.getByText(/TP: \$410\.00/)).toBeInTheDocument();
     });
 
-    it('handles zero SL/TP values', () => {
+    it('handles zero SL/TP values', async () => {
       useTradingStore.setState({
         positions: [
           {
@@ -299,12 +313,13 @@ describe('PositionsTable', () => {
       });
 
       render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
       
       expect(screen.getByText('TEST')).toBeInTheDocument();
       expect(screen.getByText(/SL: \$0\.00/)).toBeInTheDocument();
     });
 
-    it('formats SL/TP with two decimal places', () => {
+    it('formats SL/TP with two decimal places', async () => {
       useTradingStore.setState({
         positions: [
           {
@@ -321,6 +336,7 @@ describe('PositionsTable', () => {
       });
 
       render(<PositionsTable />);
+    await waitFor(() => expect(screen.queryByText('Loading positions from Alpaca...')).not.toBeInTheDocument());
       
       // Should display with 2 decimal places
       expect(screen.getByText(/SL: \$243\.12/)).toBeInTheDocument();

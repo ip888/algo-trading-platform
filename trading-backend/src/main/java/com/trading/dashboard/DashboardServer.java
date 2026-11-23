@@ -81,6 +81,23 @@ public final class DashboardServer {
             ws.onError(TradingWebSocketHandler::onError);
         });
         
+        // Admin endpoints must never be callable anonymously. The broker gateway
+        // remains read-only if TRADING_ADMIN_TOKEN has not been provisioned.
+        app.before("/api/*", ctx -> {
+            String method = ctx.req().getMethod();
+            if ("POST".equalsIgnoreCase(method) || "PUT".equalsIgnoreCase(method) ||
+                "PATCH".equalsIgnoreCase(method) || "DELETE".equalsIgnoreCase(method)) {
+                String secret = System.getenv("TRADING_ADMIN_TOKEN");
+                if (!TradingApiAuthorization.isConfigured(secret)) {
+                    throw new io.javalin.http.ServiceUnavailableResponse(
+                        "Trading admin actions disabled: TRADING_ADMIN_TOKEN not configured");
+                }
+                if (!TradingApiAuthorization.isAuthorized(ctx.header("Authorization"), secret)) {
+                    throw new io.javalin.http.UnauthorizedResponse("Trading admin token required");
+                }
+            }
+        });
+
         // Register REST API routes
         controller.registerRoutes(app);
         

@@ -127,6 +127,8 @@ public final class MultiBrokerOrchestrator {
 
             var resilient = new ResilientBrokerClient(rawClient,
                 MetricsService.getInstance().getRegistry());
+            // All production SELLs must pass through the durable idempotency ledger.
+            resilient.enableDurableSellSafety(database, brokerName);
 
             // Name the profile after the broker so logs are unambiguous
             TradingProfile base = profileIndex == 0

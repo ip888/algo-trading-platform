@@ -4,7 +4,7 @@ import { CONFIG } from '../config';
 
 export const SystemStatus = () => {
   const { systemStatus, botStatus } = useTradingStore();
-  const [marketFallback, setMarketFallback] = useState<any>(null);
+  const [marketFallback, setMarketFallback] = useState<{ currentVIX?: number; volatilityAcceptable?: boolean; isOpen?: boolean } | null>(null);
 
   // Fallback fetch if WebSocket data is missing
   useEffect(() => {

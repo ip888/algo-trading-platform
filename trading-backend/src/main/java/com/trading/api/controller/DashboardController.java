@@ -244,6 +244,14 @@ public final class DashboardController {
                 String id = order.path("id").asText("");
                 if (id.isBlank()) throw new IllegalStateException("Open order missing broker ID");
                 alpacaClient.cancelOrder(id);
+                // A successful DELETE is merely a cancellation request. A stop
+                // might have filled while the cancellation was in flight.
+                var canceled = alpacaClient.getOrderById(id);
+                if (!com.trading.portfolio.ExitEvaluator.isTerminalCancelWithoutFill(canceled)) {
+                    ctx.status(409).json(Map.of("error",
+                        "Order " + id + " not confirmed canceled without fill; no replacement SELL"));
+                    return;
+                }
             }
             var remainingOrders = alpacaClient.getOpenOrders(symbol);
             if (remainingOrders == null || !remainingOrders.isArray() || !remainingOrders.isEmpty()) {

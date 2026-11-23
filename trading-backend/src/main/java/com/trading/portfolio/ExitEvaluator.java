@@ -128,17 +128,27 @@ final class ExitEvaluator {
      * Cancel all existing orders for a symbol to free up held shares before placing a new sell order.
      */
     void cancelExistingOrders(String profilePrefix, String symbol) {
+        // A cancellation acknowledgement is NOT terminal cancellation: a stop can
+        // fill while a replacement SELL is being prepared. Abort unless a fresh
+        // broker lookup confirms no open orders remain for this symbol.
         try {
             var openOrders = client.getOpenOrders(symbol);
-            if (openOrders.isArray()) {
-                for (var order : openOrders) {
-                    String orderId = order.get("id").asText();
-                    client.cancelOrder(orderId);
-                    logger.info("{} Canceled existing order {} for {} before exit", profilePrefix, orderId, symbol);
-                }
+            if (openOrders == null || !openOrders.isArray()) {
+                throw new IllegalStateException("Invalid broker open orders response");
+            }
+            for (var order : openOrders) {
+                String orderId = order.path("id").asText("");
+                if (orderId.isBlank()) throw new IllegalStateException("Open order has no broker ID");
+                client.cancelOrder(orderId);
+            }
+            var afterCancel = client.getOpenOrders(symbol);
+            if (afterCancel == null || !afterCancel.isArray() || !afterCancel.isEmpty()) {
+                throw new IllegalStateException("Cancellation remains pending at broker");
             }
         } catch (Exception e) {
-            logger.warn("{} Could not cancel existing orders for {}: {}", profilePrefix, symbol, e.getMessage());
+            logger.error("{} {}: cannot confirm terminal cancellation; replacement SELL blocked",
+                profilePrefix, symbol, e);
+            throw new IllegalStateException("Broker order cancellations not confirmed for " + symbol, e);
         }
     }
 

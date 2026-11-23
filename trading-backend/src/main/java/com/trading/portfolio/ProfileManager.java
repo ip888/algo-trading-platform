@@ -1400,6 +1400,31 @@ public class ProfileManager implements Runnable {
                 );
             }
         }
+
+        // Broker order acceptance is not a fill. A pending or partially-filled
+        // order must not be recorded internally as a fully filled position.
+        // The regular reconciliation cycle will recover fills from broker truth.
+        if (testSimulator == null) {
+            try {
+                var filledPositions = client.getPositions();
+                if (filledPositions == null) {
+                    logger.error("{} {}: broker positions unavailable after order submission; delaying local recording",
+                        profilePrefix, symbol);
+                    return;
+                }
+                boolean fullyFilled = filledPositions.stream()
+                    .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol())
+                        && p.quantity() >= positionSize - 0.0000001);
+                if (!fullyFilled) {
+                    logger.warn("{} {}: order accepted but full position not confirmed at broker; delaying local recording until reconciliation",
+                        profilePrefix, symbol);
+                    return;
+                }
+            } catch (Exception e) {
+                logger.error("{} {}: could not confirm broker fill; delaying local recording", profilePrefix, symbol, e);
+                return;
+            }
+        }
         
         // Update portfolio and cross-profile tracker atomically
         portfolio.setPosition(symbol, Optional.of(newPosition));

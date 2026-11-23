@@ -312,6 +312,11 @@ public class ResilientBrokerClient {
         });
     }
 
+    /** Broker read needed for entry reconciliation. Fails closed if the delegate fails. */
+    public JsonNode getOrderHistory(String symbol, int limit) {
+        return executeResilient("getOrderHistory", () -> delegate.getOrderHistory(symbol, limit));
+    }
+
     public JsonNode getOpenOrders(String symbol) {
         return executeResilient("getOpenOrders", () -> {
             return delegate.getOpenOrders(symbol);

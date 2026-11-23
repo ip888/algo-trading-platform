@@ -51,6 +51,22 @@ public final class MultiBrokerOrchestrator {
     // ── Public entry point ────────────────────────────────────────────────────
 
     public void run() {
+        // Durable order IDs must survive redeployment. The old Cloud Run script
+        // uses ephemeral local storage: continuing live there would erase
+        // ambiguous order intents and permit duplicate exposure after restart.
+        if (!config.isTestModeEnabled()) {
+            String dataDir = System.getenv("DATA_DIR");
+            if (dataDir == null || dataDir.isBlank()) {
+                throw new IllegalStateException(
+                    "Live execution requires persistent DATA_DIR volume for broker order intent ledger");
+            }
+            java.nio.file.Path durableDir = java.nio.file.Path.of(dataDir);
+            if (!java.nio.file.Files.isDirectory(durableDir) ||
+                !java.nio.file.Files.isWritable(durableDir)) {
+                throw new IllegalStateException("Durable trading database directory is unavailable: " + dataDir);
+            }
+        }
+
         Map<String, Double> allocation = parseAllocation(config.getBrokersAllocation());
         if (allocation.isEmpty()) {
             logger.error("MultiBrokerOrchestrator: BROKERS env var is empty or invalid. "

@@ -54,54 +54,56 @@ class WebSocketService {
     }, RECONNECT_INTERVAL);
   }
 
-  private handleMessage(message: any) {
+  private handleMessage(message: { type: string; data?: unknown }) {
     const store = useTradingStore.getState();
+    if (message.data == null || typeof message.data !== 'object') return;
+    const payload = message.data as Record<string, unknown>;
     store.setLastUpdate(Date.now());
 
     switch (message.type) {
       case 'activity_log':
-        if (message.data) {
-          store.addActivity(message.data.message, message.data.level);
+        if (payload) {
+          store.addActivity(String(payload.message ?? ''), String(payload.level ?? 'INFO'));
           
           // Create notifications for important events
-          const level = message.data.level;
+          const level = String(payload.level ?? 'INFO');
           if (level === 'SUCCESS') {
-            store.addNotification(message.data.message, 'success');
+            store.addNotification(String(payload.message ?? ''), 'success');
           } else if (level === 'ERROR') {
-            store.addNotification(message.data.message, 'error');
+            store.addNotification(String(payload.message ?? ''), 'error');
           } else if (level === 'WARN') {
-            store.addNotification(message.data.message, 'warning');
+            store.addNotification(String(payload.message ?? ''), 'warning');
           }
         }
         break;
 
       case 'processing_status':
-        if (message.data) {
-          store.setProcessingStatus(message.data);
+        if (payload) {
+          store.setProcessingStatus(payload as unknown as Parameters<typeof store.setProcessingStatus>[0]);
         }
         break;
 
       case 'market_update':
-        if (message.data) {
-           Object.entries(message.data).forEach(([symbol, data]: [string, any]) => {
-             // Ensure data object has expected fields before updating
-             if (data && typeof data === 'object' && 'price' in data) {
-                 store.updateMarketData(symbol, {
-                   symbol,
-                   price: data.price,
-                   change: data.change,
-                   changePercent: data.changePercent,
-                   volume: data.volume,
-                   trend: data.trend,
-                   score: data.score
-                 });
-             }
+        if (payload) {
+           Object.entries(payload).forEach(([symbol, value]) => {
+             if (!value || typeof value !== 'object') return;
+             const data = value as Record<string, unknown>;
+             if (!Number.isFinite(Number(data.price))) return;
+             store.updateMarketData(symbol, {
+               symbol,
+               price: Number(data.price),
+               change: Number(data.change) || 0,
+               changePercent: Number(data.changePercent) || 0,
+               volume: Number(data.volume) || 0,
+               trend: String(data.trend || 'UNKNOWN'),
+               score: Number(data.score) || 0,
+             });
            });
         }
         break;
 
       case 'system_status':
-        store.setSystemStatus(message.data);
+        store.setSystemStatus(payload as unknown as Parameters<typeof store.setSystemStatus>[0]);
         break;
         
       case 'trade_event':
@@ -110,8 +112,8 @@ class WebSocketService {
         break;
         
       case 'positions_update':
-        if (message.data && message.data.positions) {
-          store.setPositions(message.data.positions);
+        if (Array.isArray(payload.positions)) {
+          store.setPositions(payload.positions as Parameters<typeof store.setPositions>[0]);
         }
         break;
 
@@ -120,54 +122,54 @@ class WebSocketService {
         break;
         
       case 'bot_status':
-        if (message.data) {
-          store.setBotStatus(message.data);
+        if (payload) {
+          store.setBotStatus(payload as unknown as Parameters<typeof store.setBotStatus>[0]);
         }
         break;
         
       case 'profit_targets':
-        if (message.data && message.data.targets) {
-          store.setProfitTargets(message.data.targets);
+        if (Array.isArray(payload.targets)) {
+          store.setProfitTargets(payload.targets as Parameters<typeof store.setProfitTargets>[0]);
         }
         break;
         
       case 'account_data':
-        if (message.data) {
-          store.setAccountData(message.data);
+        if (payload) {
+          store.setAccountData(payload as unknown as Parameters<typeof store.setAccountData>[0]);
         }
         break;
         
       case 'order_update':
-        if (message.data) {
+        if (payload) {
           const orderUpdate = {
-            ...message.data,
+            ...payload,
             timestamp: Date.now()
           };
-          store.addOrderUpdate(orderUpdate);
+          store.addOrderUpdate(orderUpdate as Parameters<typeof store.addOrderUpdate>[0]);
         }
         break;
         
       case 'market_hours':
-        if (message.data) {
-          store.setMarketHours(message.data);
+        if (payload) {
+          store.setMarketHours(payload as unknown as Parameters<typeof store.setMarketHours>[0]);
         }
         break;
         
       case 'health_status':
-        if (message.data) {
-          store.setHealthStatus(message.data);
+        if (payload) {
+          store.setHealthStatus(payload as unknown as Parameters<typeof store.setHealthStatus>[0]);
         }
         break;
         
       case 'readiness_report':
-        if (message.data) {
-          store.setReadinessReport(message.data);
+        if (payload) {
+          store.setReadinessReport(payload as unknown as Parameters<typeof store.setReadinessReport>[0]);
         }
         break;
         
       case 'operational_event':
-        if (message.data) {
-          store.addOperationalEvent(message.data);
+        if (payload) {
+          store.addOperationalEvent(payload as unknown as Parameters<typeof store.addOperationalEvent>[0]);
         }
         break;
     }

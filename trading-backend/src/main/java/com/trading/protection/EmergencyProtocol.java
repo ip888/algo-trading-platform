@@ -138,7 +138,7 @@ public class EmergencyProtocol {
                             "symbol", pos.symbol(),
                             "quantity", pos.quantity(),
                             "platform", "alpaca",
-                            "status", "close_ordered"
+                            "status", "filled"
                         ));
                     } catch (Exception e) {
                         logger.error("❌ Failed to close Alpaca position for {}", pos.symbol(), e);

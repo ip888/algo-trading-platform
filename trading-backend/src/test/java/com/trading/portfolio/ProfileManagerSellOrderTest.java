@@ -356,7 +356,7 @@ class ProfileManagerSellOrderTest {
 
         // Open orders exist that need cancelling before the market-sell
         ArrayNode orders = createOpenOrdersNode("order-sl-001");
-        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders, emptyOrdersNode());
 
         invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
@@ -474,7 +474,7 @@ class ProfileManagerSellOrderTest {
 
         // Open orders for the symbol
         ArrayNode orders = createOpenOrdersNode("order-risk-001");
-        when(mockClient.getOpenOrders("SPY")).thenReturn(orders);
+        when(mockClient.getOpenOrders("SPY")).thenReturn(orders, emptyOrdersNode());
 
         invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
@@ -558,7 +558,7 @@ class ProfileManagerSellOrderTest {
 
         // Open orders for worst position
         ArrayNode orders = createOpenOrdersNode("order-cleanup-001");
-        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders, emptyOrdersNode());
 
         invokeOnExitEvaluator("cleanupExcessPositions", new Class<?>[]{String.class}, "[MAIN]");
 

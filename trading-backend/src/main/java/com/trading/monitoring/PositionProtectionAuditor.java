@@ -119,7 +119,16 @@ public final class PositionProtectionAuditor {
 
             for (var position : positions) {
                 String symbol = position.symbol();
-                var orders = alpacaClient.getOpenOrders(symbol);
+                com.fasterxml.jackson.databind.JsonNode orders;
+                try {
+                    orders = alpacaClient.getOpenOrders(symbol);
+                } catch (Exception e) {
+                    logger.error("Protection state UNKNOWN for {}: broker order lookup failed", symbol, e);
+                    unprotected.add(symbol);
+                    recordUnprotectedPosition(symbol, position.quantity(),
+                        "broker order API unavailable; protection cannot be verified");
+                    continue;
+                }
 
                 // A stop must be an active SELL with enough remaining quantity.
                 // A BUY stop, stale/canceled order, or a stop for one share cannot

@@ -108,6 +108,18 @@ final class EntryEvaluator {
         return false;
     }
 
+    /** Only a fully unfilled, terminal rejection/cancellation can free a BUY intent. */
+    static boolean canReleaseNoFillIntent(com.fasterxml.jackson.databind.JsonNode order) {
+        if (order == null || !order.isObject()) return false;
+        String status = order.path("status").asText("");
+        if (!("rejected".equals(status) || "canceled".equals(status) || "expired".equals(status))) return false;
+        try {
+            return Double.parseDouble(order.path("filled_qty").asText("NaN")) == 0.0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     EntryEvaluator(TradingProfile profile, Config config, TradeDatabase database,
                    ResilientBrokerClient client, PortfolioManager portfolio, RiskGate riskGate,
                    PDTProtection pdtProtection, MarketHoursFilter marketHoursFilter,
@@ -624,6 +636,29 @@ final class EntryEvaluator {
             } catch (Exception e) {
                 logger.debug("{} Correlation cap check failed for {}: {}", profilePrefix, symbol, e.getMessage());
             }
+        }
+
+        // Reconcile any durable BUY intent from a previous cycle or process.
+        // A submission timeout must never be mistaken for a rejected order.
+        try {
+            var intent = database.getBrokerEntryIntent("alpaca", symbol);
+            if (intent != null) {
+                var order = client.getOrderByClientOrderId(intent.clientOrderId());
+                if (!canReleaseNoFillIntent(order)) {
+                    return new Blocked("unresolved broker entry intent " + intent.clientOrderId());
+                }
+                var brokerPositions = client.getPositions();
+                var openOrders = client.getOpenOrders(symbol);
+                if (brokerPositions == null || openOrders == null || !openOrders.isArray()
+                    || !openOrders.isEmpty() || brokerPositions.stream()
+                        .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() != 0.0)) {
+                    return new Blocked("cannot safely clear broker entry intent");
+                }
+                database.releaseBrokerEntryIntent(intent.broker(), symbol, intent.clientOrderId());
+            }
+        } catch (Exception e) {
+            logger.error("{} {}: unresolved broker entry intent; blocking BUY", profilePrefix, symbol, e);
+            return new Blocked("broker intent reconciliation unavailable");
         }
 
         // ========== BROKER-AUTHORITATIVE ENTRY SAFETY ==========

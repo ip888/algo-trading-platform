@@ -76,7 +76,11 @@ public class EmergencyProtocol {
         try {
             Map<String, Object> flattenResult = flattenAll();
             result.putAll(flattenResult);
-            result.put("success", true);
+            result.put("success", !flattenResult.containsKey("alpacaPositionsError")
+                && Boolean.TRUE.equals(flattenResult.get("alpacaOrdersCancelled"))
+                && ((java.util.List<?>) flattenResult.getOrDefault("alpacaPositions", java.util.List.of()))
+                    .stream().noneMatch(p -> p instanceof java.util.Map<?, ?> m
+                        && "failed".equals(m.get("status"))));
         } catch (Exception e) {
             logger.error("CRITICAL ERROR executing emergency protocol", e);
             result.put("success", false);
@@ -120,12 +124,14 @@ public class EmergencyProtocol {
                 for (Position pos : positions) {
                     try {
                         logger.warn("Closing Alpaca position: {} ({} shares)", pos.symbol(), pos.quantity());
-                        directClient.placeOrder(
-                            pos.symbol(), 
-                            Math.abs(pos.quantity()), 
+                        // Bypass the circuit breaker but keep the durable SELL
+                        // intent/reconciliation gate; never issue duplicate panic sells.
+                        resilientClient.placeOrderDirect(
+                            pos.symbol(),
+                            Math.abs(pos.quantity()),
                             pos.quantity() > 0 ? "sell" : "buy",
-                            "market", 
-                            "day", 
+                            "market",
+                            "day",
                             null
                         );
                         alpacaClosed.add(Map.of(

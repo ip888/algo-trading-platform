@@ -1296,6 +1296,20 @@ public class ProfileManager implements Runnable {
         double stopLoss = sized.stopLoss();
         double takeProfit = sized.takeProfit();
 
+        // P0 safety: Alpaca's fractional entry is a simple order without native
+        // bracket protection. The legacy path tried a native stop before the BUY
+        // had filled, potentially leaving a filled position unprotected. Until
+        // fill-driven fractional stop placement is implemented and verified,
+        // reject fractional live entries instead of trading without broker stops.
+        if (testSimulator == null && Math.abs(positionSize - Math.rint(positionSize)) > 0.0000001) {
+            logger.warn("{} {}: FRACTIONAL LIVE BUY BLOCKED (qty={}). Broker-confirmed protective-stop workflow not implemented.",
+                profilePrefix, symbol, positionSize);
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] FRACTIONAL BUY BLOCKED: %s. Safety requires confirmed fill and broker stop.",
+                    profile.name(), symbol), "WARN");
+            return;
+        }
+
         var newPosition = new TradePosition(
             symbol,
             currentPrice,
@@ -1394,7 +1408,7 @@ public class ProfileManager implements Runnable {
                 logger.info("{} {}: ✅ Bracket order with full SL/TP protection", profilePrefix, symbol);
 
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ✅ BUY ORDER FILLED: %s %.3f shares @ $%.2f (Protected)",
+                    String.format("[%s] BUY ORDER ACCEPTED (fill pending verification): %s %.3f shares @ $%.2f (Bracket submitted)",
                         profile.name(), symbol, positionSize, currentPrice),
                     "SUCCESS"
                 );

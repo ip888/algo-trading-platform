@@ -58,8 +58,8 @@ export const BotBehaviorMonitor = () => {
       const json = await res.json();
       setData(json);
       setError(null);
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to load');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load');
     } finally {
       setLoading(false);
     }

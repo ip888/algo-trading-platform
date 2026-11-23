@@ -9,7 +9,7 @@
 1. Durable SQLite entry and exit intent records are created before network submission; a separate `client_order_id` is sent with tracked Alpaca orders.
 2. Ambiguous POST failures are not automatically retried. A restart retains the unresolved symbol/intent lock and reconciles by exact client order ID.
 3. Failed bracket entry never degrades into an unprotected ordinary market BUY.
-4. Entry acceptance is not treated as a fill. Local trade recording requires broker `filled` status, quantity and positive average fill price. Incomplete fills are recovered from broker positions, not fabricated from an acknowledgement.
+4. Entry acceptance is not treated as a fill. Local trade recording requires broker `filled` status, quantity and positive average fill price. Full and partial discretionary SELL accounting uses the broker's exact `filled_avg_price`, not the last market quote. Missing execution prices defer accounting until reconciliation.
 5. SELL attempts are serialized by durable intent. Pending and partial fills prevent a second SELL; a filled SELL lock persists until broker-confirmed flat reconciliation.
 6. Cancel-before-replace checks each prior order's terminal canceled/expired/rejected status **and zero filled quantity**, not just disappearance from the open-order list.
 7. Protection checks inspect **active SELL stop quantity** against broker-held shares. Missing/invalid broker responses fail closed for new entries.

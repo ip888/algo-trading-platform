@@ -108,6 +108,17 @@ final class EntryEvaluator {
         return false;
     }
 
+    static boolean canReleaseFilledExitIntent(com.fasterxml.jackson.databind.JsonNode order, double intendedQty) {
+        if (order == null || !order.isObject() || !"filled".equals(order.path("status").asText(""))
+            || !Double.isFinite(intendedQty) || intendedQty <= 0.0) return false;
+        try {
+            double filledQty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+            return Double.isFinite(filledQty) && filledQty + 0.0000001 >= intendedQty;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     /** Only a fully unfilled, terminal rejection/cancellation can free a BUY intent. */
     static boolean canReleaseNoFillIntent(com.fasterxml.jackson.databind.JsonNode order) {
         if (order == null || !order.isObject()) return false;
@@ -700,6 +711,28 @@ final class EntryEvaluator {
         } catch (Exception e) {
             logger.error("{} {}: unresolved broker entry intent; blocking BUY", profilePrefix, symbol, e);
             return new Blocked("broker intent reconciliation unavailable");
+        }
+
+        // A completed SELL is not itself proof that the account is flat.
+        // Keep the durable SELL intent locked until Alpaca reports both a fully
+        // filled exit and no remaining position or pending order on that symbol.
+        try {
+            var exitIntent = database.getBrokerExitIntent("alpaca", symbol);
+            if (exitIntent != null) {
+                var priorExit = client.getOrderByClientOrderId(exitIntent.clientOrderId());
+                var livePositions = client.getPositions();
+                var liveOrders = client.getOpenOrders(symbol);
+                if (!canReleaseFilledExitIntent(priorExit, exitIntent.quantity())
+                    || livePositions == null || liveOrders == null || !liveOrders.isArray()
+                    || !liveOrders.isEmpty() || livePositions.stream()
+                        .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() != 0.0)) {
+                    return new Blocked("SELL reconciliation incomplete; new BUY blocked");
+                }
+                database.releaseBrokerExitIntent("alpaca", symbol, exitIntent.clientOrderId());
+            }
+        } catch (Exception e) {
+            logger.error("{} {}: SELL state unknown, refusing BUY", profilePrefix, symbol, e);
+            return new Blocked("SELL reconciliation unavailable");
         }
 
         // ========== BROKER-AUTHORITATIVE ENTRY SAFETY ==========

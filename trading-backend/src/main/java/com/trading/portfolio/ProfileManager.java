@@ -1318,7 +1318,7 @@ public class ProfileManager implements Runnable {
 
         TradePosition newPosition = new TradePosition(
             symbol,
-            verifiedFillPrice,
+            currentPrice,
             positionSize,
             stopLoss,
             takeProfit,
@@ -1494,7 +1494,7 @@ public class ProfileManager implements Runnable {
             profile.name(),
             brokerName,
             newPosition.entryTime(),
-            currentPrice,
+            verifiedFillPrice,
             positionSize,
             stopLoss,
             takeProfit,

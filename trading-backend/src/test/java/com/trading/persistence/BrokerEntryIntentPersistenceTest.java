@@ -10,7 +10,7 @@ class BrokerEntryIntentPersistenceTest {
     void persistsIntentAcrossDatabaseReopen(@TempDir Path dir) {
         String path = dir.resolve("order-intents.db").toString();
         try (var db = new TestDb(path)) {
-            assertTrue(db.database.claimBrokerEntryIntent("alpaca", "SPY", "atp_unique1"));
+            assertTrue(db.database.claimBrokerEntryIntent("alpaca", "SPY", "atp_unique1", 4.0, 485.25, 522.75));
             assertFalse(db.database.claimBrokerEntryIntent("alpaca", "SPY", "atp_unique2"));
             assertEquals("atp_unique1",
                 db.database.getBrokerEntryIntent("alpaca", "SPY").clientOrderId());
@@ -19,6 +19,9 @@ class BrokerEntryIntentPersistenceTest {
         try (var db = new TestDb(path)) {
             assertEquals("ACKNOWLEDGED",
                 db.database.getBrokerEntryIntent("alpaca", "SPY").state());
+            assertEquals(4.0, db.database.getBrokerEntryIntent("alpaca", "SPY").intendedQty());
+            assertEquals(485.25, db.database.getBrokerEntryIntent("alpaca", "SPY").stopLoss());
+            assertEquals(522.75, db.database.getBrokerEntryIntent("alpaca", "SPY").takeProfit());
             assertFalse(db.database.claimBrokerEntryIntent("alpaca", "SPY", "atp_unique3"));
             db.database.releaseBrokerEntryIntent("alpaca", "SPY", "atp_unique1");
             assertTrue(db.database.claimBrokerEntryIntent("alpaca", "SPY", "atp_unique4"));

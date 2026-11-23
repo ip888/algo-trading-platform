@@ -637,7 +637,10 @@ final class EntryEvaluator {
                 pendingEntryTimestamps.remove(symbol); // order filled/expired — clear tracking
             }
         } catch (Exception e) {
-            logger.debug("{} Could not check pending orders for {}: {}", profilePrefix, symbol, e.getMessage());
+            // Broker order state is unknown. Never allow a new BUY based on an
+            // assumed-empty order book when this lookup fails.
+            logger.error("{} Blocking BUY for {}: cannot verify pending broker orders", profilePrefix, symbol, e);
+            return new Blocked("broker order state unavailable");
         }
 
         // ========== EVENT-DAY (EARNINGS-GAP) GATE — single stocks ==========

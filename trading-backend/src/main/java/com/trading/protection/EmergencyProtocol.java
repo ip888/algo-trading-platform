@@ -100,54 +100,46 @@ public class EmergencyProtocol {
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> closed = new ArrayList<>();
 
-        // Snapshot every currently held symbol's protective orders BEFORE bulk
-        // cancel. A successful DELETE response alone is not terminal cancellation.
-        final List<Position> originalPositions;
-        final Map<String, List<String>> priorOrders = new HashMap<>();
+        // Snapshot ALL open orders, including entry BUYs not yet represented as
+        // positions. A global cancel response is not proof that any of these
+        // orders reached the canceled state (they may fill during cancellation).
+        final List<String> beforeCancelIds = new ArrayList<>();
         try {
-            originalPositions = directClient.getPositions();
-            if (originalPositions == null) throw new IllegalStateException("Broker positions unavailable");
-            for (Position position : originalPositions) {
-                var open = directClient.getOpenOrders(position.symbol());
-                if (open == null || !open.isArray()) {
-                    throw new IllegalStateException("Open orders unknown for " + position.symbol());
-                }
-                var ids = new ArrayList<String>();
-                for (var order : open) {
-                    String id = order.path("id").asText("");
-                    if (id.isBlank()) throw new IllegalStateException("Open order missing ID");
-                    ids.add(id);
-                }
-                priorOrders.put(position.symbol(), ids);
+            var open = directClient.getOpenOrders(null);
+            if (open == null || !open.isArray()) {
+                throw new IllegalStateException("Global open-order snapshot unavailable");
+            }
+            for (var order : open) {
+                String id = order.path("id").asText("");
+                if (id.isBlank()) throw new IllegalStateException("Open order missing broker ID");
+                beforeCancelIds.add(id);
             }
         } catch (Exception e) {
-            logger.error("PANIC: cannot snapshot broker orders; automatic liquidation aborted", e);
+            logger.error("PANIC: cannot snapshot ALL broker orders; automatic liquidation aborted", e);
             result.put("alpacaOrdersCancelled", false);
-            result.put("alpacaPositionsError", "Cannot establish pre-cancel broker state; manual intervention required");
+            result.put("alpacaPositionsError", "Cannot establish open orders; manual intervention required");
             result.put("alpacaPositions", closed);
             return result;
         }
 
         try {
             directClient.cancelAllOrders();
-            for (var entry : priorOrders.entrySet()) {
-                for (String id : entry.getValue()) {
-                    var terminal = directClient.getOrderById(id);
-                    if (!ResilientBrokerClient.isConfirmedNoFillCancellation(terminal)) {
-                        throw new IllegalStateException("Order " + id
-                            + " may have filled or cancellation is still pending");
-                    }
+            for (String id : beforeCancelIds) {
+                var terminal = directClient.getOrderById(id);
+                if (!ResilientBrokerClient.isConfirmedNoFillCancellation(terminal)) {
+                    throw new IllegalStateException("Order " + id
+                        + " filled or cancellation remains pending");
                 }
-                var open = directClient.getOpenOrders(entry.getKey());
-                if (open == null || !open.isArray() || !open.isEmpty()) {
-                    throw new IllegalStateException("Open orders remain for " + entry.getKey());
-                }
+            }
+            var openAfter = directClient.getOpenOrders(null);
+            if (openAfter == null || !openAfter.isArray() || !openAfter.isEmpty()) {
+                throw new IllegalStateException("Global order book not empty after cancellation");
             }
             result.put("alpacaOrdersCancelled", true);
         } catch (Exception e) {
-            logger.error("PANIC: broker cancellations not terminal; no new SELL sent", e);
+            logger.error("PANIC: global cancellation unresolved; no replacement SELL", e);
             result.put("alpacaOrdersCancelled", false);
-            result.put("alpacaOrdersError", "Cancellation/fill race unresolved; manual intervention required");
+            result.put("alpacaOrdersError", "Cancel/fill race unresolved; manual intervention required");
             result.put("alpacaPositions", closed);
             return result;
         }

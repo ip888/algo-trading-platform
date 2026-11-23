@@ -1316,9 +1316,9 @@ public class ProfileManager implements Runnable {
             return;
         }
 
-        var newPosition = new TradePosition(
+        TradePosition newPosition = new TradePosition(
             symbol,
-            currentPrice,
+            verifiedFillPrice,
             positionSize,
             stopLoss,
             takeProfit,
@@ -1328,6 +1328,10 @@ public class ProfileManager implements Runnable {
         logger.info("{} {}: Position tracked: Entry=${}, StopLoss=${}, TakeProfit={}",
             profilePrefix, symbol, currentPrice, stopLoss, takeProfit);
         
+        // Used only after exact broker fill confirmation.
+        String submittedClientOrderId = null;
+        double verifiedFillPrice = currentPrice;
+
         // Place order (skip if in test mode)
         if (testSimulator == null) {
             // Calculate order value
@@ -1370,6 +1374,7 @@ public class ProfileManager implements Runnable {
             // Durable intent must be committed BEFORE the network request. On timeout
             // retain this exact identifier and require broker reconciliation.
             String clientOrderId = "atp_" + java.util.UUID.randomUUID().toString().replace("-", "");
+            submittedClientOrderId = clientOrderId;
             if (!database.claimBrokerEntryIntent(brokerName, symbol, clientOrderId)) {
                 logger.error("{} {}: unresolved broker entry intent exists; refusing additional BUY",
                     profilePrefix, symbol);
@@ -1435,6 +1440,19 @@ public class ProfileManager implements Runnable {
         // The regular reconciliation cycle will recover fills from broker truth.
         if (testSimulator == null) {
             try {
+                var order = client.getOrderByClientOrderId(submittedClientOrderId);
+                if (order == null || !"filled".equals(order.path("status").asText(""))) {
+                    logger.warn("{} {}: tracked BUY not fully filled; delaying internal recording", profilePrefix, symbol);
+                    return;
+                }
+                double orderFilledQty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+                double orderFillPrice = Double.parseDouble(order.path("filled_avg_price").asText("NaN"));
+                if (!Double.isFinite(orderFilledQty) || orderFilledQty + 0.0000001 < positionSize
+                    || !Double.isFinite(orderFillPrice) || orderFillPrice <= 0.0) {
+                    logger.warn("{} {}: broker BUY fill quantities/prices not verified; deferring", profilePrefix, symbol);
+                    return;
+                }
+                verifiedFillPrice = orderFillPrice;
                 var filledPositions = client.getPositions();
                 if (filledPositions == null) {
                     logger.error("{} {}: broker positions unavailable after order submission; delaying local recording",
@@ -1453,8 +1471,10 @@ public class ProfileManager implements Runnable {
                 logger.error("{} {}: could not confirm broker fill; delaying local recording", profilePrefix, symbol, e);
                 return;
             }
+            newPosition = new TradePosition(symbol, verifiedFillPrice, positionSize,
+                stopLoss, takeProfit, java.time.Instant.now());
         }
-        
+
         // Update portfolio and cross-profile tracker atomically
         portfolio.setPosition(symbol, Optional.of(newPosition));
         riskGate.globalHeldSymbols().put(symbol, profilePrefix);

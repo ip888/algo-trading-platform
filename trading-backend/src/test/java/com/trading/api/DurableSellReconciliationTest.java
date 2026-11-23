@@ -17,6 +17,8 @@ class DurableSellReconciliationTest {
     void ambiguousTimeoutNeverSubmitsSecondSellAcrossRestart(@TempDir Path dir) throws Exception {
         String dbPath = dir.resolve("sell.db").toString();
         BrokerClient broker = mock(BrokerClient.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
+        when(broker.getPositions()).thenReturn(java.util.List.of(
+            new com.trading.api.model.Position("SPY", 2.0, 980.0, 490.0, 0.0)));
         doThrow(new IllegalStateException("response lost after acceptance"))
             .when(broker).placeOrderTracked(eq("SPY"), eq(2.0), eq("sell"),
                 eq("market"), eq("day"), isNull(), anyString());
@@ -54,6 +56,8 @@ class DurableSellReconciliationTest {
     void partiallyFilledSellDoesNotReleaseOrderLock(@TempDir Path dir) throws Exception {
         try (var db = new TradeDatabase(dir.resolve("partial.db").toString())) {
             BrokerClient broker = mock(BrokerClient.class, withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
+            when(broker.getPositions()).thenReturn(java.util.List.of(
+                new com.trading.api.model.Position("SPY", 2.0, 980.0, 490.0, 0.0)));
             when(broker.getOrderByClientOrderId(anyString())).thenReturn(JSON.readTree("""
                 {"status":"partially_filled","filled_qty":"1"}
                 """));

@@ -167,8 +167,17 @@ public final class AlpacaClient implements BrokerClient {
     
     public JsonNode getOpenOrders(String symbol) {
         try {
-            var url = config.baseUrl() + "/v2/orders?status=open&symbols=" + symbol;
-            return objectMapper.readTree(sendRequest(url, "GET"));
+            // Null symbol means ALL open orders (panic / broker-wide reconciliation).
+            // Never assume a truncated page proves the order book is empty.
+            var url = config.baseUrl() + "/v2/orders?status=open&limit=500";
+            if (symbol != null && !symbol.isBlank()) {
+                url += "&symbols=" + java.net.URLEncoder.encode(symbol, java.nio.charset.StandardCharsets.UTF_8);
+            }
+            var orders = objectMapper.readTree(sendRequest(url, "GET"));
+            if (orders == null || !orders.isArray() || orders.size() >= 500) {
+                throw new IllegalStateException("Open-order response invalid or potentially truncated");
+            }
+            return orders;
         } catch (Exception e) {
             // Never interpret an API outage as "no open orders": callers may otherwise
             // submit duplicate entries or cancel/recreate active protective orders.

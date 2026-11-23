@@ -995,7 +995,9 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Time-based exit order placed for {}", profilePrefix, symbol);
 
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_hold_time");
+                        database.closeTrade(symbol, Instant.now(),
+                            client.hasDurableSellSafety() ? client.getConfirmedSellFillPrice(symbol) : currentPrice,
+                            pnl, brokerName, "max_hold_time");
                         portfolio.setPosition(symbol, Optional.empty());
                         exitEvaluator.clearPositionTracking(symbol);
                         exitEvaluator.applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "time-based");

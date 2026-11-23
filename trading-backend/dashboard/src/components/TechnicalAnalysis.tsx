@@ -35,9 +35,11 @@ export const TechnicalAnalysis = () => {
       setRegime(String(data.regime || 'UNKNOWN'));
       setAllCount((data.watchlist || []).length);
 
-      const list: TargetEntry[] = (data.watchlist || [])
-        .filter((it: any) => it.isTarget || it.inPosition)
-        .map((it: any) => ({
+      const watchlist: Array<Partial<TargetEntry> & { isTarget?: boolean }> =
+        Array.isArray(data.watchlist) ? data.watchlist : [];
+      const list: TargetEntry[] = watchlist
+        .filter(it => it.isTarget || it.inPosition)
+        .map(it => ({
           symbol:          String(it.symbol),
           inPosition:      Boolean(it.inPosition),
           blocked:         Boolean(it.blocked),

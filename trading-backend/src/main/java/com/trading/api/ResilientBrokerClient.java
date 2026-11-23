@@ -40,6 +40,76 @@ public class ResilientBrokerClient {
     private final Retry retry;
     private final MeterRegistry meterRegistry;
 
+    // Enabled by production orchestration before ProfileManager is constructed.
+    private com.trading.persistence.TradeDatabase durableOrderDatabase;
+    private String durableOrderBroker;
+
+    public void enableDurableSellSafety(com.trading.persistence.TradeDatabase database, String broker) {
+        this.durableOrderDatabase = java.util.Objects.requireNonNull(database);
+        this.durableOrderBroker = java.util.Objects.requireNonNull(broker);
+    }
+
+    private void submitSafelyTrackedSell(String symbol, double qty, String type,
+                                         String tif, Double limitPrice, boolean bypassCircuitBreaker) {
+        var db = durableOrderDatabase;
+        if (db == null) {
+            // Compatibility with historical non-production mock clients; live
+            // orchestration must call enableDurableSellSafety before trading.
+            if (bypassCircuitBreaker) {
+                delegate.placeOrder(symbol, qty, "sell", type, tif, limitPrice);
+            } else {
+                executeMutation("placeOrder", () -> {
+                    delegate.placeOrder(symbol, qty, "sell", type, tif, limitPrice);
+                    return null;
+                });
+            }
+            return;
+        }
+        String broker = durableOrderBroker;
+        var intent = db.getBrokerExitIntent(broker, symbol);
+        if (intent == null) {
+            String id = "atp_sell_" + java.util.UUID.randomUUID().toString().replace("-", "");
+            if (db.claimBrokerExitIntent(broker, symbol, id, qty)) {
+                intent = db.getBrokerExitIntent(broker, symbol);
+                if (intent == null) throw new IllegalStateException("Persisted SELL intent disappeared");
+                final String orderId = id;
+                if (bypassCircuitBreaker) {
+                    delegate.placeOrderTracked(symbol, qty, "sell", type, tif, limitPrice, orderId);
+                } else {
+                    executeMutation("placeOrderTracked", () -> {
+                        delegate.placeOrderTracked(symbol, qty, "sell", type, tif, limitPrice, orderId);
+                        return null;
+                    });
+                }
+            } else {
+                intent = db.getBrokerExitIntent(broker, symbol);
+            }
+        }
+        if (intent == null) throw new IllegalStateException("SELL order intent state is unknown");
+        // Never issue a second POST while the previous order is unresolved.
+        var order = getOrderByClientOrderId(intent.clientOrderId());
+        String status = order.path("status").asText("");
+        double filled;
+        try {
+            filled = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("SELL fill quantity unavailable, keep intent locked", e);
+        }
+        if ("filled".equals(status) && Double.isFinite(filled)
+                && filled + 0.0000001 >= intent.quantity()) {
+            db.releaseBrokerExitIntent(broker, symbol, intent.clientOrderId());
+            return;
+        }
+        if (("canceled".equals(status) || "rejected".equals(status) || "expired".equals(status))
+                && filled == 0) {
+            db.releaseBrokerExitIntent(broker, symbol, intent.clientOrderId());
+            throw new IllegalStateException("SELL order terminated without a fill; reassess broker position");
+        }
+        throw new IllegalStateException("SELL order " + intent.clientOrderId()
+            + " status=" + status + " filled=" + filled + "; awaiting broker terminal fill");
+    }
+
+
     public ResilientBrokerClient(BrokerClient delegate, MeterRegistry meterRegistry) {
         this.delegate = delegate;
         this.meterRegistry = meterRegistry;
@@ -253,6 +323,10 @@ public class ResilientBrokerClient {
 
     public void placeOrder(String symbol, double qty, String side, String type,
                           String timeInForce, Double limitPrice) {
+        if ("sell".equalsIgnoreCase(side)) {
+            submitSafelyTrackedSell(symbol, qty, type, timeInForce, limitPrice, false);
+            return;
+        }
         executeMutation("placeOrder", () -> {
             try {
                 delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
@@ -353,7 +427,11 @@ public class ResilientBrokerClient {
     public void placeOrderDirect(String symbol, double qty, String side, String type,
                                  String timeInForce, Double limitPrice) {
         logger.info("DIRECT ORDER (bypass circuit breaker): {} {} {} qty={}", side, type, symbol, qty);
-        delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
+        if ("sell".equalsIgnoreCase(side)) {
+            submitSafelyTrackedSell(symbol, qty, type, timeInForce, limitPrice, true);
+        } else {
+            delegate.placeOrder(symbol, qty, side, type, timeInForce, limitPrice);
+        }
     }
 
     /**

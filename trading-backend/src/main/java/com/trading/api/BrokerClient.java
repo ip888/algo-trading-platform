@@ -66,6 +66,12 @@ public interface BrokerClient {
         throw new UnsupportedOperationException("Tracked broker orders are not supported");
     }
 
+    /** Tracked single-leg market/limit order. Must honor the provided client_order_id. */
+    default void placeOrderTracked(String symbol, double qty, String side, String type,
+                                   String timeInForce, Double limitPrice, String clientOrderId) {
+        throw new UnsupportedOperationException("Tracked single-leg orders are not supported");
+    }
+
     /** Exact lookup for crash recovery. Fail on unknown API state; 404 is not proof of rejection. */
     default JsonNode getOrderByClientOrderId(String clientOrderId) {
         throw new UnsupportedOperationException("Broker order-id reconciliation is not supported");

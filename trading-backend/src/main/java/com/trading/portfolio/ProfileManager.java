@@ -1243,6 +1243,11 @@ public class ProfileManager implements Runnable {
         }
     }
 
+    /** Fail closed on an unsuccessful or missing bracket acknowledgement. */
+    static boolean bracketSubmissionUnconfirmed(com.trading.api.model.BracketOrderResult result) {
+        return result == null || !result.success();
+    }
+
     private void handleBuy(String symbol, double currentPrice, double equity,
                           double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
 
@@ -1346,7 +1351,7 @@ public class ProfileManager implements Runnable {
             var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
                 takeProfit, stopLoss, null, entryLimitPrice);
 
-            if (bracketResult == null || !bracketResult.success()) {
+            if (bracketSubmissionUnconfirmed(bracketResult)) {
                 // An API timeout/error does not prove the broker rejected this order.
                 // A market-order fallback could buy twice and bypass server-side stops.
                 // Do not mutate the internal portfolio: reconcile broker orders/fills first.

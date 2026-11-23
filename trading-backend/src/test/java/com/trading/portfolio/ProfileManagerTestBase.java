@@ -135,6 +135,7 @@ abstract class ProfileManagerTestBase {
         when(mockDatabase.getOpenTradeRecords(anyString())).thenReturn(List.of());
         when(mockDatabase.wasRecentlyClosed(anyString(), anyString(), anyLong())).thenReturn(false);
         when(mockClient.getOpenOrders(anyString())).thenReturn(MAPPER.createArrayNode());
+        when(mockClient.getOrderHistory(anyString(), anyInt())).thenReturn(MAPPER.createArrayNode());
         doNothing().when(mockClient).placeNativeStopOrder(anyString(), anyDouble(), anyDouble());
 
         var profile = mainProfile();

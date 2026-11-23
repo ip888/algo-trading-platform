@@ -356,7 +356,13 @@ class ProfileManagerSellOrderTest {
 
         // Open orders exist that need cancelling before the market-sell
         ArrayNode orders = createOpenOrdersNode("order-sl-001");
-        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
+        when(mockClient.getOrderById("order-sl-001")).thenReturn(
+            MAPPER.createObjectNode().put("id", "order-sl-001").put("status", "canceled").put("filled_qty", "0"));
+        // Risk-exit scan checks protection before cancellation; the following
+        // cancellation lookup must still see the order until DELETE is issued.
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders, orders, emptyOrdersNode());
+        when(mockClient.getOrderById("order-sl-001")).thenReturn(
+            MAPPER.createObjectNode().put("status", "canceled").put("filled_qty", "0"));
 
         invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
@@ -474,7 +480,11 @@ class ProfileManagerSellOrderTest {
 
         // Open orders for the symbol
         ArrayNode orders = createOpenOrdersNode("order-risk-001");
-        when(mockClient.getOpenOrders("SPY")).thenReturn(orders);
+        when(mockClient.getOrderById("order-risk-001")).thenReturn(
+            MAPPER.createObjectNode().put("id", "order-risk-001").put("status", "canceled").put("filled_qty", "0"));
+        when(mockClient.getOpenOrders("SPY")).thenReturn(orders, emptyOrdersNode());
+        when(mockClient.getOrderById("order-risk-001")).thenReturn(
+            MAPPER.createObjectNode().put("status", "canceled").put("filled_qty", "0"));
 
         invokeOnExitEvaluator("checkAllPositionsForRiskExits", new Class<?>[]{String.class}, "[MAIN]");
 
@@ -558,7 +568,11 @@ class ProfileManagerSellOrderTest {
 
         // Open orders for worst position
         ArrayNode orders = createOpenOrdersNode("order-cleanup-001");
-        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders);
+        when(mockClient.getOrderById("order-cleanup-001")).thenReturn(
+            MAPPER.createObjectNode().put("id", "order-cleanup-001").put("status", "canceled").put("filled_qty", "0"));
+        when(mockClient.getOpenOrders("AAPL")).thenReturn(orders, emptyOrdersNode());
+        when(mockClient.getOrderById("order-cleanup-001")).thenReturn(
+            MAPPER.createObjectNode().put("status", "canceled").put("filled_qty", "0"));
 
         invokeOnExitEvaluator("cleanupExcessPositions", new Class<?>[]{String.class}, "[MAIN]");
 

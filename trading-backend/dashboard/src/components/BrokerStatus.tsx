@@ -40,9 +40,13 @@ export const BrokerStatus = () => {
   };
 
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 30000);
-    return () => clearInterval(interval);
+    // Schedule network-driven state updates outside the synchronous effect body.
+    const initial = window.setTimeout(() => { void fetchStatus(); }, 0);
+    const interval = window.setInterval(() => { void fetchStatus(); }, 30000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
   }, []);
 
   if (!data) return null;

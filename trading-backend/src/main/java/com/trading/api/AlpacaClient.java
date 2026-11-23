@@ -119,8 +119,12 @@ public final class AlpacaClient implements BrokerClient {
             var position = objectMapper.readValue(response, Position.class);
             return Optional.of(position);
         } catch (Exception e) {
-            logger.debug("No position found for {}", symbol);
-            return Optional.empty();
+            // Only an explicit Alpaca 404 means the symbol is not held.
+            // Timeouts, 5xx, authentication errors and malformed JSON are UNKNOWN.
+            if (e.getMessage() != null && e.getMessage().startsWith("API Request failed: 404 -")) {
+                return Optional.empty();
+            }
+            throw new IllegalStateException("Cannot verify broker position " + symbol, e);
         }
     }
 
@@ -129,6 +133,9 @@ public final class AlpacaClient implements BrokerClient {
         var response = sendRequest(config.baseUrl() + "/v2/positions", "GET");
         var root = objectMapper.readTree(response);
         
+        if (root == null || !root.isArray()) {
+            throw new IllegalStateException("Malformed broker positions response");
+        }
         var positions = new ArrayList<Position>();
         if (root.isArray()) {
             for (var node : root) {
@@ -160,11 +167,22 @@ public final class AlpacaClient implements BrokerClient {
     
     public JsonNode getOpenOrders(String symbol) {
         try {
-            var url = config.baseUrl() + "/v2/orders?status=open&symbols=" + symbol;
-            return objectMapper.readTree(sendRequest(url, "GET"));
+            // Null symbol means ALL open orders (panic / broker-wide reconciliation).
+            // Never assume a truncated page proves the order book is empty.
+            var url = config.baseUrl() + "/v2/orders?status=open&limit=500";
+            if (symbol != null && !symbol.isBlank()) {
+                url += "&symbols=" + java.net.URLEncoder.encode(symbol, java.nio.charset.StandardCharsets.UTF_8);
+            }
+            var orders = objectMapper.readTree(sendRequest(url, "GET"));
+            if (orders == null || !orders.isArray() || orders.size() >= 500) {
+                throw new IllegalStateException("Open-order response invalid or potentially truncated");
+            }
+            return orders;
         } catch (Exception e) {
+            // Never interpret an API outage as "no open orders": callers may otherwise
+            // submit duplicate entries or cancel/recreate active protective orders.
             logger.error("Failed to get open orders for {}", symbol, e);
-            return objectMapper.createArrayNode();
+            throw new IllegalStateException("Cannot establish open-order state for " + symbol, e);
         }
     }
     
@@ -208,8 +226,10 @@ public final class AlpacaClient implements BrokerClient {
             var response = sendRequest(url, "GET");
             return objectMapper.readTree(response);
         } catch (Exception e) {
+            // Unknown history is not equivalent to an empty history. New-entry
+            // reconciliation must fail closed when the broker cannot be queried.
             logger.error("Failed to get order history", e);
-            return objectMapper.createArrayNode();
+            throw new IllegalStateException("Broker order history unavailable", e);
         }
     }
 
@@ -279,6 +299,34 @@ public final class AlpacaClient implements BrokerClient {
         } catch (Exception e) {
             logger.error("Failed to place order", e);
             throw new RuntimeException("Order placement failed", e);
+        }
+    }
+
+    @Override
+    public void placeOrderTracked(String symbol, double qty, String side, String type,
+                                  String timeInForce, Double limitPrice, String clientOrderId) {
+        if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}") ||
+            !Double.isFinite(qty) || qty <= 0) {
+            throw new IllegalArgumentException("Invalid tracked order id or quantity");
+        }
+        try {
+            var order = objectMapper.createObjectNode()
+                .put("client_order_id", clientOrderId)
+                .put("symbol", symbol)
+                .put("qty", String.format(java.util.Locale.ROOT, "%.9f", qty))
+                .put("side", side)
+                .put("type", type)
+                .put("time_in_force", timeInForce);
+            if (limitPrice != null) {
+                if ("stop".equals(type)) throw new IllegalArgumentException("Stop needs stop_price, not limit_price");
+                order.put("limit_price", String.format(java.util.Locale.ROOT, "%.2f", limitPrice));
+            }
+            if (config.isExtendedHoursEnabled() && "limit".equals(type)) {
+                order.put("extended_hours", true);
+            }
+            sendRequest(config.baseUrl() + "/v2/orders", "POST", objectMapper.writeValueAsString(order));
+        } catch (Exception e) {
+            throw new IllegalStateException("Tracked broker order unconfirmed: " + clientOrderId, e);
         }
     }
 
@@ -354,6 +402,73 @@ public final class AlpacaClient implements BrokerClient {
         } catch (Exception e) {
             logger.error("Failed to place trailing stop order", e);
             throw new RuntimeException("Trailing stop order placement failed", e);
+        }
+    }
+
+    /**
+     * Submit a whole-share bracket with the caller's durable client order ID.
+     * Never retry here; a timeout may occur after Alpaca accepted the order.
+     */
+    @Override
+    public BracketOrderResult placeBracketOrderTracked(String symbol, double qty, String side,
+            double takeProfitPrice, double stopLossPrice, Double stopLossLimitPrice,
+            Double limitPrice, String clientOrderId) {
+        if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}")) {
+            throw new IllegalArgumentException("Invalid client_order_id");
+        }
+        if (!Double.isFinite(qty) || qty <= 0 || Math.abs(qty - Math.rint(qty)) > 0.0000001) {
+            throw new IllegalArgumentException("Tracked bracket requires positive whole-share quantity");
+        }
+        try {
+            var order = objectMapper.createObjectNode()
+                .put("client_order_id", clientOrderId)
+                .put("symbol", symbol)
+                .put("qty", String.format(java.util.Locale.ROOT, "%.0f", qty))
+                .put("side", side)
+                .put("type", limitPrice == null ? "market" : "limit")
+                .put("time_in_force", "gtc")
+                .put("order_class", "bracket");
+            order.set("take_profit", objectMapper.createObjectNode().put(
+                "limit_price", String.format(java.util.Locale.ROOT, "%.2f", takeProfitPrice)));
+            var stop = objectMapper.createObjectNode().put(
+                "stop_price", String.format(java.util.Locale.ROOT, "%.2f", stopLossPrice));
+            if (stopLossLimitPrice != null) stop.put("limit_price", String.format(java.util.Locale.ROOT, "%.2f", stopLossLimitPrice));
+            order.set("stop_loss", stop);
+            if (limitPrice != null) order.put("limit_price", String.format(java.util.Locale.ROOT, "%.2f", limitPrice));
+            sendRequest(config.baseUrl() + "/v2/orders", "POST", objectMapper.writeValueAsString(order));
+            return BracketOrderResult.withBracket(symbol, qty);
+        } catch (Exception e) {
+            logger.error("Tracked bracket order {} failed or is unconfirmed; broker lookup required", clientOrderId, e);
+            return BracketOrderResult.failed(symbol, qty, "Broker submission not confirmed: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public JsonNode getOrderById(String orderId) {
+        if (orderId == null || !orderId.matches("[A-Za-z0-9-]{1,64}")) {
+            throw new IllegalArgumentException("Invalid broker order ID");
+        }
+        try {
+            return objectMapper.readTree(sendRequest(config.baseUrl() + "/v2/orders/"
+                + java.net.URLEncoder.encode(orderId, java.nio.charset.StandardCharsets.UTF_8), "GET"));
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot establish terminal status for order " + orderId, e);
+        }
+    }
+
+    @Override
+    public JsonNode getOrderByClientOrderId(String clientOrderId) {
+        if (clientOrderId == null || !clientOrderId.matches("[A-Za-z0-9_-]{1,48}")) {
+            throw new IllegalArgumentException("Invalid client_order_id");
+        }
+        try {
+            String url = config.baseUrl() + "/v2/orders:by_client_order_id?client_order_id="
+                + java.net.URLEncoder.encode(clientOrderId, java.nio.charset.StandardCharsets.UTF_8);
+            return objectMapper.readTree(sendRequest(url, "GET"));
+        } catch (Exception e) {
+            // 404 and network failures are both UNKNOWN here. Never silently
+            // release a durable order intent merely because the lookup failed.
+            throw new IllegalStateException("Cannot reconcile order " + clientOrderId, e);
         }
     }
 
@@ -644,6 +759,7 @@ public final class AlpacaClient implements BrokerClient {
             case "GET" -> builder.GET().build();
             case "POST" -> builder.POST(HttpRequest.BodyPublishers.ofString(body != null ? body : "{}")).build();
             case "DELETE" -> builder.DELETE().build();
+            case "PATCH" -> builder.method("PATCH", HttpRequest.BodyPublishers.ofString(body != null ? body : "{}")).build();
             default -> throw new IllegalArgumentException(String.format("Unsupported HTTP method: %s", method));
         };
 

@@ -87,6 +87,34 @@ class ResilientBrokerClientTest {
     }
 
     @Test
+    @DisplayName("ambiguous order submission failure is never retried automatically")
+    void testOrderSubmissionFailureDoesNotRetry() {
+        doThrow(new RuntimeException("read timeout after submission"))
+            .when(mockDelegate).placeOrder(eq("SPY"), eq(1.0), eq("buy"),
+                eq("market"), eq("day"), isNull());
+
+        assertThrows(RuntimeException.class, () ->
+            resilient.placeOrder("SPY", 1.0, "buy", "market", "day", null));
+
+        verify(mockDelegate, times(1))
+            .placeOrder("SPY", 1.0, "buy", "market", "day", null);
+    }
+
+    @Test
+    @DisplayName("ambiguous bracket submission failure is never retried automatically")
+    void testBracketSubmissionFailureDoesNotRetry() {
+        when(mockDelegate.placeBracketOrder(eq("SPY"), eq(1.0), eq("buy"),
+            eq(110.0), eq(95.0), isNull(), isNull()))
+            .thenThrow(new RuntimeException("network timeout"));
+
+        assertThrows(RuntimeException.class, () ->
+            resilient.placeBracketOrder("SPY", 1.0, "buy", 110.0, 95.0, null, null));
+
+        verify(mockDelegate, times(1))
+            .placeBracketOrder("SPY", 1.0, "buy", 110.0, 95.0, null, null);
+    }
+
+    @Test
     @DisplayName("cancelOrder delegates to underlying BrokerClient")
     void testCancelOrderDelegates() {
         resilient.cancelOrder("order-123");

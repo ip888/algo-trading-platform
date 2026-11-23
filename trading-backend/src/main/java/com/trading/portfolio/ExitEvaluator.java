@@ -128,18 +128,49 @@ final class ExitEvaluator {
      * Cancel all existing orders for a symbol to free up held shares before placing a new sell order.
      */
     void cancelExistingOrders(String profilePrefix, String symbol) {
+        // A cancellation acknowledgement is NOT terminal cancellation: a stop can
+        // fill while a replacement SELL is being prepared. Abort unless a fresh
+        // broker lookup confirms no open orders remain for this symbol.
         try {
             var openOrders = client.getOpenOrders(symbol);
-            if (openOrders.isArray()) {
-                for (var order : openOrders) {
-                    String orderId = order.get("id").asText();
-                    client.cancelOrder(orderId);
-                    logger.info("{} Canceled existing order {} for {} before exit", profilePrefix, orderId, symbol);
+            if (openOrders == null || !openOrders.isArray()) {
+                throw new IllegalStateException("Invalid broker open orders response");
+            }
+            for (var order : openOrders) {
+                String orderId = order.path("id").asText("");
+                if (orderId.isBlank()) throw new IllegalStateException("Open order has no broker ID");
+                client.cancelOrder(orderId);
+                // A DELETE response and absence from an open-order listing are
+                // not proof of cancellation: this order may be filling right now.
+                var finalOrder = client.getOrderById(orderId);
+                if (!isTerminalCancelWithoutFill(finalOrder)) {
+                    throw new IllegalStateException("Cancel/fill race or non-terminal order status for " + orderId);
                 }
             }
+            var afterCancel = client.getOpenOrders(symbol);
+            if (afterCancel == null || !afterCancel.isArray() || !afterCancel.isEmpty()) {
+                throw new IllegalStateException("Cancellation remains pending at broker");
+            }
         } catch (Exception e) {
-            logger.warn("{} Could not cancel existing orders for {}: {}", profilePrefix, symbol, e.getMessage());
+            logger.error("{} {}: cannot confirm terminal cancellation; replacement SELL blocked",
+                profilePrefix, symbol, e);
+            throw new IllegalStateException("Broker order cancellations not confirmed for " + symbol, e);
         }
+    }
+
+    /** Only terminal no-fill cancellation permits a replacement SELL. */
+    static boolean isTerminalCancelWithoutFill(com.fasterxml.jackson.databind.JsonNode order) {
+        return com.trading.api.ResilientBrokerClient.isConfirmedNoFillCancellation(order);
+    }
+
+    /**
+     * A quote is not a broker execution. Production tracked SELLs must book
+     * Alpaca's filled_avg_price. The quote fallback is for pre-existing mocked
+     * clients in unit tests that do not have a durable broker execution gateway.
+     */
+    private double filledExitPrice(String symbol, double quote) {
+        return client.hasDurableSellSafety()
+            ? client.getConfirmedSellFillPrice(symbol) : quote;
     }
 
     /**
@@ -366,7 +397,7 @@ final class ExitEvaluator {
         if (cb != null) cb.recordTrade(pnl);
 
         // Close trade in database
-        database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "signal_sell");
+        database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), pnl, brokerName, "signal_sell");
         updateDailyPnLFn.accept(profilePrefix, pnl);
 
         // Broadcast trade event
@@ -533,7 +564,7 @@ final class ExitEvaluator {
                                     double earningsPnl = (currentPrice - entryPrice) * qty;
                                     portfolio.setPosition(symbol, Optional.empty());
                                     clearPositionTracking(symbol);
-                                    database.closeTrade(symbol, Instant.now(), currentPrice, earningsPnl, brokerName, "pre_earnings");
+                                    database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), earningsPnl, brokerName, "pre_earnings");
                                     updateDailyPnLFn.accept(profilePrefix, earningsPnl);
                                     applyPostExitCooldown(symbol, currentPrice, earningsPnl, profilePrefix, "PRE_EARNINGS");
                                     TradingWebSocketHandler.broadcastActivity(
@@ -579,7 +610,7 @@ final class ExitEvaluator {
                             client.placeOrderDirect(symbol, halfQty, "sell", "market", "day", null);
                             double runnerPnl = (currentPrice - entryPrice) * halfQty;
                             updateDailyPnLFn.accept(profilePrefix, runnerPnl);
-                            database.recordPartialExitFill(symbol, brokerName, halfQty, currentPrice);
+                            database.recordPartialExitFill(symbol, brokerName, halfQty, filledExitPrice(symbol, currentPrice));
                             // Mark all partial levels done (1-3 are superseded; 4 = runner guard)
                             // and raise TP to 1.5× original so the runner half can run further
                             var marked = position.markPartialExit(1).markPartialExit(2)
@@ -625,7 +656,7 @@ final class ExitEvaluator {
                             double tdPnl = (currentPrice - entryPrice) * qty;
                             portfolio.setPosition(symbol, Optional.empty());
                             clearPositionTracking(symbol);
-                            database.closeTrade(symbol, Instant.now(), currentPrice, tdPnl, brokerName, "time_decay");
+                            database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), tdPnl, brokerName, "time_decay");
                             updateDailyPnLFn.accept(profilePrefix, tdPnl);
                             applyPostExitCooldown(symbol, currentPrice, tdPnl, profilePrefix, "TIME_DECAY");
                             TradingWebSocketHandler.broadcastActivity(
@@ -656,7 +687,7 @@ final class ExitEvaluator {
                                 double scalpTimeoutPnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
                                 clearPositionTracking(symbol);
-                                database.closeTrade(symbol, Instant.now(), currentPrice, scalpTimeoutPnl, brokerName, "scalp_timeout");
+                                database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), scalpTimeoutPnl, brokerName, "scalp_timeout");
                                 updateDailyPnLFn.accept(profilePrefix, scalpTimeoutPnl);
                                 applyPostExitCooldown(symbol, currentPrice, scalpTimeoutPnl, profilePrefix, "SCALP_TIMEOUT");
                                 TradingWebSocketHandler.broadcastActivity(
@@ -701,7 +732,7 @@ final class ExitEvaluator {
                                 logger.info("{} ✅ Partial exit executed: {} ({}% of position)",
                                     profilePrefix, symbol, String.format("%.1f", exitDecision.quantity() * 100));
                                 // Bank the proceeds on the DB lot so closeTrade() prices only the remainder.
-                                database.recordPartialExitFill(symbol, brokerName, qtyToExit, currentPrice);
+                                database.recordPartialExitFill(symbol, brokerName, qtyToExit, filledExitPrice(symbol, currentPrice));
                                 updateDailyPnLFn.accept(profilePrefix, (currentPrice - entryPrice) * qtyToExit);
                                 // Mark the partial exit level so it won't re-trigger next cycle
                                 if (exitDecision.partialLevel() > 0) {
@@ -718,7 +749,7 @@ final class ExitEvaluator {
                                 double tradePnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
                                 clearPositionTracking(symbol);
-                                database.closeTrade(symbol, Instant.now(), currentPrice, tradePnl, brokerName, "strategy_exit");
+                                database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), tradePnl, brokerName, "strategy_exit");
                                 updateDailyPnLFn.accept(profilePrefix, tradePnl);
                                 // Set re-entry cooldown after full exit
                                 riskGate.stopLossCooldowns().put(symbol, System.currentTimeMillis() + config.getStopLossCooldownMs());
@@ -812,7 +843,7 @@ final class ExitEvaluator {
                                 double pnl = (currentPrice - entryPrice) * qty;
                                 portfolio.setPosition(symbol, Optional.empty());
                                 clearPositionTracking(symbol);
-                                database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "regime_flip");
+                                database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), pnl, brokerName, "regime_flip");
                                 updateDailyPnLFn.accept(profilePrefix, pnl);
                                 applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "REGIME_EXIT");
                                 riskGate.pendingExitOrders().put(brokerName + ":" + symbol, System.currentTimeMillis());
@@ -935,7 +966,7 @@ final class ExitEvaluator {
                         double maxLossPnl = (currentPrice - entryPrice) * qty;
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
-                        database.closeTrade(symbol, Instant.now(), currentPrice, maxLossPnl, brokerName, "max_loss");
+                        database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), maxLossPnl, brokerName, "max_loss");
                         updateDailyPnLFn.accept(profilePrefix, maxLossPnl);
                         // Set re-entry cooldown + per-symbol cooldown + circuit-breaker tracking.
                         applyPostExitCooldown(symbol, currentPrice, maxLossPnl, profilePrefix, "MAX_LOSS_UNTRACKED");
@@ -1069,7 +1100,7 @@ final class ExitEvaluator {
                         client.placeOrder(symbol, exitQty, "sell", "market", "day", null);
 
                         double pnlDollars = (currentPrice - entryPrice) * exitQty;
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName, "eod_profit_lock");
+                        database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), pnlDollars, brokerName, "eod_profit_lock");
                         if (!eodDecision.isPartial()) {
                             portfolio.setPosition(symbol, Optional.empty());
                             clearPositionTracking(symbol);
@@ -1164,7 +1195,7 @@ final class ExitEvaluator {
                         CircuitBreakerState cbTp = riskGate.circuitBreakers().get(brokerName);
                         if (cbTp != null) cbTp.recordTrade(pnlDollars);
 
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnlDollars, brokerName, "take_profit");
+                        database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), pnlDollars, brokerName, "take_profit");
                         portfolio.setPosition(symbol, Optional.empty());
                         clearPositionTracking(symbol);
 
@@ -1386,7 +1417,7 @@ final class ExitEvaluator {
 
                 // Record trade close and update daily risk tracking
                 double currentPrice = Math.abs(pos.marketValue() / qty);
-                database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_positions_cleanup");
+                database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), pnl, brokerName, "max_positions_cleanup");
                 updateDailyPnLFn.accept(profilePrefix, pnl);
                 CircuitBreakerState cb = riskGate.circuitBreakers().get(brokerName);
                 if (cb != null) cb.recordTrade(pnl);
@@ -1487,7 +1518,7 @@ final class ExitEvaluator {
                     // Close DB record immediately so hasOpenTrade() returns false on the next
                     // cycle. Without this, orphan cleanup runs 1-2 cycles later, leaving a window
                     // where isGoodEntryTime() is true + hasOpenTrade() is false → re-entry.
-                    database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "eod_cleanup");
+                    database.closeTrade(symbol, Instant.now(), filledExitPrice(symbol, currentPrice), pnl, brokerName, "eod_cleanup");
 
                     TradingWebSocketHandler.broadcastActivity(
                         String.format("[%s] EOD EXIT: %s - Closed %.3f shares | P&L: $%.2f (%.2f%%)",

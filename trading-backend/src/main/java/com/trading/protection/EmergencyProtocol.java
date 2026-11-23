@@ -76,13 +76,27 @@ public class EmergencyProtocol {
         try {
             Map<String, Object> flattenResult = flattenAll();
             result.putAll(flattenResult);
-            result.put("success", true);
+            result.put("success", !flattenResult.containsKey("alpacaPositionsError")
+                && Boolean.TRUE.equals(flattenResult.get("alpacaOrdersCancelled"))
+                && ((java.util.List<?>) flattenResult.getOrDefault("alpacaPositions", java.util.List.of()))
+                    .stream().noneMatch(p -> p instanceof java.util.Map<?, ?> m
+                        && "failed".equals(m.get("status"))));
         } catch (Exception e) {
             logger.error("CRITICAL ERROR executing emergency protocol", e);
             result.put("success", false);
             result.put("error", e.getMessage());
         }
         
+        if (!Boolean.TRUE.equals(result.get("success"))) {
+            // A partial/unknown panic outcome must reach the operator, not just
+            // appear as an error in an ephemeral HTTP response or log buffer.
+            com.trading.bot.TradingBot.sendCriticalAlert(
+                "CRITICAL: trading panic incomplete",
+                "Emergency order cancellation or liquidation was not confirmed. "
+                    + "Inspect Alpaca positions and order statuses immediately. Reason: " + reason);
+            com.trading.bot.TradingBot.logSystemEvent(
+                "panic_incomplete", "Emergency broker reconciliation requires manual intervention");
+        }
         lastExecutionResult = result;
         return result;
     }
@@ -94,68 +108,89 @@ public class EmergencyProtocol {
      */
     private Map<String, Object> flattenAll() {
         Map<String, Object> result = new HashMap<>();
-        List<Map<String, Object>> alpacaClosed = new ArrayList<>();
-        
-        // ===== STEP 1: Cancel ALL Alpaca Orders =====
-        // Use directClient to bypass circuit breaker
-        logger.warn("STEP 1: Cancelling all Alpaca open orders (direct API - bypassing circuit breaker)...");
+        List<Map<String, Object>> closed = new ArrayList<>();
+
+        // Snapshot ALL open orders, including entry BUYs not yet represented as
+        // positions. A global cancel response is not proof that any of these
+        // orders reached the canceled state (they may fill during cancellation).
+        final List<String> beforeCancelIds = new ArrayList<>();
         try {
-            directClient.cancelAllOrders();
-            result.put("alpacaOrdersCancelled", true);
-            logger.info("✅ All Alpaca orders cancelled.");
+            var open = directClient.getOpenOrders(null);
+            if (open == null || !open.isArray()) {
+                throw new IllegalStateException("Global open-order snapshot unavailable");
+            }
+            for (var order : open) {
+                String id = order.path("id").asText("");
+                if (id.isBlank()) throw new IllegalStateException("Open order missing broker ID");
+                beforeCancelIds.add(id);
+            }
         } catch (Exception e) {
-            logger.error("❌ Failed to cancel Alpaca orders", e);
+            logger.error("PANIC: cannot snapshot ALL broker orders; automatic liquidation aborted", e);
             result.put("alpacaOrdersCancelled", false);
-            result.put("alpacaOrdersError", e.getMessage());
+            result.put("alpacaPositionsError", "Cannot establish open orders; manual intervention required");
+            result.put("alpacaPositions", closed);
+            return result;
         }
 
-        // ===== STEP 2: Close ALL Alpaca Positions =====
-        // Use directClient to bypass circuit breaker
-        logger.warn("STEP 2: Closing all Alpaca positions (direct API - bypassing circuit breaker)...");
         try {
-            List<Position> positions = directClient.getPositions();
-            if (positions.isEmpty()) {
-                logger.info("No open Alpaca positions to close.");
-            } else {
-                for (Position pos : positions) {
-                    try {
-                        logger.warn("Closing Alpaca position: {} ({} shares)", pos.symbol(), pos.quantity());
-                        directClient.placeOrder(
-                            pos.symbol(), 
-                            Math.abs(pos.quantity()), 
-                            pos.quantity() > 0 ? "sell" : "buy",
-                            "market", 
-                            "day", 
-                            null
-                        );
-                        alpacaClosed.add(Map.of(
-                            "symbol", pos.symbol(),
-                            "quantity", pos.quantity(),
-                            "platform", "alpaca",
-                            "status", "close_ordered"
-                        ));
-                    } catch (Exception e) {
-                        logger.error("❌ Failed to close Alpaca position for {}", pos.symbol(), e);
-                        alpacaClosed.add(Map.of(
-                            "symbol", pos.symbol(),
-                            "quantity", pos.quantity(),
-                            "platform", "alpaca",
-                            "status", "failed",
-                            "error", e.getMessage()
-                        ));
-                    }
+            directClient.cancelAllOrders();
+            for (String id : beforeCancelIds) {
+                var terminal = directClient.getOrderById(id);
+                if (!ResilientBrokerClient.isConfirmedNoFillCancellation(terminal)) {
+                    throw new IllegalStateException("Order " + id
+                        + " filled or cancellation remains pending");
                 }
             }
-            logger.info("✅ Alpaca close commands sent for {} positions.", alpacaClosed.size());
+            var openAfter = directClient.getOpenOrders(null);
+            if (openAfter == null || !openAfter.isArray() || !openAfter.isEmpty()) {
+                throw new IllegalStateException("Global order book not empty after cancellation");
+            }
+            result.put("alpacaOrdersCancelled", true);
         } catch (Exception e) {
-            logger.error("❌ Failed to fetch Alpaca positions for closure", e);
-            result.put("alpacaPositionsError", e.getMessage());
+            logger.error("PANIC: global cancellation unresolved; no replacement SELL", e);
+            result.put("alpacaOrdersCancelled", false);
+            result.put("alpacaOrdersError", "Cancel/fill race unresolved; manual intervention required");
+            result.put("alpacaPositions", closed);
+            return result;
         }
-        result.put("alpacaPositions", alpacaClosed);
-        
+
+        try {
+            // Fetch a new snapshot to avoid selling shares already removed by a
+            // protective stop while cancellation was being processed.
+            var currentPositions = directClient.getPositions();
+            if (currentPositions == null) throw new IllegalStateException("Broker positions unavailable");
+            for (Position pos : currentPositions) {
+                try {
+                    if (pos.quantity() <= 0.0) {
+                        throw new IllegalStateException("Short/flat position needs manual handling");
+                    }
+                    var open = directClient.getOpenOrders(pos.symbol());
+                    if (open == null || !open.isArray() || !open.isEmpty()) {
+                        throw new IllegalStateException("Pending orders remain for " + pos.symbol());
+                    }
+                    // Retains single-attempt idempotency while bypassing the
+                    // circuit breaker for emergency liquidation.
+                    resilientClient.placeOrderDirect(pos.symbol(), pos.quantity(),
+                        "sell", "market", "day", null);
+                    closed.add(Map.of(
+                        "symbol", pos.symbol(), "quantity", pos.quantity(),
+                        "platform", "alpaca", "status", "filled"));
+                } catch (Exception e) {
+                    logger.error("PANIC: SELL fill unconfirmed for {}", pos.symbol(), e);
+                    closed.add(Map.of(
+                        "symbol", pos.symbol(), "quantity", pos.quantity(),
+                        "platform", "alpaca", "status", "failed",
+                        "error", "Broker status unresolved; manual review required"));
+                }
+            }
+        } catch (Exception e) {
+            logger.error("PANIC: unable to obtain final broker positions", e);
+            result.put("alpacaPositionsError", "Broker positions unavailable; manual intervention required");
+        }
+        result.put("alpacaPositions", closed);
         return result;
     }
-    
+
     /**
      * Reset the emergency protocol so it can be triggered again.
      * Use with caution - only after system has stabilized.

@@ -57,7 +57,7 @@ describe('AccountOverview', () => {
     expect(screen.getByText('TOTAL EQUITY')).toBeInTheDocument();
     expect(screen.getByText('BUYING POWER')).toBeInTheDocument();
     expect(screen.getByText('AVAILABLE CASH')).toBeInTheDocument();
-    expect(screen.getByText('LIVE FEED')).toBeInTheDocument();
+    expect(screen.getByText('SESSION START')).toBeInTheDocument();
     
     // Check values are formatted with commas
     expect(screen.getByText('$75,000.00')).toBeInTheDocument();

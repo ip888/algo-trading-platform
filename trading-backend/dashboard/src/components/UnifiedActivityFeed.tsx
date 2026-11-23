@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useMemo } from 'react';
 import { useTradingStore } from '../store/tradingStore';
 import './UnifiedActivityFeed.css';
 
@@ -14,9 +14,7 @@ interface ActivityItem {
 
 export function UnifiedActivityFeed() {
   const { orderHistory, activityLog } = useTradingStore();
-  const [activities, setActivities] = useState<ActivityItem[]>([]);
-
-  useEffect(() => {
+  const activities = useMemo(() => {
     // Combine orders and activity log into unified feed
     const combined: ActivityItem[] = [];
 
@@ -52,7 +50,7 @@ export function UnifiedActivityFeed() {
     combined.sort((a, b) => b.timestamp - a.timestamp);
 
     // Keep last 20 items
-    setActivities(combined.slice(0, 20));
+    return combined.slice(0, 20);
   }, [orderHistory, activityLog]);
 
   const formatTime = (timestamp: number) => {

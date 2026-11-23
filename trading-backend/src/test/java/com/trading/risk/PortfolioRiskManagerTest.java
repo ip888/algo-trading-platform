@@ -27,6 +27,16 @@ class PortfolioRiskManagerTest {
     }
 
     @Test
+    void unknownBrokerExposureMustNeverBeReportedAsZero() throws Exception {
+        var broker = org.mockito.Mockito.mock(com.trading.api.BrokerClient.class,
+            org.mockito.Mockito.withSettings().mockMaker(org.mockito.MockMakers.SUBCLASS));
+        org.mockito.Mockito.when(broker.getPositions())
+            .thenThrow(new java.io.IOException("broker offline"));
+        assertThrows(IllegalStateException.class,
+            () -> riskManager.assessRisk(broker, INITIAL_CAPITAL));
+    }
+
+    @Test
     void shouldHaltTrading_whenDisabled_returnsAlwaysFalse() {
         var manager = new PortfolioRiskManager(configWith(false, STOP_LOSS_PCT), INITIAL_CAPITAL);
         assertFalse(manager.shouldHaltTrading(INITIAL_CAPITAL * 0.5)); // Even 50% loss allowed

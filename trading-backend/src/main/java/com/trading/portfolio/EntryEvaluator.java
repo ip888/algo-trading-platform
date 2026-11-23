@@ -85,6 +85,90 @@ final class EntryEvaluator {
         = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long STALE_ENTRY_ORDER_MS = 30 * 60 * 1000L; // 30 minutes
 
+    /**
+     * Conservative replay/settlement-lag guard. Invalid/missing timestamps are treated
+     * as unresolved BUYs, never as proof that another BUY is safe.
+     */
+    static boolean hasRecentBuy(com.fasterxml.jackson.databind.JsonNode orders, String symbol,
+                                Instant now, java.time.Duration window) {
+        if (orders == null || !orders.isArray()) {
+            throw new IllegalArgumentException("Broker order history is not an array");
+        }
+        for (var order : orders) {
+            if (!symbol.equalsIgnoreCase(order.path("symbol").asText("")) ||
+                !"buy".equalsIgnoreCase(order.path("side").asText(""))) continue;
+            String submitted = order.path("submitted_at").asText("");
+            if (submitted.isBlank()) return true;
+            try {
+                if (!Instant.parse(submitted).isBefore(now.minus(window))) return true;
+            } catch (java.time.format.DateTimeParseException e) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean canReleaseFilledExitIntent(com.fasterxml.jackson.databind.JsonNode order, double intendedQty) {
+        if (order == null || !order.isObject() || !"filled".equals(order.path("status").asText(""))
+            || !Double.isFinite(intendedQty) || intendedQty <= 0.0) return false;
+        try {
+            double filledQty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+            return Double.isFinite(filledQty) && filledQty + 0.0000001 >= intendedQty;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** Only a fully unfilled, terminal rejection/cancellation can free a BUY intent. */
+    static boolean canReleaseNoFillIntent(com.fasterxml.jackson.databind.JsonNode order) {
+        if (order == null || !order.isObject()) return false;
+        String status = order.path("status").asText("");
+        if (!("rejected".equals(status) || "canceled".equals(status) || "expired".equals(status))) return false;
+        try {
+            return Double.parseDouble(order.path("filled_qty").asText("NaN")) == 0.0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /**
+     * An entry is complete when the entire filled quantity was subsequently sold.
+     * This complements zero-fill cancellation and allows trading again after a full
+     * broker-confirmed round trip, without releasing intent on mere order acceptance.
+     * Retain the intent if history is incomplete, malformed, or partially sold.
+     */
+    static boolean canReleaseSettledIntent(com.fasterxml.jackson.databind.JsonNode buy,
+                                           com.fasterxml.jackson.databind.JsonNode history) {
+        if (buy == null || !buy.isObject() || history == null || !history.isArray()) return false;
+        if (!"buy".equalsIgnoreCase(buy.path("side").asText(""))) return false;
+        double filled;
+        Instant buyFilledAt;
+        try {
+            filled = Double.parseDouble(buy.path("filled_qty").asText("NaN"));
+            buyFilledAt = Instant.parse(buy.path("filled_at").asText(""));
+        } catch (NumberFormatException | java.time.format.DateTimeParseException e) {
+            return false;
+        }
+        if (!Double.isFinite(filled) || filled <= 0) return false;
+        double sold = 0.0;
+        for (var order : history) {
+            if (!"sell".equalsIgnoreCase(order.path("side").asText("")) ||
+                !buy.path("symbol").asText("").equalsIgnoreCase(order.path("symbol").asText(""))) continue;
+            if (!"filled".equals(order.path("status").asText(""))) continue;
+            try {
+                Instant soldAt = Instant.parse(order.path("filled_at").asText(""));
+                if (!soldAt.isBefore(buyFilledAt)) {
+                    double qty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+                    if (!Double.isFinite(qty) || qty <= 0) return false;
+                    sold += qty;
+                }
+            } catch (NumberFormatException | java.time.format.DateTimeParseException e) {
+                return false;
+            }
+        }
+        return sold >= filled - 0.0000001;
+    }
+
     EntryEvaluator(TradingProfile profile, Config config, TradeDatabase database,
                    ResilientBrokerClient client, PortfolioManager portfolio, RiskGate riskGate,
                    PDTProtection pdtProtection, MarketHoursFilter marketHoursFilter,
@@ -599,45 +683,110 @@ final class EntryEvaluator {
                     }
                 }
             } catch (Exception e) {
-                logger.debug("{} Correlation cap check failed for {}: {}", profilePrefix, symbol, e.getMessage());
+                // The concentration risk cap must not silently disappear when
+                // historical market data / correlation calculation is unavailable.
+                logger.error("{} Correlation exposure is UNKNOWN for {}; blocking new BUY",
+                    profilePrefix, symbol, e);
+                return new Blocked("portfolio correlation risk unavailable");
             }
         }
 
-        // ========== PENDING ORDER CHECK ==========
-        // Prevent duplicate orders for the same symbol (fixes order spam issue).
-        // If a pending entry order has been sitting >30 min (e.g. sandbox never fills),
-        // cancel it so the bot can re-evaluate and place a fresh order.
+        // Reconcile any durable BUY intent from a previous cycle or process.
+        // A submission timeout must never be mistaken for a rejected order.
         try {
-            var pendingOrders = client.getOpenOrders(symbol);
-            if (pendingOrders.isArray() && pendingOrders.size() > 0) {
-                long now = System.currentTimeMillis();
-                long firstSeen = pendingEntryTimestamps.computeIfAbsent(symbol, k -> now);
-                long ageMs = now - firstSeen;
-
-                if (ageMs >= STALE_ENTRY_ORDER_MS) {
-                    logger.warn("{} {} has {} stale pending entry order(s) ({}min old) — cancelling and re-evaluating",
-                        profilePrefix, symbol, pendingOrders.size(), ageMs / 60000);
-                    for (var order : pendingOrders) {
-                        String orderId = order.path("id").asText();
-                        if (!orderId.isBlank()) {
-                            try { client.cancelOrder(orderId); } catch (Exception ce) {
-                                logger.warn("{} Failed to cancel stale entry order {} for {}: {}",
-                                    profilePrefix, orderId, symbol, ce.getMessage());
-                            }
-                        }
-                    }
-                    pendingEntryTimestamps.remove(symbol);
-                    // Fall through to re-evaluate entry this cycle
-                } else {
-                    logger.info("{} {} already has {} pending order(s) ({}min old), skipping new entry",
-                        profilePrefix, symbol, pendingOrders.size(), ageMs / 60000);
-                    return new Blocked("pending order already exists");
+            var intent = database.getBrokerEntryIntent("alpaca", symbol);
+            if (intent != null) {
+                var order = client.getOrderByClientOrderId(intent.clientOrderId());
+                var brokerPositions = client.getPositions();
+                var openOrders = client.getOpenOrders(symbol);
+                if (brokerPositions == null || openOrders == null || !openOrders.isArray()
+                    || !openOrders.isEmpty() || brokerPositions.stream()
+                        .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() != 0.0)) {
+                    return new Blocked("cannot safely clear broker entry intent");
                 }
-            } else {
-                pendingEntryTimestamps.remove(symbol); // order filled/expired — clear tracking
+                if (!canReleaseNoFillIntent(order)) {
+                    var orderHistory = client.getOrderHistory(symbol, 50);
+                    if (!canReleaseSettledIntent(order, orderHistory)) {
+                        return new Blocked("unresolved broker entry intent " + intent.clientOrderId());
+                    }
+                }
+                database.releaseBrokerEntryIntent(intent.broker(), symbol, intent.clientOrderId());
             }
         } catch (Exception e) {
-            logger.debug("{} Could not check pending orders for {}: {}", profilePrefix, symbol, e.getMessage());
+            logger.error("{} {}: unresolved broker entry intent; blocking BUY", profilePrefix, symbol, e);
+            return new Blocked("broker intent reconciliation unavailable");
+        }
+
+        // A completed SELL is not itself proof that the account is flat.
+        // Keep the durable SELL intent locked until Alpaca reports both a fully
+        // filled exit and no remaining position or pending order on that symbol.
+        try {
+            var exitIntent = database.getBrokerExitIntent("alpaca", symbol);
+            if (exitIntent != null) {
+                var priorExit = client.getOrderByClientOrderId(exitIntent.clientOrderId());
+                var livePositions = client.getPositions();
+                var liveOrders = client.getOpenOrders(symbol);
+                if (!canReleaseFilledExitIntent(priorExit, exitIntent.quantity())
+                    || livePositions == null || liveOrders == null || !liveOrders.isArray()
+                    || !liveOrders.isEmpty() || livePositions.stream()
+                        .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() != 0.0)) {
+                    return new Blocked("SELL reconciliation incomplete; new BUY blocked");
+                }
+                database.releaseBrokerExitIntent("alpaca", symbol, exitIntent.clientOrderId());
+            }
+        } catch (Exception e) {
+            logger.error("{} {}: SELL state unknown, refusing BUY", profilePrefix, symbol, e);
+            return new Blocked("SELL reconciliation unavailable");
+        }
+
+        // ========== BROKER-AUTHORITATIVE ENTRY SAFETY ==========
+        // Never cancel an open order and buy again in the same cycle. A cancel request
+        // is asynchronous and can race with a fill. Broker reconciliation must establish
+        // terminal state before a replacement submission is considered.
+        try {
+            var positions = client.getPositions();
+            if (positions == null) {
+                return new Blocked("broker positions unavailable");
+            }
+            if (positions.stream().anyMatch(p -> symbol.equalsIgnoreCase(p.symbol()) && p.quantity() > 0.0)) {
+                return new Blocked("broker already holds position");
+            }
+
+            // Do not add new exposure while existing positions lack verified
+            // broker-native stop coverage. A configured stop price in the database
+            // is not evidence that a protective order exists at Alpaca.
+            for (var held : positions) {
+                if (held.quantity() <= 0.0) continue;
+                var protectiveOrders = client.getOpenOrders(held.symbol());
+                if (!com.trading.monitoring.PositionProtectionAuditor.hasSufficientBrokerStop(
+                        protectiveOrders, held.symbol(), held.quantity())) {
+                    logger.error("{} Blocking new BUY {}: {} quantity {} has no verified broker-side stop",
+                        profilePrefix, symbol, held.symbol(), held.quantity());
+                    return new Blocked("existing position lacks verified broker stop");
+                }
+            }
+
+            var pendingOrders = client.getOpenOrders(symbol);
+            if (pendingOrders == null || !pendingOrders.isArray()) {
+                return new Blocked("broker open-order response invalid");
+            }
+            if (!pendingOrders.isEmpty()) {
+                return new Blocked("broker has open order; await terminal status");
+            }
+
+            // Recent accepted orders can be absent from the open-order list while the
+            // position endpoint still lags a fill or cancellation. Block re-entry for a
+            // conservative window, including after process restart.
+            var recentOrders = client.getOrderHistory(symbol, 50);
+            if (recentOrders == null || !recentOrders.isArray()) {
+                return new Blocked("broker order history unavailable");
+            }
+            if (hasRecentBuy(recentOrders, symbol, Instant.now(), java.time.Duration.ofMinutes(30))) {
+                return new Blocked("recent BUY requires reconciliation before re-entry");
+            }
+        } catch (Exception e) {
+            logger.error("{} Blocking BUY for {}: broker state cannot be verified", profilePrefix, symbol, e);
+            return new Blocked("broker state unavailable");
         }
 
         // ========== EVENT-DAY (EARNINGS-GAP) GATE — single stocks ==========

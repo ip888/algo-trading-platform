@@ -37,7 +37,9 @@ export const Watchlist = () => {
       const res  = await fetch(`${CONFIG.API_BASE_URL}/api/watchlist`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const list: WatchlistItem[] = (data.watchlist || []).map((it: any) => ({
+      const watchlist: Partial<WatchlistItem>[] =
+        Array.isArray(data.watchlist) ? data.watchlist : [];
+      const list: WatchlistItem[] = watchlist.map(it => ({
         symbol:          String(it.symbol),
         inPosition:      Boolean(it.inPosition),
         isTarget:        Boolean(it.isTarget),
@@ -51,8 +53,8 @@ export const Watchlist = () => {
       baseRef.current = list;
       setItems(list);
       setStatus('ok');
-    } catch (e: any) {
-      setError(String(e?.message || 'Unknown error'));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Unknown error');
       setStatus('error');
     }
   };

@@ -3,6 +3,8 @@ import { useTradingStore } from '../store/tradingStore';
 
 export const useWebSocket = (url: string) => {
   const wsRef = useRef<WebSocket | null>(null);
+  const connectRef = useRef<() => void>(() => {});
+  const shouldReconnectRef = useRef(true);
   const { setConnected, setSystemStatus, updateMarketData, mergeMarketData, setLastUpdate } = useTradingStore();
 
   const connect = useCallback(() => {
@@ -23,16 +25,31 @@ export const useWebSocket = (url: string) => {
             case 'market_update':
             case 'MARKET_UPDATE':
               // Per-symbol price + signal update (price, change%, score, recommendation)
-              Object.entries(message.data).forEach(([symbol, data]: [string, any]) => {
-                updateMarketData(symbol, data);
+              Object.entries(message.data as Record<string, unknown>).forEach(([symbol, data]) => {
+                if (!data || typeof data !== 'object') return;
+                const item = data as Record<string, unknown>;
+                updateMarketData(symbol, {
+                  symbol,
+                  price: Number(item.price) || 0,
+                  change: Number(item.change) || 0,
+                  changePercent: Number(item.changePercent) || 0,
+                  volume: Number(item.volume) || 0,
+                  trend: String(item.trend || 'UNKNOWN'),
+                  score: Number(item.score) || 0,
+                });
               });
               break;
 
             case 'market_analysis':
               // Full market analysis: merge per-symbol scores/recommendations into existing marketData
               if (message.data?.scores) {
-                Object.entries(message.data.scores).forEach(([symbol, s]: [string, any]) => {
-                  mergeMarketData(symbol, { score: s.score, recommendation: s.recommendation });
+                Object.entries(message.data.scores as Record<string, unknown>).forEach(([symbol, value]) => {
+                  if (!value || typeof value !== 'object') return;
+                  const item = value as Record<string, unknown>;
+                  mergeMarketData(symbol, {
+                    score: Number(item.score) || 0,
+                    recommendation: String(item.recommendation || ''),
+                  });
                 });
               }
               break;
@@ -69,7 +86,7 @@ export const useWebSocket = (url: string) => {
         // Reconnect after 5 seconds
         setTimeout(() => {
           console.log('Attempting to reconnect...');
-          connect();
+          if (shouldReconnectRef.current) connectRef.current();
         }, 5000);
       };
       
@@ -81,14 +98,19 @@ export const useWebSocket = (url: string) => {
   }, [url, setConnected, setSystemStatus, updateMarketData, mergeMarketData, setLastUpdate]);
   
   useEffect(() => {
+    shouldReconnectRef.current = true;
+    connectRef.current = connect;
     connect();
-    
+
     return () => {
+      shouldReconnectRef.current = false;
       if (wsRef.current) {
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
     };
   }, [connect]);
   
-  return wsRef.current;
+  // Return the ref rather than reading mutable .current during render.
+  return wsRef;
 };

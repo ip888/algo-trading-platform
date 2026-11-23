@@ -119,34 +119,29 @@ public final class PositionProtectionAuditor {
 
             for (var position : positions) {
                 String symbol = position.symbol();
-                var orders = alpacaClient.getOpenOrders(symbol);
-
-                boolean hasStopLoss = false;
-                boolean hasTakeProfit = false;
-
-                if (orders.isArray()) {
-                    for (var order : orders) {
-                        String orderType = order.has("type") ? order.get("type").asText() : "";
-                        String orderClass = order.has("order_class") ? order.get("order_class").asText() : "";
-
-                        // Check for stop-loss orders
-                        if ("stop".equals(orderType) || "stop_limit".equals(orderType) ||
-                            "trailing_stop".equals(orderType)) {
-                            hasStopLoss = true;
-                        }
-
-                        // Check for take-profit (limit sell for long positions)
-                        if ("limit".equals(orderType) && "bracket".equals(orderClass)) {
-                            hasTakeProfit = true;
-                        }
-                    }
+                com.fasterxml.jackson.databind.JsonNode orders;
+                try {
+                    orders = alpacaClient.getOpenOrders(symbol);
+                } catch (Exception e) {
+                    logger.error("Protection state UNKNOWN for {}: broker order lookup failed", symbol, e);
+                    unprotected.add(symbol);
+                    recordUnprotectedPosition(symbol, position.quantity(),
+                        "broker order API unavailable; protection cannot be verified");
+                    continue;
                 }
+
+                // A stop must be an active SELL with enough remaining quantity.
+                // A BUY stop, stale/canceled order, or a stop for one share cannot
+                // protect an unrelated or larger position.
+                boolean hasStopLoss = hasSufficientBrokerStop(orders, symbol, position.quantity());
+                boolean hasTakeProfit = hasSufficientTakeProfit(orders, symbol, position.quantity());
 
                 boolean isFractional = Math.abs(position.quantity() - Math.floor(position.quantity())) > 0.0001;
 
                 if (!hasStopLoss || !hasTakeProfit) {
                     unprotected.add(symbol);
-                    unprotectedPositions.add(symbol);
+                    recordUnprotectedPosition(symbol, position.quantity(),
+                        "broker-side active protective orders missing or insufficient");
 
                     if (isFractional) {
                         logger.debug("{} is unprotected (fractional: {} shares) - expected behavior",
@@ -173,6 +168,43 @@ public final class PositionProtectionAuditor {
         }
 
         return unprotected;
+    }
+
+    public static boolean hasSufficientBrokerStop(com.fasterxml.jackson.databind.JsonNode orders,
+                                           String symbol, double positionQty) {
+        return hasCoveringOrder(orders, symbol, positionQty, true);
+    }
+
+    static boolean hasSufficientTakeProfit(com.fasterxml.jackson.databind.JsonNode orders,
+                                          String symbol, double positionQty) {
+        return hasCoveringOrder(orders, symbol, positionQty, false);
+    }
+
+    private static boolean hasCoveringOrder(com.fasterxml.jackson.databind.JsonNode orders,
+                                            String symbol, double positionQty, boolean stop) {
+        if (orders == null || !orders.isArray() || !Double.isFinite(positionQty) || positionQty <= 0) return false;
+        for (var order : orders) {
+            if (!symbol.equalsIgnoreCase(order.path("symbol").asText("")) ||
+                !"sell".equalsIgnoreCase(order.path("side").asText(""))) continue;
+            String status = order.path("status").asText("");
+            // HELD bracket legs are not active protection until the parent
+            // order fills. ACCEPTED may not yet be a working stop either.
+            if (!("new".equals(status) || "partially_filled".equals(status))) continue;
+            String type = order.path("type").asText("");
+            boolean correctType = stop
+                ? ("stop".equals(type) || "stop_limit".equals(type) || "trailing_stop".equals(type))
+                : "limit".equals(type);
+            if (!correctType) continue;
+            try {
+                double qty = Double.parseDouble(order.path("qty").asText("NaN"));
+                double filledQty = Double.parseDouble(order.path("filled_qty").asText("0"));
+                if (Double.isFinite(qty) && Double.isFinite(filledQty)
+                    && qty - filledQty + 0.0000001 >= positionQty) return true;
+            } catch (NumberFormatException e) {
+                // Unknown quantity cannot prove protection.
+            }
+        }
+        return false;
     }
 
     /**

@@ -15,7 +15,7 @@ import java.util.concurrent.locks.StampedLock;
  * Thread-Safety: Uses StampedLock with optimistic reads for high-throughput read operations
  * and write locks for mutations. This is significantly faster than synchronized methods.
  */
-public class TradeDatabase {
+public class TradeDatabase implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(TradeDatabase.class);
 
     private final Connection connection;
@@ -177,6 +177,35 @@ public class TradeDatabase {
             "Schema migration: Added regime_log table");
         runMigration("CREATE INDEX IF NOT EXISTS idx_regime_ts ON regime_log(ts)",
             "Schema migration: Added idx_regime_ts index");
+
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS broker_entry_intents (
+                broker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (broker, symbol)
+            )""", "P0: restart-safe broker entry intents");
+
+        runMigration("""
+            CREATE TABLE IF NOT EXISTS broker_exit_intents (
+                broker TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                client_order_id TEXT NOT NULL UNIQUE,
+                quantity REAL NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (broker, symbol)
+            )""", "P0: restart-safe broker sell intents");
+
+        runMigration("ALTER TABLE broker_entry_intents ADD COLUMN intended_qty REAL",
+            "P0: persist intended entry quantity");
+        runMigration("ALTER TABLE broker_entry_intents ADD COLUMN intended_stop REAL",
+            "P0: persist original broker stop level");
+        runMigration("ALTER TABLE broker_entry_intents ADD COLUMN intended_take_profit REAL",
+            "P0: persist original broker take-profit level");
 
         // Prune old observability data on startup so the volume doesn't grow unbounded.
         pruneOldObservabilityData();
@@ -1318,6 +1347,173 @@ public class TradeDatabase {
             return "\"" + str.replace("\"", "\"\"") + "\"";
         }
         return str;
+    }
+
+    // P0: persisted, fail-closed order intents. Never treat a failed DB write as
+    // permission to submit a broker order. One active intent per broker+symbol.
+    public record BrokerEntryIntent(String broker, String symbol, String clientOrderId,
+                                    String state, double intendedQty, double stopLoss, double takeProfit) {}
+
+    public boolean claimBrokerEntryIntent(String broker, String symbol, String clientOrderId) {
+        return claimBrokerEntryIntent(broker, symbol, clientOrderId, 0, 0, 0);
+    }
+
+    public boolean claimBrokerEntryIntent(String broker, String symbol, String clientOrderId,
+                                          double quantity, double stopLoss, double takeProfit) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            INSERT OR IGNORE INTO broker_entry_intents(
+                broker, symbol, client_order_id, state, intended_qty, intended_stop, intended_take_profit)
+            VALUES (?, ?, ?, 'SUBMITTING', ?, ?, ?)
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, clientOrderId);
+            ps.setDouble(4, quantity);
+            ps.setDouble(5, stopLoss);
+            ps.setDouble(6, takeProfit);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot persist broker entry intent; no order may be sent", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    public BrokerEntryIntent getBrokerEntryIntent(String broker, String symbol) {
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement("""
+            SELECT client_order_id, state, intended_qty, intended_stop, intended_take_profit FROM broker_entry_intents
+            WHERE broker = ? AND symbol = ?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            try (var rs = ps.executeQuery()) {
+                return rs.next() ? new BrokerEntryIntent(
+                    broker, symbol, rs.getString(1), rs.getString(2),
+                    rs.getDouble(3), rs.getDouble(4), rs.getDouble(5)) : null;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot verify broker entry intent", e);
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    public void updateBrokerEntryIntent(String broker, String symbol, String clientOrderId, String state) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            UPDATE broker_entry_intents SET state = ?, updated_at = datetime('now')
+            WHERE broker = ? AND symbol = ? AND client_order_id = ?
+            """)) {
+            ps.setString(1, state);
+            ps.setString(2, broker);
+            ps.setString(3, symbol);
+            ps.setString(4, clientOrderId);
+            if (ps.executeUpdate() != 1) throw new IllegalStateException("Broker entry intent missing");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot persist broker entry state", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /**
+     * Only release a claimed entry after confirmed no-fill terminal state and
+     * independent broker positions/open-orders checks. Never delete after a timeout.
+     */
+    public void releaseBrokerEntryIntent(String broker, String symbol, String clientOrderId) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            DELETE FROM broker_entry_intents
+            WHERE broker = ? AND symbol = ? AND client_order_id = ?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, clientOrderId);
+            if (ps.executeUpdate() != 1) throw new IllegalStateException("Broker entry intent missing");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot release broker entry intent", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    /** Durable unfilled SELL submission; never send twice after timeout. */
+    public record BrokerExitIntent(String clientOrderId, double quantity, String state) {}
+
+    public boolean claimBrokerExitIntent(String broker, String symbol, String id, double quantity) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            INSERT OR IGNORE INTO broker_exit_intents(broker,symbol,client_order_id,quantity,state)
+            VALUES (?,?,?,?, 'SUBMITTING')
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, id);
+            ps.setDouble(4, quantity);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot persist SELL intent, refusing broker order", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    public BrokerExitIntent getBrokerExitIntent(String broker, String symbol) {
+        long stamp = lock.readLock();
+        try (var ps = connection.prepareStatement("""
+            SELECT client_order_id, quantity, state FROM broker_exit_intents
+            WHERE broker=? AND symbol=?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            try (var rs = ps.executeQuery()) {
+                return rs.next() ? new BrokerExitIntent(rs.getString(1), rs.getDouble(2), rs.getString(3)) : null;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot retrieve durable SELL intent", e);
+        } finally {
+            lock.unlockRead(stamp);
+        }
+    }
+
+    /**
+     * Mark a confirmed SELL fill as consumed exactly once. A second caller must
+     * never reuse that same broker execution as its own successful SELL.
+     */
+    public boolean consumeBrokerExitFill(String broker, String symbol, String id) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            UPDATE broker_exit_intents SET state = 'CONSUMED'
+            WHERE broker = ? AND symbol = ? AND client_order_id = ?
+              AND state <> 'CONSUMED'
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, id);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot atomically consume confirmed broker SELL fill", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    public void releaseBrokerExitIntent(String broker, String symbol, String id) {
+        long stamp = lock.writeLock();
+        try (var ps = connection.prepareStatement("""
+            DELETE FROM broker_exit_intents WHERE broker=? AND symbol=? AND client_order_id=?
+            """)) {
+            ps.setString(1, broker);
+            ps.setString(2, symbol);
+            ps.setString(3, id);
+            if (ps.executeUpdate() != 1) throw new IllegalStateException("SELL intent missing");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot release durable SELL intent", e);
+        } finally {
+            lock.unlockWrite(stamp);
+        }
     }
 
     // ── bot_state persistence ────────────────────────────────────────────────

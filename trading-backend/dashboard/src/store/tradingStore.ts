@@ -278,7 +278,7 @@ export const useTradingStore = create<TradingStore>((set) => ({
       const newEntry = {
         id: Math.random().toString(36).substr(2, 9),
         message,
-        level: level as any,
+        level: (['INFO', 'WARN', 'ERROR', 'SUCCESS'].includes(level) ? level : 'INFO') as ActivityLogEntry['level'],
         timestamp: Date.now()
       };
       // Keep last 50 messages

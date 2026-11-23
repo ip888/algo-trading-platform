@@ -214,70 +214,73 @@ public final class DashboardController {
      */
     private void closePosition(Context ctx) {
         String symbol = ctx.pathParam("symbol");
-        logger.info("🔧 Manual close requested for {}", symbol);
-        
+        logger.warn("Manual close requested for {}", symbol);
+        if (alpacaClient == null) {
+            ctx.status(503).json(Map.of("error", "Durable broker execution gateway unavailable"));
+            return;
+        }
         try {
-            var client = cachedAlpacaClient;
-            var positions = client.getPositions();
-            
-            // Find the position
+            var positions = alpacaClient.getPositions();
             var position = positions.stream()
                 .filter(p -> p.symbol().equalsIgnoreCase(symbol))
                 .findFirst();
-            
             if (position.isEmpty()) {
-                ctx.status(404).json(Map.of("error", "Position not found: " + symbol));
+                ctx.status(404).json(Map.of("error", "No broker position for " + symbol));
                 return;
             }
-            
             var pos = position.get();
-            double qty = pos.quantity();
-            double entryPrice = pos.avgEntryPrice();
-            double currentPrice = Math.abs(pos.marketValue() / qty);
-            double pnlDollars = (currentPrice - entryPrice) * qty;
-            double pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100.0;
-            
-            // Cancel any existing orders first to free up held shares
-            try {
-                var openOrders = client.getOpenOrders(symbol);
-                if (openOrders.isArray()) {
-                    for (var order : openOrders) {
-                        String orderId = order.get("id").asText();
-                        client.cancelOrder(orderId);
-                        logger.info("Canceled existing order {} for {} before manual close", orderId, symbol);
-                    }
-                    if (openOrders.size() > 0) {
-                        Thread.sleep(500); // Brief delay for order cancellation to settle
-                    }
-                }
-            } catch (Exception cancelEx) {
-                logger.warn("Could not cancel existing orders for {}: {}", symbol, cancelEx.getMessage());
+            if (pos.quantity() <= 0) {
+                ctx.status(409).json(Map.of("error", "Unsupported short or zero position; manual review required"));
+                return;
             }
 
-            // Place sell order
-            client.placeOrder(symbol, qty, "sell", "market", "day", null);
-            
-            // Record in DB
-            database.closeTrade(symbol, java.time.Instant.now(), currentPrice, pnlDollars, "alpaca");
-            
-            logger.info("✅ Manually closed {}: qty={}, entry=${}, exit=${}, P&L=${} ({}%)",
-                symbol, qty, entryPrice, currentPrice, String.format("%.2f", pnlDollars), String.format("%.2f", pnlPercent));
-            
-            ctx.json(Map.of(
-                "success", true,
-                "symbol", symbol,
-                "quantity", qty,
-                "entryPrice", entryPrice,
-                "exitPrice", currentPrice,
-                "pnlDollars", pnlDollars,
-                "pnlPercent", pnlPercent
-            ));
+            // Never assume DELETE is final. A stop may fill while cancellation
+            // is pending; only a second clean broker snapshot permits a new SELL.
+            var openOrders = alpacaClient.getOpenOrders(symbol);
+            if (openOrders == null || !openOrders.isArray()) {
+                throw new IllegalStateException("Broker order state unavailable");
+            }
+            for (var order : openOrders) {
+                String id = order.path("id").asText("");
+                if (id.isBlank()) throw new IllegalStateException("Open order missing broker ID");
+                alpacaClient.cancelOrder(id);
+                // A successful DELETE is merely a cancellation request. A stop
+                // might have filled while the cancellation was in flight.
+                var canceled = alpacaClient.getOrderById(id);
+                if (!com.trading.api.ResilientBrokerClient.isConfirmedNoFillCancellation(canceled)) {
+                    ctx.status(409).json(Map.of("error",
+                        "Order " + id + " not confirmed canceled without fill; no replacement SELL"));
+                    return;
+                }
+            }
+            var remainingOrders = alpacaClient.getOpenOrders(symbol);
+            if (remainingOrders == null || !remainingOrders.isArray() || !remainingOrders.isEmpty()) {
+                ctx.status(409).json(Map.of("error", "Cancellation still pending at Alpaca; no SELL sent"));
+                return;
+            }
+            // Checked again after cancellation to avoid selling an already closed
+            // position. The durable gateway also verifies broker quantity.
+            var current = alpacaClient.getPositions().stream()
+                .filter(p -> p.symbol().equalsIgnoreCase(symbol))
+                .findFirst();
+            if (current.isEmpty() || current.get().quantity() <= 0) {
+                ctx.status(409).json(Map.of("error", "Broker position changed during cancellation; resync required"));
+                return;
+            }
+            // placeOrder succeeds only once the tracked sell has a confirmed full fill.
+            alpacaClient.placeOrder(symbol, current.get().quantity(), "sell", "market", "day", null);
+            // The normal reconciliation process writes the actual broker exit
+            // price and timestamp to the DB; do not fabricate P&L from a quote.
+            ctx.json(Map.of("success", true, "status", "broker_fill_confirmed",
+                "symbol", symbol, "quantity", current.get().quantity(),
+                "message", "Broker sell filled; accounting reconciliation pending"));
         } catch (Exception e) {
-            logger.error("❌ Failed to close {}: {}", symbol, e.getMessage(), e);
-            ctx.status(500).json(Map.of("error", e.getMessage()));
+            logger.error("Manual close unresolved for {}; check broker order state before repeating", symbol, e);
+            ctx.status(409).json(Map.of("success", false, "status", "unconfirmed",
+                "error", "Broker close is not confirmed. Check orders and fills before retry."));
         }
     }
-    
+
     /**
      * Profit targets endpoint for UI - returns position profit tracking data.
      */

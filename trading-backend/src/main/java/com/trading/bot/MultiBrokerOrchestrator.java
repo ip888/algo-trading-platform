@@ -51,6 +51,22 @@ public final class MultiBrokerOrchestrator {
     // ── Public entry point ────────────────────────────────────────────────────
 
     public void run() {
+        // Durable order IDs must survive redeployment. The old Cloud Run script
+        // uses ephemeral local storage: continuing live there would erase
+        // ambiguous order intents and permit duplicate exposure after restart.
+        if (!config.isTestModeEnabled()) {
+            String dataDir = System.getenv("DATA_DIR");
+            if (dataDir == null || dataDir.isBlank()) {
+                throw new IllegalStateException(
+                    "Live execution requires persistent DATA_DIR volume for broker order intent ledger");
+            }
+            java.nio.file.Path durableDir = java.nio.file.Path.of(dataDir);
+            if (!java.nio.file.Files.isDirectory(durableDir) ||
+                !java.nio.file.Files.isWritable(durableDir)) {
+                throw new IllegalStateException("Durable trading database directory is unavailable: " + dataDir);
+            }
+        }
+
         Map<String, Double> allocation = parseAllocation(config.getBrokersAllocation());
         if (allocation.isEmpty()) {
             logger.error("MultiBrokerOrchestrator: BROKERS env var is empty or invalid. "
@@ -127,6 +143,8 @@ public final class MultiBrokerOrchestrator {
 
             var resilient = new ResilientBrokerClient(rawClient,
                 MetricsService.getInstance().getRegistry());
+            // All production SELLs must pass through the durable idempotency ledger.
+            resilient.enableDurableSellSafety(database, brokerName);
 
             // Name the profile after the broker so logs are unambiguous
             TradingProfile base = profileIndex == 0
@@ -166,6 +184,7 @@ public final class MultiBrokerOrchestrator {
         // Dashboard — uses Alpaca for health checks and market data display
         var alpacaResilient   = new ResilientBrokerClient(alpacaDataClient,
             MetricsService.getInstance().getRegistry());
+        alpacaResilient.enableDurableSellSafety(database, "alpaca");
         var dashboardAnalyzer = new MarketAnalyzer(alpacaDataClient);
         var dashboardVolFilter = new VolatilityFilter(alpacaDataClient);
         var dashboard = new DashboardServer(database,

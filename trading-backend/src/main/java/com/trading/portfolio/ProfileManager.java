@@ -676,16 +676,22 @@ public class ProfileManager implements Runnable {
             riskGate.setPortfolioStopLossHaltActive(true);
             logger.error("{} 🛑 PORTFOLIO STOP LOSS - Halting new entries (protective exits already checked)", profilePrefix);
 
-            // Assess and log portfolio risk
-            var risk = portfolioRiskManager.assessRisk(client.getDelegate(), accountEquity);
-            logger.error("{} {}", profilePrefix, risk.getSummary());
+            // Risk telemetry errors cannot undo an already triggered loss halt.
+            String riskSummary;
+            try {
+                riskSummary = portfolioRiskManager.assessRisk(client.getDelegate(), accountEquity).getSummary();
+            } catch (Exception riskError) {
+                riskSummary = "BROKER PORTFOLIO RISK UNKNOWN — loss halt remains active";
+                logger.error("{} {}", profilePrefix, riskSummary, riskError);
+            }
+            logger.error("{} {}", profilePrefix, riskSummary);
 
             TradingWebSocketHandler.broadcastActivity(
                 String.format("[%s] PORTFOLIO STOP LOSS HIT - New entries halted", profile.name()),
                 "ERROR"
             );
             if (!lastPortfolioStopLossHalted) {
-                com.trading.bot.TradingBot.logSystemEvent("portfolio_stop_loss_halted", risk.getSummary());
+                com.trading.bot.TradingBot.logSystemEvent("portfolio_stop_loss_halted", riskSummary);
                 lastPortfolioStopLossHalted = true;
             }
 
@@ -954,46 +960,27 @@ public class ProfileManager implements Runnable {
                 // Cancel existing orders to free up held shares
                 exitEvaluator.cancelExistingOrders(profilePrefix, symbol);
 
-                // Retry up to 3 times if order fails
-                int maxAttempts = 3;
-                int attempt = 0;
-                boolean success = false;
-                Exception lastError = null;
-                while (attempt < maxAttempts && !success) {
-                    try {
-                        client.placeOrder(symbol, qty, "sell", "market", "day", null);
-                        logger.info("{} ✅ Max loss exit order placed for {} (attempt {}/{})", profilePrefix, symbol, attempt+1, maxAttempts);
-                        // Record trade close
-                        double exitPnl = pos.calculatePnL(currentPrice);
-                        database.closeTrade(symbol, Instant.now(), currentPrice, exitPnl, brokerName, "max_loss");
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] MAX LOSS EXIT: %s (%.2f%% loss) [attempt %d]",
-                                profile.name(), symbol, lossPercent, attempt+1),
-                            "WARN"
-                        );
-                        portfolio.setPosition(symbol, Optional.empty());
-                        exitEvaluator.clearPositionTracking(symbol);
-                        exitEvaluator.applyPostExitCooldown(symbol, currentPrice, exitPnl, profilePrefix, "max loss");
-                        success = true;
-                        return;
-                    } catch (Exception e) {
-                        lastError = e;
-                        logger.error("{} Failed to place max loss exit order for {} (attempt {}/{}): {}", profilePrefix, symbol, attempt+1, maxAttempts, e.getMessage());
-                        try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
-                        attempt++;
-                    }
-                }
-                if (!success) {
+                // Never blindly retry an ambiguous sell timeout. The tracked SELL
+                // gateway reconciles its durable client_order_id before returning.
+                try {
+                    client.placeOrder(symbol, qty, "sell", "market", "day", null);
+                    var filled = client.getOrderHistory(symbol, 50);
+                    logger.info("{} Max-loss SELL confirmed at broker for {} (order history entries {})",
+                        profilePrefix, symbol, filled == null ? 0 : filled.size());
+                    // The reconciliation cycle records final broker fill price/P&L.
+                    // Do not close a trade at the last quote or fabricate a fill.
+                    return;
+                } catch (Exception e) {
+                    logger.error("{} MAX LOSS SELL unresolved for {}. Inspect broker order status; no blind retry.",
+                        profilePrefix, symbol, e);
                     TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] CRITICAL: Max loss exit FAILED for %s after %d attempts. Manual intervention required!", 
-                            profile.name(), symbol, maxAttempts),
-                        "ERROR"
-                    );
-                    logger.error("{} CRITICAL: Max loss exit FAILED for {} after {} attempts. Last error: {}", profilePrefix, symbol, maxAttempts, lastError != null ? lastError.getMessage() : "none");
+                        String.format("[%s] CRITICAL: max-loss SELL unconfirmed for %s; broker reconciliation required",
+                            profile.name(), symbol), "ERROR");
+                    return;
                 }
             }
-            
-            // Check 2: Time-Based Exit (if not profitable)
+
+                        // Check 2: Time-Based Exit (if not profitable)
             if (pos.isHoldTimeLimitExceeded(config.getMaxHoldTimeHours())) {
                 double pnl = pos.calculatePnL(currentPrice);
                 
@@ -1008,7 +995,9 @@ public class ProfileManager implements Runnable {
                         logger.info("{} ✅ Time-based exit order placed for {}", profilePrefix, symbol);
 
                         // Record trade close
-                        database.closeTrade(symbol, Instant.now(), currentPrice, pnl, brokerName, "max_hold_time");
+                        database.closeTrade(symbol, Instant.now(),
+                            client.hasDurableSellSafety() ? client.getConfirmedSellFillPrice(symbol) : currentPrice,
+                            pnl, brokerName, "max_hold_time");
                         portfolio.setPosition(symbol, Optional.empty());
                         exitEvaluator.clearPositionTracking(symbol);
                         exitEvaluator.applyPostExitCooldown(symbol, currentPrice, pnl, profilePrefix, "time-based");
@@ -1243,6 +1232,17 @@ public class ProfileManager implements Runnable {
         }
     }
 
+    /** Temporary P0 guard until fractional fill-driven stop placement is implemented. */
+    static boolean isFractionalQuantity(double quantity) {
+        return !Double.isFinite(quantity) || quantity <= 0.0 ||
+            Math.abs(quantity - Math.rint(quantity)) > 0.0000001;
+    }
+
+    /** Fail closed on an unsuccessful or missing bracket acknowledgement. */
+    static boolean bracketSubmissionUnconfirmed(com.trading.api.model.BracketOrderResult result) {
+        return result == null || !result.success();
+    }
+
     private void handleBuy(String symbol, double currentPrice, double equity,
                           double buyingPower, double currentVix, MarketRegime regime, String profilePrefix) throws Exception {
 
@@ -1291,7 +1291,21 @@ public class ProfileManager implements Runnable {
         double stopLoss = sized.stopLoss();
         double takeProfit = sized.takeProfit();
 
-        var newPosition = new TradePosition(
+        // P0 safety: Alpaca's fractional entry is a simple order without native
+        // bracket protection. The legacy path tried a native stop before the BUY
+        // had filled, potentially leaving a filled position unprotected. Until
+        // fill-driven fractional stop placement is implemented and verified,
+        // reject fractional live entries instead of trading without broker stops.
+        if (testSimulator == null && isFractionalQuantity(positionSize)) {
+            logger.warn("{} {}: FRACTIONAL LIVE BUY BLOCKED (qty={}). Broker-confirmed protective-stop workflow not implemented.",
+                profilePrefix, symbol, positionSize);
+            TradingWebSocketHandler.broadcastActivity(
+                String.format("[%s] FRACTIONAL BUY BLOCKED: %s. Safety requires confirmed fill and broker stop.",
+                    profile.name(), symbol), "WARN");
+            return;
+        }
+
+        TradePosition newPosition = new TradePosition(
             symbol,
             currentPrice,
             positionSize,
@@ -1303,6 +1317,10 @@ public class ProfileManager implements Runnable {
         logger.info("{} {}: Position tracked: Entry=${}, StopLoss=${}, TakeProfit={}",
             profilePrefix, symbol, currentPrice, stopLoss, takeProfit);
         
+        // Used only after exact broker fill confirmation.
+        String submittedClientOrderId = null;
+        double verifiedFillPrice = currentPrice;
+
         // Place order (skip if in test mode)
         if (testSimulator == null) {
             // Calculate order value
@@ -1342,51 +1360,34 @@ public class ProfileManager implements Runnable {
             var orderDecision = orderTypeSelector.selectOrderType(orderCtx);
             Double entryLimitPrice = orderDecision.limitPrice();
 
-            // Place bracket order and check if server-side protection was applied
-            var bracketResult = client.placeBracketOrder(symbol, positionSize, "buy",
-                takeProfit, stopLoss, null, entryLimitPrice);
+            // Durable intent must be committed BEFORE the network request. On timeout
+            // retain this exact identifier and require broker reconciliation.
+            String clientOrderId = "atp_" + java.util.UUID.randomUUID().toString().replace("-", "");
+            submittedClientOrderId = clientOrderId;
+            if (!database.claimBrokerEntryIntent(brokerName, symbol, clientOrderId,
+                    positionSize, stopLoss, takeProfit)) {
+                logger.error("{} {}: unresolved broker entry intent exists; refusing additional BUY",
+                    profilePrefix, symbol);
+                return;
+            }
+            var bracketResult = client.placeBracketOrderTracked(symbol, positionSize, "buy",
+                takeProfit, stopLoss, null, entryLimitPrice, clientOrderId);
 
-            if (!bracketResult.success()) {
-                // Order failed completely - try simple market order as fallback
-                logger.warn("{} {}: Bracket order failed ({}), trying market order",
-                    profilePrefix, symbol, bracketResult.message());
-
-                try {
-                    client.placeOrder(symbol, positionSize, "buy", "market", "day", null);
-                    broadcastOrderData(symbol, positionSize, "buy", "market", "filled", currentPrice);
-
-                    // Market order succeeded but NO bracket protection
-                    TradingWebSocketHandler.broadcastActivity(
-                        String.format("[%s] ⚠️ BUY ORDER FILLED (No Protection): %s %.3f shares @ $%.2f",
-                            profile.name(), symbol, positionSize, currentPrice),
-                        "WARN"
-                    );
-
-                    // Record as unprotected position
-                    logger.warn("{} {}: ⚠️ Position has NO server-side SL/TP protection!",
-                        profilePrefix, symbol);
-                } catch (Exception marketOrderError) {
-                    if (marketOrderError.getMessage() != null &&
-                        marketOrderError.getMessage().contains("insufficient buying power")) {
-                        logger.error("{} {}: ❌ Order FAILED - Insufficient buying power",
-                            profilePrefix, symbol);
-
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ❌ BUY ORDER FAILED: %s - Insufficient buying power (Tried: $%.2f, Available: $%.2f)",
-                                profile.name(), symbol, positionSize * currentPrice, buyingPower),
-                            "ERROR"
-                        );
-                        return;
-                    } else {
-                        TradingWebSocketHandler.broadcastActivity(
-                            String.format("[%s] ❌ BUY ORDER FAILED: %s - %s",
-                                profile.name(), symbol, marketOrderError.getMessage()),
-                            "ERROR"
-                        );
-                        throw marketOrderError;
-                    }
-                }
-            } else if (bracketResult.needsClientSideMonitoring()) {
+            if (bracketSubmissionUnconfirmed(bracketResult)) {
+                // An API timeout/error does not prove the broker rejected this order.
+                // A market-order fallback could buy twice and bypass server-side stops.
+                // Do not mutate the internal portfolio: reconcile broker orders/fills first.
+                String failureReason = bracketResult == null ? "null bracket response" : bracketResult.message();
+                logger.error("{} {}: BRACKET SUBMISSION UNCONFIRMED ({}). No fallback BUY; broker reconciliation required before any new entry.",
+                    profilePrefix, symbol, failureReason);
+                TradingWebSocketHandler.broadcastActivity(
+                    String.format("[%s] 🚨 BRACKET ORDER UNCONFIRMED: %s. No fallback order sent; verify broker orders and fills.",
+                        profile.name(), symbol),
+                    "ERROR");
+                return;
+            }
+            database.updateBrokerEntryIntent(brokerName, symbol, clientOrderId, "ACKNOWLEDGED");
+            if (bracketResult.needsClientSideMonitoring()) {
                 // Order succeeded but fractional — Alpaca doesn't support bracket orders for fractions.
                 // Place a separate native GTC stop-market order to provide crash-safe protection.
                 // This order persists on Alpaca even if the bot restarts.
@@ -1417,13 +1418,53 @@ public class ProfileManager implements Runnable {
                 logger.info("{} {}: ✅ Bracket order with full SL/TP protection", profilePrefix, symbol);
 
                 TradingWebSocketHandler.broadcastActivity(
-                    String.format("[%s] ✅ BUY ORDER FILLED: %s %.3f shares @ $%.2f (Protected)",
+                    String.format("[%s] BUY ORDER ACCEPTED (fill pending verification): %s %.3f shares @ $%.2f (Bracket submitted)",
                         profile.name(), symbol, positionSize, currentPrice),
                     "SUCCESS"
                 );
             }
         }
-        
+
+        // Broker order acceptance is not a fill. A pending or partially-filled
+        // order must not be recorded internally as a fully filled position.
+        // The regular reconciliation cycle will recover fills from broker truth.
+        if (testSimulator == null) {
+            try {
+                var order = client.getOrderByClientOrderId(submittedClientOrderId);
+                if (order == null || !"filled".equals(order.path("status").asText(""))) {
+                    logger.warn("{} {}: tracked BUY not fully filled; delaying internal recording", profilePrefix, symbol);
+                    return;
+                }
+                double orderFilledQty = Double.parseDouble(order.path("filled_qty").asText("NaN"));
+                double orderFillPrice = Double.parseDouble(order.path("filled_avg_price").asText("NaN"));
+                if (!Double.isFinite(orderFilledQty) || orderFilledQty + 0.0000001 < positionSize
+                    || !Double.isFinite(orderFillPrice) || orderFillPrice <= 0.0) {
+                    logger.warn("{} {}: broker BUY fill quantities/prices not verified; deferring", profilePrefix, symbol);
+                    return;
+                }
+                verifiedFillPrice = orderFillPrice;
+                var filledPositions = client.getPositions();
+                if (filledPositions == null) {
+                    logger.error("{} {}: broker positions unavailable after order submission; delaying local recording",
+                        profilePrefix, symbol);
+                    return;
+                }
+                boolean fullyFilled = filledPositions.stream()
+                    .anyMatch(p -> symbol.equalsIgnoreCase(p.symbol())
+                        && p.quantity() >= positionSize - 0.0000001);
+                if (!fullyFilled) {
+                    logger.warn("{} {}: order accepted but full position not confirmed at broker; delaying local recording until reconciliation",
+                        profilePrefix, symbol);
+                    return;
+                }
+            } catch (Exception e) {
+                logger.error("{} {}: could not confirm broker fill; delaying local recording", profilePrefix, symbol, e);
+                return;
+            }
+            newPosition = new TradePosition(symbol, verifiedFillPrice, positionSize,
+                stopLoss, takeProfit, java.time.Instant.now());
+        }
+
         // Update portfolio and cross-profile tracker atomically
         portfolio.setPosition(symbol, Optional.of(newPosition));
         riskGate.globalHeldSymbols().put(symbol, profilePrefix);
@@ -1443,7 +1484,7 @@ public class ProfileManager implements Runnable {
             profile.name(),
             brokerName,
             newPosition.entryTime(),
-            currentPrice,
+            verifiedFillPrice,
             positionSize,
             stopLoss,
             takeProfit,
@@ -1631,9 +1672,17 @@ public class ProfileManager implements Runnable {
             } catch (Exception e) {
                 logger.debug("{} Order history fetch for orphan recovery failed: {}", profilePrefix, e.getMessage());
             }
-            // Mark any remaining orphans (no fill price found) as CANCELLED.
-            // Min age = 2 minutes to avoid closing records for positions currently being opened.
-            database.closeOrphanedOpenTrades(brokerName, brokerSymbols, 2 * 60 * 1000L);
+            // P0: never manufacture a CANCELLED/$0 trade merely because the
+            // account positions endpoint is flat and history is missing/truncated.
+            // A stop fill may have executed at an entirely different price. Keep
+            // unresolved DB rows for authoritative Alpaca fill reconciliation.
+            for (var openTrade : database.getOpenTradeRecords(brokerName)) {
+                if (!brokerSymbols.contains(openTrade.symbol())) {
+                    logger.warn("{} UNRESOLVED BROKER EXECUTION: {} has OPEN DB trade but no broker position. "
+                        + "Preserving the record until actual fill/cancel evidence is available.",
+                        profilePrefix, openTrade.symbol());
+                }
+            }
 
             // Ensure every live broker position has a matching OPEN record in the trade DB.
             // This fixes the "0 trades in DB" problem after a redeploy wipes the ephemeral DB:
@@ -1647,16 +1696,27 @@ public class ProfileManager implements Runnable {
                 String symbol = pos.symbol();
                 if (!database.hasOpenTrade(symbol, brokerName)) {
                     try {
+                        var intent = database.getBrokerEntryIntent(brokerName, symbol);
+                        // Never silently relax an intended stop after restart. Broker
+                        // already has a position: use original persisted SL/TP when
+                        // they are valid, otherwise fall back to conservative defaults
+                        // and mark protection as unverified for risk-gating.
+                        double restoredStop = intent != null && intent.stopLoss() > 0
+                            ? intent.stopLoss()
+                            : pos.avgEntryPrice() * (1.0 - profile.stopLossPercent() / 100.0);
+                        double restoredTarget = intent != null && intent.takeProfit() > 0
+                            ? intent.takeProfit()
+                            : pos.avgEntryPrice() * (1.0 + profile.takeProfitPercent() / 100.0);
                         database.recordTrade(
                             symbol,
-                            "recovered",          // strategy = recovered (synced from Alpaca)
+                            "recovered",
                             profile.name(),
                             brokerName,
                             java.time.Instant.now(),
                             pos.avgEntryPrice(),
                             pos.quantity(),
-                            pos.avgEntryPrice() * (1.0 - profile.stopLossPercent() / 100.0),
-                            pos.avgEntryPrice() * (1.0 + profile.takeProfitPercent() / 100.0)
+                            restoredStop,
+                            restoredTarget
                         );
                         logger.info("{} DB recovery: inserted OPEN trade for {} (qty={}, entry=${})",
                             profilePrefix, symbol,
@@ -1679,6 +1739,9 @@ public class ProfileManager implements Runnable {
             var openDbTrades = database.getOpenTradeRecords(brokerName);
             int restored = 0;
             for (var trade : openDbTrades) {
+                // Never resurrect a pending/phantom DB position unless Alpaca
+                // actually reports filled shares. An accepted limit order is not a fill.
+                if (!brokerSymbols.contains(trade.symbol())) continue;
                 if (portfolio.getPosition(trade.symbol()).isEmpty()) {
                     var position = new com.trading.risk.TradePosition(
                         trade.symbol(), trade.entryPrice(), trade.quantity(),

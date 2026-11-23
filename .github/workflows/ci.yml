@@ -15,6 +15,10 @@ jobs:
     name: Java 25 Maven tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      APCA_API_KEY_ID: ci-dummy-key-not-valid
+      APCA_API_SECRET_KEY: ci-dummy-secret-not-valid
+      APCA_API_BASE_URL: https://127.0.0.1:1
     defaults:
       run:
         working-directory: trading-backend
@@ -51,10 +55,13 @@ jobs:
           cache: npm
           cache-dependency-path: trading-backend/dashboard/package-lock.json
       - name: Install dependencies
+        id: dependencies
         run: npm ci
       - name: Lint
         run: npm run lint
       - name: Unit tests
+        if: success() || (failure() && steps.dependencies.outcome == 'success')
         run: npm run test:run
       - name: Production build
+        if: success() || (failure() && steps.dependencies.outcome == 'success')
         run: npm run build

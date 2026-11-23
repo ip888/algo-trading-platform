@@ -386,6 +386,10 @@ public class ResilientBrokerClient {
                 takeProfitPrice, stopLossPrice, stopLossLimitPrice, limitPrice, clientOrderId));
     }
 
+    public JsonNode getOrderById(String orderId) {
+        return executeResilient("getOrderById", () -> delegate.getOrderById(orderId));
+    }
+
     public JsonNode getOrderByClientOrderId(String clientOrderId) {
         return executeResilient("getOrderByClientOrderId",
             () -> delegate.getOrderByClientOrderId(clientOrderId));

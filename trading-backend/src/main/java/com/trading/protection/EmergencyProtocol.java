@@ -87,6 +87,16 @@ public class EmergencyProtocol {
             result.put("error", e.getMessage());
         }
         
+        if (!Boolean.TRUE.equals(result.get("success"))) {
+            // A partial/unknown panic outcome must reach the operator, not just
+            // appear as an error in an ephemeral HTTP response or log buffer.
+            com.trading.bot.TradingBot.sendCriticalAlert(
+                "CRITICAL: trading panic incomplete",
+                "Emergency order cancellation or liquidation was not confirmed. "
+                    + "Inspect Alpaca positions and order statuses immediately. Reason: " + reason);
+            com.trading.bot.TradingBot.logSystemEvent(
+                "panic_incomplete", "Emergency broker reconciliation requires manual intervention");
+        }
         lastExecutionResult = result;
         return result;
     }

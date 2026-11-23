@@ -1,8 +1,6 @@
-import { useTradingStore } from '../store/tradingStore';
 import './ProductionMetrics.css';
 
 export function ProductionMetrics() {
-  const { } = useTradingStore();
   
   // Mock data - will be replaced with real metrics from backend
   const metrics = {
@@ -18,7 +16,7 @@ export function ProductionMetrics() {
   
   return (
     <div className="production-metrics">
-      <h3>⚡ Production Metrics</h3>
+      <h3>⚡ Example Metrics (Not Live)</h3>
       
       <div className="metrics-grid">
         <div className="metric-card circuit-breaker">
@@ -56,7 +54,7 @@ export function ProductionMetrics() {
       
       <div className="metrics-footer">
         <span className="footer-item">🔄 Virtual Threads Active</span>
-        <span className="footer-item">🛡️ Retry: 3 attempts</span>
+        <span className="footer-item">🛡️ Read retries only</span>
         <span className="footer-item">📊 Prometheus Ready</span>
       </div>
     </div>

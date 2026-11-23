@@ -25,6 +25,16 @@ class ProfileManagerBracketSubmissionSafetyTest {
     }
 
     @Test
+    void fractionalQuantitiesAreBlockedUntilBrokerStopWorkflowIsVerified() {
+        assertTrue(ProfileManager.isFractionalQuantity(0.5));
+        assertTrue(ProfileManager.isFractionalQuantity(2.75));
+        assertTrue(ProfileManager.isFractionalQuantity(Double.NaN));
+        assertTrue(ProfileManager.isFractionalQuantity(0.0));
+        assertFalse(ProfileManager.isFractionalQuantity(1.0));
+        assertFalse(ProfileManager.isFractionalQuantity(10.0));
+    }
+
+    @Test
     void acceptedBracketMayProceedToReconciliation() {
         assertFalse(ProfileManager.bracketSubmissionUnconfirmed(
             BracketOrderResult.withBracket("SPY", 1.0)));

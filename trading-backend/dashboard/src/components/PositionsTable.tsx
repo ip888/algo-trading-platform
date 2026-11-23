@@ -233,7 +233,7 @@ export const PositionsTable = () => {
                         <span style={{ color: 'var(--text-dim)' }}> | </span>
                         <span style={{ color: 'var(--positive)' }}>TP: ${takeProfit.toFixed(2)}</span>
                         {distanceToTP && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}> ({distanceToTP}%↑)</span>}
-                        <span style={{ color: 'var(--positive)', marginLeft: '8px', fontSize: '10px' }}>✓ Protected</span>
+                        <span style={{ color: 'var(--warning)', marginLeft: '8px', fontSize: '10px' }} title="Configured SL/TP are not proof of active Alpaca protective orders">⚠ Broker protection unverified</span>
                       </>
                     ) : (
                       <span style={{

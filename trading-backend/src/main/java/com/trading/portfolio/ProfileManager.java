@@ -1670,9 +1670,17 @@ public class ProfileManager implements Runnable {
             } catch (Exception e) {
                 logger.debug("{} Order history fetch for orphan recovery failed: {}", profilePrefix, e.getMessage());
             }
-            // Mark any remaining orphans (no fill price found) as CANCELLED.
-            // Min age = 2 minutes to avoid closing records for positions currently being opened.
-            database.closeOrphanedOpenTrades(brokerName, brokerSymbols, 2 * 60 * 1000L);
+            // P0: never manufacture a CANCELLED/$0 trade merely because the
+            // account positions endpoint is flat and history is missing/truncated.
+            // A stop fill may have executed at an entirely different price. Keep
+            // unresolved DB rows for authoritative Alpaca fill reconciliation.
+            for (var openTrade : database.getOpenTradeRecords(brokerName)) {
+                if (!brokerSymbols.contains(openTrade.symbol())) {
+                    logger.warn("{} UNRESOLVED BROKER EXECUTION: {} has OPEN DB trade but no broker position. "
+                        + "Preserving the record until actual fill/cancel evidence is available.",
+                        profilePrefix, openTrade.symbol());
+                }
+            }
 
             // Ensure every live broker position has a matching OPEN record in the trade DB.
             // This fixes the "0 trades in DB" problem after a redeploy wipes the ephemeral DB:

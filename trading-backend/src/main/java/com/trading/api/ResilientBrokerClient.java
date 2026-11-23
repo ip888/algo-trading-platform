@@ -34,6 +34,18 @@ import java.util.function.Supplier;
 public class ResilientBrokerClient {
     private static final Logger logger = LoggerFactory.getLogger(ResilientBrokerClient.class);
 
+    /** Broker cancellation is final only for terminal statuses with zero filled shares. */
+    public static boolean isConfirmedNoFillCancellation(JsonNode order) {
+        if (order == null || !order.isObject()) return false;
+        String status = order.path("status").asText("");
+        if (!("canceled".equals(status) || "expired".equals(status) || "rejected".equals(status))) return false;
+        try {
+            return Double.parseDouble(order.path("filled_qty").asText("NaN")) == 0.0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     private final BrokerClient delegate;
     private final CircuitBreaker circuitBreaker;
     private final RateLimiter rateLimiter;

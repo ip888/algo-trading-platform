@@ -168,6 +168,7 @@ public final class MultiBrokerOrchestrator {
         // Dashboard — uses Alpaca for health checks and market data display
         var alpacaResilient   = new ResilientBrokerClient(alpacaDataClient,
             MetricsService.getInstance().getRegistry());
+        alpacaResilient.enableDurableSellSafety(database, "alpaca");
         var dashboardAnalyzer = new MarketAnalyzer(alpacaDataClient);
         var dashboardVolFilter = new VolatilityFilter(alpacaDataClient);
         var dashboard = new DashboardServer(database,

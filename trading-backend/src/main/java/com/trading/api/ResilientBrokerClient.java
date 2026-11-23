@@ -68,6 +68,25 @@ public class ResilientBrokerClient {
         String broker = durableOrderBroker;
         var intent = db.getBrokerExitIntent(broker, symbol);
         if (intent == null) {
+            // A stale local position is never permission to sell shares that the
+            // broker says we no longer own (e.g. native stop filled meanwhile).
+            // Check immediately before minting a new durable SELL identifier.
+            final List<Position> brokerPositions;
+            try {
+                brokerPositions = delegate.getPositions();
+            } catch (Exception e) {
+                throw new IllegalStateException("Cannot verify broker quantity before SELL", e);
+            }
+            if (brokerPositions == null) {
+                throw new IllegalStateException("Broker positions unavailable before SELL");
+            }
+            double brokerQty = brokerPositions.stream()
+                .filter(p -> symbol.equalsIgnoreCase(p.symbol()))
+                .mapToDouble(Position::quantity).sum();
+            if (!Double.isFinite(qty) || qty <= 0 || brokerQty + 0.0000001 < qty) {
+                throw new IllegalStateException("SELL blocked: requested " + qty
+                    + " but broker holds only " + brokerQty + " of " + symbol);
+            }
             String id = "atp_sell_" + java.util.UUID.randomUUID().toString().replace("-", "");
             if (db.claimBrokerExitIntent(broker, symbol, id, qty)) {
                 intent = db.getBrokerExitIntent(broker, symbol);
